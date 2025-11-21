@@ -367,6 +367,10 @@ client *createClient(connection *conn) {
     c->io_last_written.buf = NULL;
     c->io_last_written.bufpos = 0;
     c->io_last_written.data_len = 0;
+    
+    // durable stuff
+    durableClientInit(c);
+
     return c;
 }
 
@@ -1668,6 +1672,18 @@ void copyReplicaOutputBuffer(client *dst, client *src) {
 /* Return true if the specified client has pending reply buffers to write to
  * the socket. */
 int clientHasPendingReplies(client *c) {
+    if (isClientReplyBufferLimited(c)) {
+        // Check if our first allowed reply boundary is in a position that comes
+        // after the current position that Redis has written up to in the COB.
+        const blockedResponse *n = listNodeValue(listFirst(c->clientDurabilityInfo.blocked_responses));
+        if ((c->bufpos && n->disallowed_reply_block == NULL) ||
+             (c->bufpos == 0 && n->disallowed_reply_block != NULL && listFirst(c->reply) == n->disallowed_reply_block)) {
+            // Both positions are pointing both at the initial 16KB buffer or the
+            // first reply block, compare the sentlen with the last allowed byte offset
+            return c->io_last_written.data_len < n->disallowed_byte_offset;
+        }
+    }
+
     if (getClientType(c) == CLIENT_TYPE_REPLICA) {
         /* Replicas use global shared replication buffer instead of
          * private output buffer. */
