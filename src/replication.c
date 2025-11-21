@@ -1421,6 +1421,11 @@ void replconfCommand(client *c) {
             if (c->repl_data->repl_state == REPLICA_STATE_BG_RDB_LOAD) {
                 replicaPutOnline(c);
             }
+            
+            // Process all clients waiting ACK from a quorum 
+            // TODO: this would need to integrate with the raft interface
+            // for now using 1 replica as the quorum for POC
+            postReplicaAck();
             /* Note: this command does not reply anything! */
             return;
         } else if (!strcasecmp(c->argv[j]->ptr, "getack")) {
