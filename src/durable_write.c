@@ -4,6 +4,16 @@
 #include <assert.h>
 #include <math.h>
 
+// TODO: handle PSYNC
+// TODO: handle durability on/off?
+// TODO: handle failovers (clear durability state)
+// TODO: remove debug logging
+// TODO: handle lua
+// TODO: handle blocking commands
+// TODO: handle DB level commands (swap flushall etc)
+// TODO: handle monitors
+// TODO: temetry
+
 /*================================= Data structures ========================== */
 
 /**
@@ -141,7 +151,7 @@ static inline int hasUncommittedKeys(void) {
 
 /**
  * Determines if a client is doing a transaction or not. 
- * TODO: This applies to either MULTI/EXEC or scripts
+ * This applies to either MULTI/EXEC (and TODO: scripts)
  */
 static bool isClientDoingTransaction(client *c) {
     return c->cmd->proc == execCommand;
@@ -229,11 +239,11 @@ static void resetPreExecutionOffset(struct client *c) {
 
 /**
  * Utility function to track the pre-execution position in the client reply COB. The given client can be either
- * a normal client or a monitor client (TODO: though we don't handle monitors yet)
+ * a normal client (or TODO: a monitor client)
  * For a normal client, this position is the byte position in the COB prior to command execution. The response
  * generated from executing the next valkey command comes after this position.
- * For a monitor client, this position is the byte position in the COB prior to command replication. The command
- * will be replicated after this position.
+ * (For a monitor client, this position is the byte position in the COB prior to command replication. The command
+ * will be replicated after this position.)
  */
 static inline void trackCommandPreExecutionPosition(struct client *c) {
     // There can be cases when the client gets blocked by other mechanisms such as slot migration
@@ -267,7 +277,6 @@ static inline void trackCommandPreExecutionPosition(struct client *c) {
  * @return 1 if the client is successfully marked unblocked, 0 otherwise 
  */
 static int unblockClientWaitingReplicaAck(struct client *c) {
-    //TODO:jules
     if (c->flag.durable_blocked_client) {
         listNode *ln = listSearchKey(server.durability.clients_waiting_replica_ack, c);
         if(ln != NULL) {
@@ -323,6 +332,7 @@ static bool clientEligibleForResponseTracking(client *c) {
     if(c->cmd == NULL) return false;
 
     // should we do info?
+    // i.e: keyspace, does it include dirty keys?
     // Administrative commands that are not keyspace informational nor
     // write commands are not eligible for response tracking/blocking.
     if ((c->cmd->flags & CMD_ADMIN) && !(c->cmd->flags & CMD_WRITE)) {
@@ -395,7 +405,6 @@ void blockLastResponseIfExist(struct client *c, long long blocked_offset) {
         new_block->primary_repl_offset = blocked_offset;
         new_block->disallowed_byte_offset = disallowed_byte_offset;
         new_block->disallowed_reply_block = disallowed_reply_block;
-        // TODO: track temetry?
         listAddNodeTail(c->clientDurabilityInfo.blocked_responses, new_block);
     }
 }
@@ -622,7 +631,7 @@ void handleUncommittedKeyForClient(client *c, robj *key, serverDb *db) {
  * Clear all uncommitted DBs and keys that are properly acknowledged by 
  * sufficient number of replicas and mark them no longer dirty. 
  *
- * This method iterates through all the redis databases and checks the
+ * This method iterates through all the valkey databases and checks the
  * DB and all items tracked by the uncommitted_keys set for each, and
  * removes keys that are acknowledged by sufficient number of replicas.
  * It is applicable only to primary.
@@ -718,15 +727,15 @@ static void processPendingUncommittedData(long long blocking_repl_offset) {
         }
     }
 
-    // TODO: Process the dirty databases for the current command block if needed
-    // TODO:functions
+    // TODO: Process the dirty databases for the current command block if needed (flush, swap)
+    // TODO: functions
     serverAssert(listLength(pending_uncommitted_keys) == 0);
 }
 
 /*========================== Command access validation ====================== */
 
 /**
- * Determines if a single Redis command is trying to access an uncommitted key. 
+ * Determines if a single valkey command is trying to access an uncommitted key. 
  * Returns 1 if so, 0 otherwise. 
  */
 static int isSingleCommandAccessingUncommittedKeys(serverDb *db, struct serverCommand *cmd, robj **argv, int argc) {
@@ -771,12 +780,20 @@ static int isAccessingUncommittedData(client *c) {
     int ret_val = 0;
     // MULTI/EXEC transaction handling
     if ((c->flag.multi) && c->cmd->proc == execCommand) {
-        // We need to track the current database the client is on
         // Check if the keys accessed are dirty or not
-            // If the current command is SELECT, then we need to switch
-            // the database referenced by the client
-            // At the end of pre-processing the MULTI/EXEC, we need to
-        // restore the current database referenced by the client.
+        for (int i = 0; i < c->mstate->count; i++) {
+            multiCmd mc = c->mstate->commands[i];
+            if (mc.cmd->proc == selectCommand) {
+                // TODO: select
+                // If the current command is SELECT, then we need to switch
+                // the database referenced by the client
+                continue;
+            }
+            if (isSingleCommandAccessingUncommittedKeys(c->db, mc.cmd, mc.argv, mc.argc)) {
+                ret_val = 1;
+                break;
+            }
+        }
     }
     return ret_val;
 }
@@ -872,7 +889,7 @@ static long long getSingleCommandBlockingOffsetForNonReplicatingCommand(client *
     // todo handle function, module, etc
     if (c->cmd->flags & (CMD_READONLY | CMD_WRITE)) {
         // For read/write commands that didn't generate replication data, we would block
-        // on the highest offset of all accessed uncommitted keys and the redis DBs itself.
+        // on the highest offset of all accessed uncommitted keys and the valkey DBs itself.
         // Note some commands categorized as writes can perform read only operations
         // therefore they should undergo the same checks as read-only commands.
         blocking_repl_offset = c->db->dirty_repl_offset;
@@ -948,7 +965,7 @@ void preCall(void) {
 }
 
 /**
- * For synchronous replication, after we finish processing a redis command which can either be a stand-alone
+ * For synchronous replication, after we finish processing a valkey command which can either be a stand-alone
  * command, or in a multi-command block such as MULTI/EXEC transaction or a Lua script,  we need to
  * track the replication offset for the command and update the replication offset post-execution
  * for the entire command block. Later on, after the command block execution completes, we can determine
@@ -957,7 +974,7 @@ void preCall(void) {
  * Note: we need to track the final replication offset on the primary for all the keys and databases
  * that become dirty due to the command or transaction/script.
  *
- * @param c The client executing the redis command
+ * @param c The client executing the valkey command
  */
 void postCall(struct client *c) {
     // log debug tracing
@@ -1033,7 +1050,6 @@ int preCommandExec(struct client *c) {
  * @param c client
  */
 void postCommandExec(struct client *c) {
-    // TODO: remove these extra log lines for not-poc version
     if (!isPrimaryDurabilityEnabled()) {
         return;
     }
@@ -1111,6 +1127,3 @@ void durableInit(void) {
     server.durability.clients_waiting_replica_ack = listCreate();
 }
 
-// TODO: handle PSYNC
-// todo: handle durability on/off
-// todo: handle primary becoming replica (clear durability state)

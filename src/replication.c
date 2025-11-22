@@ -1423,8 +1423,6 @@ void replconfCommand(client *c) {
             }
             
             // Process all clients waiting ACK from a quorum 
-            // TODO: this would need to integrate with the raft interface
-            // for now using 1 replica as the quorum for POC
             postReplicaAck();
             /* Note: this command does not reply anything! */
             return;
