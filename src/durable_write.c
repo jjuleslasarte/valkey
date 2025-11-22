@@ -107,7 +107,9 @@ static inline int offsetSorterDesc(const void* v1, const void* v2) {
 static unsigned long long getNumberOfUncommittedKeys(void) {
     unsigned long long num_uncommitted_keys = 0;
     for(int i=0; i<server.dbnum; i++) {
-        num_uncommitted_keys += raxSize(server.db[i]->uncommitted_keys);
+        if (server.db[i] != NULL) { 
+            num_uncommitted_keys += raxSize(server.db[i]->uncommitted_keys);
+        }
     }
     return num_uncommitted_keys;
 }
@@ -642,50 +644,52 @@ void clearUncommittedKeysAcknowledged(void) {
     unsigned long long start_time_ms = mstime();
     while(durability->curr_db_scan_idx < server.dbnum) {
         serverDb *db = server.db[durability->curr_db_scan_idx];
-        raxIterator *iter = &db->next_scan_iter;
+        if (db != NULL) {
+            raxIterator *iter = &db->next_scan_iter;
 
-        // Clear the database's dirty replication offset if it is acknowledged by replicas
-        if (db->dirty_repl_offset <= server.durability.previous_acked_offset) {
-            db->dirty_repl_offset = -1;
-        }
+            // Clear the database's dirty replication offset if it is acknowledged by replicas
+            if (db->dirty_repl_offset <= server.durability.previous_acked_offset) {
+                db->dirty_repl_offset = -1;
+            }
 
-        // In a time-bound fashion, clear the uncommitted keys if the required replication
-        // offset has been acknowledged by replicas.
-        if(raxSize(db->uncommitted_keys) > 0) {
-            if (!db->scan_in_progress) {
-                raxStart(iter, db->uncommitted_keys);
-                raxSeek(iter, "^", NULL, 0);
-                db->scan_in_progress = 1;
-            } else {
-                raxSeek(iter, ">=", iter->key, iter->key_len);
-            }
-    
-            while (raxNext(iter)) {
-                // Use scan_count % TIME_CHECK_INTERVAL to reduce the number of calling mstime
-                // method, it can make sure to scan some keys if time_limit_ms 
-                // is very small. 
-                if ((time_limit_ms > 0) && (scan_count > 0) 
-                        && (scan_count % TIME_CHECK_INTERVAL == 0)) {
-                    unsigned long long cur_time_ms = mstime();
-                    if (cur_time_ms - start_time_ms > time_limit_ms) {
-                        // Stop the current scan, continue to do in the next run
-                        return;
-                    }
+            // In a time-bound fashion, clear the uncommitted keys if the required replication
+            // offset has been acknowledged by replicas.
+            if(raxSize(db->uncommitted_keys) > 0) {
+                if (!db->scan_in_progress) {
+                    raxStart(iter, db->uncommitted_keys);
+                    raxSeek(iter, "^", NULL, 0);
+                    db->scan_in_progress = 1;
+                } else {
+                    raxSeek(iter, ">=", iter->key, iter->key_len);
                 }
-    
-                long long dirty_key_offset = (long long)iter->data;
-                if (dirty_key_offset <= server.durability.previous_acked_offset) {
-                    raxRemove(db->uncommitted_keys, iter->key, iter->key_len, NULL);
-                    raxSeek(iter, ">", iter->key, iter->key_len);
-                }
-                scan_count++;
-            }
-        }
         
-        // Finish to DB scan.
-        if(db->scan_in_progress) {
-            db->scan_in_progress = 0;
-            raxStop(iter);
+                while (raxNext(iter)) {
+                    // Use scan_count % TIME_CHECK_INTERVAL to reduce the number of calling mstime
+                    // method, it can make sure to scan some keys if time_limit_ms 
+                    // is very small. 
+                    if ((time_limit_ms > 0) && (scan_count > 0) 
+                            && (scan_count % TIME_CHECK_INTERVAL == 0)) {
+                        unsigned long long cur_time_ms = mstime();
+                        if (cur_time_ms - start_time_ms > time_limit_ms) {
+                            // Stop the current scan, continue to do in the next run
+                            return;
+                        }
+                    }
+        
+                    long long dirty_key_offset = (long long)iter->data;
+                    if (dirty_key_offset <= server.durability.previous_acked_offset) {
+                        raxRemove(db->uncommitted_keys, iter->key, iter->key_len, NULL);
+                        raxSeek(iter, ">", iter->key, iter->key_len);
+                    }
+                    scan_count++;
+                }
+            }
+            
+            // Finish to DB scan.
+            if(db->scan_in_progress) {
+                db->scan_in_progress = 0;
+                raxStop(iter);
+            }
         }
         durability->curr_db_scan_idx++;
     }
@@ -698,8 +702,8 @@ void clearUncommittedKeysAcknowledged(void) {
 }
 
 /**
- * Marks keys, databases, and the function store dirty at the current
- * replication offset if they were updated during a transaction.
+ * Marks keys dirty at the current
+ * replication offset if they were updated during a transaction
  */
 static void processPendingUncommittedData(long long blocking_repl_offset) {
     // Process the dirty keys in the current command block if needed
@@ -714,10 +718,9 @@ static void processPendingUncommittedData(long long blocking_repl_offset) {
         }
     }
 
-    // Process the dirty databases for the current command block if needed
-
-    serverAssert(listLength(pending_uncommitted_keys) == 0);
+    // TODO: Process the dirty databases for the current command block if needed
     // TODO:functions
+    serverAssert(listLength(pending_uncommitted_keys) == 0);
 }
 
 /*========================== Command access validation ====================== */
@@ -1106,7 +1109,6 @@ void durableInit(void) {
     server.durability.previous_acked_offset = -1;
     server.durability.curr_db_scan_idx = 0;
     server.durability.clients_waiting_replica_ack = listCreate();
-    run_with_period(1000) clearUncommittedKeysAcknowledged();
 }
 
 // TODO: handle PSYNC

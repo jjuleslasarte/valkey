@@ -103,7 +103,7 @@ bool isClientReplyBufferLimited(struct client *c);
 long long durablePurgeAndGetUncommittedKeyOffset(const sds key, struct serverDb *db);
 // TODO: naming of these flags.
 int isDurabilityEnabled(void);
-
+void clearUncommittedKeysAcknowledged(void);
 // TODO:
 //  preReplyToBlockedClient
 // for streams and timeounts, when a blocked client is being unblocked 
