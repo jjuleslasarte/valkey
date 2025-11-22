@@ -960,8 +960,6 @@ void preCall(void) {
 
     pre_call_replication_offset = server.primary_repl_offset;
     pre_call_num_ops_pending_propagation = server.also_propagate.numops;
-    serverLog(LOG_DEBUG, "preCall hook: pre_call_replication_offset=%lld, pre_call_num_ops_pending_propagation=%d", 
-              pre_call_replication_offset, pre_call_num_ops_pending_propagation);
 }
 
 /**
@@ -978,7 +976,7 @@ void preCall(void) {
  */
 void postCall(struct client *c) {
     // log debug tracing
-    serverLog(LOG_DEBUG, "Call hook entered for command '%s'", c->cmd->declared_name);
+    serverLog(LOG_DEBUG, "postCall hook entered for command '%s'", c->cmd->declared_name);
     if (!isPrimaryDurabilityEnabled() || (c->flag.blocked))
         return;
 
@@ -1007,9 +1005,7 @@ void postCall(struct client *c) {
 int preCommandExec(struct client *c) {
     serverLog(LOG_DEBUG, "preCommandExec hook entered for command '%s'", 
               c->cmd ? c->cmd->declared_name : "NULL");
-    // durability checks exist only on primary node
     if (!isDurabilityEnabled()) {
-        serverLog(LOG_DEBUG, "preCommandExec hook: durability not enabled, allowing");
         return CMD_FILTER_ALLOW;
     }
 
