@@ -177,13 +177,13 @@ static void populateReplicaOffsets(long long *offsets, const size_t numReplicas)
  * 
  * @param numAcksNeeded The number of replicas that need to acknowledge the offset.
  * @returns The offset that requested replicas have reached. 
- *          In absence of required replicas, the master offset is returned.
+ *          In absence of required replicas, the primary offset is returned.
  *          If there is not enough number of replicas connected, return -1.
  */ 
 long long getConsensusOffset(const unsigned long numAcksNeeded) {
     const unsigned long numReplicas = listLength(server.replicas);
     if (numAcksNeeded == 0) {
-        // If no ack is needed, then the consensus offset is the one master is at.
+        // If no ack is needed, then the consensus offset is the one primary is at.
         return server.primary_repl_offset;
     }
 
@@ -313,7 +313,7 @@ void durableClientReset(struct client *c) {
 
 /*
  * Returns true if the client is eligible for keyspace tracking
- * on a master node.
+ * on a primary node.
  */
 static bool clientEligibleForResponseTracking(client *c) {
     serverAssert(iAmPrimary());
@@ -476,7 +476,7 @@ static void blockClientAndMonitorsOnReplOffset(struct client *c, long long block
  * all responses and tasks that has the required offset that is acknowledged by replicas.
  * If the max repl offset is acked, all blocked responses will be flushed.
  *
- * @param durability Durability object of the current master
+ * @param durability Durability object of the current primary
  * @param consensus_ack_offset Repl offset that have been acked by the required number of replicas
  */
 void unblockResponsesWithAckOffset(struct durable_t *durability, long long consensus_ack_offset) {
@@ -565,7 +565,7 @@ static inline void addUncommittedKey(const sds key, const long long offset, rax 
 /**
  * Retrieve the uncommitted replication offset for a given key, purge the given
  * key from uncommitted keys set if the replication offset has been committed.
- * Pre-condition: valkey is currently a master
+ * Pre-condition: valkey is currently a primary
  * @param key The key to retrieve the uncommitted replication offset
  * @param db The serverDB object
  * @return the ACK offset of the key if key is uncommitted, returns -1 otherwise.
@@ -623,7 +623,7 @@ void handleUncommittedKeyForClient(client *c, robj *key, serverDb *db) {
  * This method iterates through all the redis databases and checks the
  * DB and all items tracked by the uncommitted_keys set for each, and
  * removes keys that are acknowledged by sufficient number of replicas.
- * It is applicable only to master.
+ * It is applicable only to primary.
  */
 void clearUncommittedKeysAcknowledged(void) {
     if (!isPrimaryDurabilityEnabled()) {
@@ -901,7 +901,7 @@ static long long getSingleCommandBlockingOffsetForNonReplicatingCommand(client *
  * @param c Client
  * @return The replication offset we need to use for blocking this client for replica ack.
  *         Returns -1 if blocking is not required. Replication offset of 0 can lead to blocking
- *         behavior because if the master has no replicas, and it is configured to require replica
+ *         behavior because if the primary has no replicas, and it is configured to require replica
  *         to ACK write, then it needs to block writes.
  */
 static long long getSingleCommandBlockingOffsetForConsistentWrites(struct client *c) {
@@ -951,7 +951,7 @@ void preCall(void) {
  * for the entire command block. Later on, after the command block execution completes, we can determine
  * whether to block the client response for replica acknowledgement or not.
  *
- * Note: we need to track the final replication offset on the master for all the keys and databases
+ * Note: we need to track the final replication offset on the primary for all the keys and databases
  * that become dirty due to the command or transaction/script.
  *
  * @param c The client executing the redis command
@@ -987,7 +987,7 @@ void postCall(struct client *c) {
 int preCommandExec(struct client *c) {
     serverLog(LOG_DEBUG, "preCommandExec hook entered for command '%s'", 
               c->cmd ? c->cmd->declared_name : "NULL");
-    // durability checks exist only on master node
+    // durability checks exist only on primary node
     if (!isDurabilityEnabled()) {
         serverLog(LOG_DEBUG, "preCommandExec hook: durability not enabled, allowing");
         return CMD_FILTER_ALLOW;
@@ -1003,7 +1003,7 @@ int preCommandExec(struct client *c) {
         return CMD_FILTER_REJECT;
     }
 
-    // If we are operating as a master, then apply the regular synchronous replication
+    // If we are operating as a primary, then apply the regular synchronous replication
     // logic of blocking command response post execution if needed. 
     if (iAmPrimary() && clientEligibleForResponseTracking(c)) {
 

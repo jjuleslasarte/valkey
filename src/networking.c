@@ -27,6 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "durable_write.h"
 #include "server.h"
 #include "cluster.h"
 #include "cluster_slot_stats.h"
@@ -1881,6 +1882,8 @@ void unlinkClient(client *c) {
 
     /* Wait for IO operations to be done before unlinking the client. */
     waitForClientIO(c);
+
+    durableClientReset(c);
 
     /* If this is marked as current client unset it. */
     if (c->conn && server.current_client == c) server.current_client = NULL;

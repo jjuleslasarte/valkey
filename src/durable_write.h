@@ -8,8 +8,6 @@
 #include "sds.h"
 
 #define DURABLE_ACCESSED_DATA_UNAVAILABLE "Accessed data unavailable to be served"
-/* Indicates the client currently has pending reply that is blocked for consitent writes */
-#define DURABLE_BLOCKED_CLIENT (1<<9)
 /* Command filter codes that are used in pre execution stage of a command. */
 #define CMD_FILTER_ALLOW 0
 #define CMD_FILTER_REJECT 1
