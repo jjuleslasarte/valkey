@@ -889,7 +889,8 @@ typedef struct serverDb {
         unsigned long cursor; /* Cursor of the active expire cycle. */
     } expiry[ACTIVE_EXPIRY_TYPE_COUNT];
 
-    // durability stuff
+    /* fields related to dirty key tracking 
+     * for consistent writes with durability */
     rax *uncommitted_keys; /* Map of dirty keys to the offset required by replica acknowledgement */
     long long dirty_repl_offset; /* Replication offset for a dirty DB */
     raxIterator next_scan_iter;  /* The next iterator for db scan */
@@ -1674,15 +1675,6 @@ typedef enum childInfoType {
     CHILD_INFO_TYPE_SLOT_MIGRATION_COW_SIZE,
     CHILD_INFO_TYPE_REPL_OUTPUT_BYTES
 } childInfoType;
-
-
-typedef enum {
-    CONFIG_TYPE_BOOL = 0,
-    CONFIG_TYPE_STRING,
-    CONFIG_TYPE_SDS,
-    CONFIG_TYPE_ENUM,
-    CONFIG_TYPE_NUMERIC
-} standardConfigType;
 
 struct valkeyServer {
     durable_t durability;
@@ -2489,12 +2481,6 @@ typedef enum {
 
 typedef void serverCommandProc(client *c);
 typedef int serverGetKeysProc(struct serverCommand *cmd, robj **argv, int argc, getKeysResult *result);
-
-typedef enum {
-    MODULE_NOTIFY_STANDARD,  // Notify modules that did not opt-in for delayed notification
-    MODULE_NOTIFY_DELAYED,   // Notify modules that opt-in for delayed notification
-    MODULE_NOTIFY_ALL        // Notify all modules
-} ModuleNotificationType;
 
 /* Command structure.
  *

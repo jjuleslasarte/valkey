@@ -3988,8 +3988,9 @@ void call(client *c, int flags) {
     if (zmalloc_used > server.stat_peak_memory) server.stat_peak_memory = zmalloc_used;
 
     /* Do some maintenance job and cleanup */
+    // TODO: should blocking postCall could be moved into afterCommand?
     afterCommand(c);
-    postCall(c); //TODO:jules combine
+    postCall(c);
 
     /* Remember the replication offset of the client, right after its last
      * command that resulted in propagation. */

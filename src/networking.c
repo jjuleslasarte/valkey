@@ -369,7 +369,11 @@ client *createClient(connection *conn) {
     c->io_last_written.bufpos = 0;
     c->io_last_written.data_len = 0;
     
-    // durable stuff
+    // init durability info like
+    // key blocking on primary
+    // TODO: this probably doesn't need to be a separate function
+    // just makes it a bit easier to review the POC with all related functionality
+    // together
     durableClientInit(c);
 
     return c;

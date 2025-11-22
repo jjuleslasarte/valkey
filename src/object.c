@@ -1102,7 +1102,6 @@ int getPositiveLongFromObjectOrReply(client *c, robj *o, long *target, const cha
     }
 }
 
-//TODO:jules why and what is the difference
 int getIntFromObject(robj *o, int *target) {
     long long value;
 
