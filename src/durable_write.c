@@ -24,7 +24,7 @@
  * propagated to the replication buffer.
  *
  * Note: here it is impossible to skip processing the buffered keys/DBs at the end of each command
- * because command processing is single-threaded and atomic, so postProcessCommand() always
+ * because command processing is single-threaded and atomic, so postCommandExec() always
  * gets invoked after call() even if call() fails with some error.
  * See processCommand() implementation in server.c.
  */
@@ -174,10 +174,10 @@ static void populateReplicaOffsets(long long *offsets, const size_t numReplicas)
  
     listNode *ln = listNext(&li);
     for (unsigned i=0; i < numReplicas && ln != NULL; ln = listNext(&li), i++) {
-        const client *slave = listNodeValue(ln);
-        serverAssert(slave->repl_data);
-        if (slave->repl_data->repl_state == REPLICA_STATE_ONLINE) {
-            offsets[i] = slave->repl_data->repl_ack_off;
+        const client *replica = listNodeValue(ln);
+        serverAssert(replica->repl_data);
+        if (replica->repl_data->repl_state == REPLICA_STATE_ONLINE) {
+            offsets[i] = replica->repl_data->repl_ack_off;
         }
     }
 }
@@ -310,8 +310,7 @@ void durableClientInit(struct client *c) {
 void durableClientReset(struct client *c) {
     // Free this client from the clients_waiting_replica_ack list and emit a metric on
     // how many clients are disconnected before the response gets flushed/unblocked.
-    if (unblockClientWaitingReplicaAck(c)) {
-    }
+    unblockClientWaitingReplicaAck(c);
 
     if(c->clientDurabilityInfo.blocked_responses != NULL) {
         listRelease(c->clientDurabilityInfo.blocked_responses);
@@ -767,7 +766,6 @@ static int isSingleCommandAccessingUncommittedKeys(serverDb *db, struct serverCo
  * Returns 1 if so, 0 otherwise. 
  */
 static int isAccessingUncommittedData(client *c) {
-    // TODO:functions
     if (hasUncommittedKeys()) {
         return 1;
     }
@@ -824,18 +822,6 @@ static bool shouldRejectCommandWithUncommittedData(client *c) {
  *         offset has not been updated yet.
  */
 static long long getSingleCommandBlockingOffsetForReplicatingCommand(client *c) {
-    /* We check the CMD_WRITE flag because there are three cases where the post-call replication offset can
-    * be greater than the pre-call replication offset but we don't consider the command to be replicating:
-    *
-    * 1. Top-level commands of transactions (e.g. EVAL, FCALL, EXEC). The necessary keys will already be
-    *    added to the pending_uncommitted_keys array when the nested write commands are processed.
-    * 2. Read commands that cause a write as a side-effect. The only case currently is passive expiration.
-    *    The mutated keys are marked dirty by a separate hook and the keys accessed by the read command
-    *    don't need to be marked dirty here.
-    * 3. The pre-call hook was skipped so we have an outdated pre-call replication offset. This can happen
-    *    when consistent writes are dynamically enabled on a primary with CONFIG SET or when a replica becomes
-    *    a primary via REPLICAOF NO ONE.
-    */
     if (!(c->cmd->flags & CMD_WRITE)) {
         return -1;
     }
@@ -844,33 +830,33 @@ static long long getSingleCommandBlockingOffsetForReplicatingCommand(client *c) 
     // We need to mark the modified data as dirty and block the response to the client until the 
     // replica's replication offset is caught up to the current global offset.
     // todo handle functions
-        getKeysResult result;
-        initGetKeysResult(&result);
-        int numkeys = getKeysFromCommand(c->cmd, c->argv, c->argc, &result);
-        keyReference *keys = result.keys;
-        if (numkeys > 0) {
-            if (c->cmd->proc == moveCommand) {
-                // TODO: support MOVE command: we need to mark the key as dirty in the destination DB
-                // dont block for now
-                return -1;
-            } else if (c->cmd->proc == copyCommand) {
-                //  TODO: handle copy command
-                // handle the dirty keys in the destination db
-                // dont block for now
-                return -1;
-            }
-
-            // Mark all the keys updated by the current command as dirty in the current DB 
-            for (int i = 0; i < numkeys; i++) {
-                handleUncommittedKeyForClient(c, c->argv[keys[i].pos], c->db);
-            }
+    getKeysResult result;
+    initGetKeysResult(&result);
+    int numkeys = getKeysFromCommand(c->cmd, c->argv, c->argc, &result);
+    keyReference *keys = result.keys;
+    if (numkeys > 0) {
+        if (c->cmd->proc == moveCommand) {
+            // TODO: support MOVE command: we need to mark the key as dirty in the destination DB
+            // dont block for now
+            return -1;
+        } else if (c->cmd->proc == copyCommand) {
+            //  TODO: handle copy command
+            // handle the dirty keys in the destination db
+            // dont block for now
+            return -1;
         }
-        getKeysFreeResult(&result);
+
+        // Mark all the keys updated by the current command as dirty in the current DB 
+        for (int i = 0; i < numkeys; i++) {
+            handleUncommittedKeyForClient(c, c->argv[keys[i].pos], c->db);
+        }
+    }
+    getKeysFreeResult(&result);
     
 
     // If we're in a nested call, we do not update the blocking replication offset yet because
     // the replication data is not propagated until after the transaction completes.
-    // Instead, the blocking repl offset will be finalized in postProcessCommand().
+    // Instead, the blocking repl offset will be finalized in postCommandExec().
     if (!server.execution_nesting) {
         return server.primary_repl_offset;
     }
@@ -886,7 +872,7 @@ static long long getSingleCommandBlockingOffsetForReplicatingCommand(client *c) 
  */
 static long long getSingleCommandBlockingOffsetForNonReplicatingCommand(client *c) {
     long long blocking_repl_offset = -1;
-    // todo handle function, module, etc
+    // TODO: handle function, module, etc
     if (c->cmd->flags & (CMD_READONLY | CMD_WRITE)) {
         // For read/write commands that didn't generate replication data, we would block
         // on the highest offset of all accessed uncommitted keys and the valkey DBs itself.
@@ -1111,8 +1097,6 @@ static void freePendingUncommitedKey(void *uncommitted_key) {
  * TODO: exit clean up?
  */ 
 void durableInit(void) {
-    serverLog(LOG_DEBUG, "Initializing durability");
-
     // Initialize synchronous replication
     pending_uncommitted_keys = listCreate();
     listSetFreeMethod(pending_uncommitted_keys, freePendingUncommitedKey);
