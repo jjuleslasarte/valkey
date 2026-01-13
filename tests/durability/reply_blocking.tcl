@@ -12,6 +12,14 @@ start_server {tags {"repl durability external:skip"} overrides {sync-replication
         set replica_host [srv 0 host]
         set replica_port [srv 0 port]
 
+        proc assert_no_reply {client} {
+            set fd [$client channel]
+            fconfigure $fd -blocking 0
+            set data [read $fd]
+            fconfigure $fd -blocking 1
+            assert_equal "" $data
+        }
+
         test "Sync replication blocks replies until replica acks" {
             assert_equal "yes" [lindex [$primary config get sync-replication] 1]
 
@@ -212,6 +220,60 @@ start_server {tags {"repl durability external:skip"} overrides {sync-replication
             set reader [valkey_client -1]
             catch {$reader get durable:failover} err
             assert_equal "ERR Accessed data unavailable to be served" $err
+        }
+    }
+}
+
+start_server {tags {"repl durability external:skip"} overrides {sync-replication yes}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    start_server {} {
+        set replica [srv 0 client]
+        set replica_host [srv 0 host]
+        set replica_port [srv 0 port]
+
+        proc assert_no_reply {client} {
+            set fd [$client channel]
+            fconfigure $fd -blocking 0
+            set data [read $fd]
+            fconfigure $fd -blocking 1
+            assert_equal "" $data
+        }
+
+        test "Sync replication blocks reads after SWAPDB until replica acks" {
+            assert_equal "yes" [lindex [$primary config get sync-replication] 1]
+
+            set writer [valkey_client]
+            $writer select 0
+            $writer set durable:swapdb:db0 zero
+            $writer select 1
+            $writer set durable:swapdb:db1 one
+
+            set swapper [valkey_deferring_client -1]
+            $swapper swapdb 0 1
+            assert_no_reply $swapper
+
+            set reader0 [valkey_deferring_client -1]
+            $reader0 select 0
+            assert_equal "OK" [$reader0 read]
+            $reader0 get durable:swapdb:db1
+            assert_no_reply $reader0
+
+            set reader1 [valkey_deferring_client -1]
+            $reader1 select 1
+            assert_equal "OK" [$reader1 read]
+            $reader1 get durable:swapdb:db0
+            assert_no_reply $reader1
+
+            $replica replicaof $primary_host $primary_port
+            wait_replica_online $primary
+            wait_replica_acked_ofs $primary $replica $replica_host $replica_port
+
+            assert_equal "OK" [$swapper read]
+            assert_equal "one" [$reader0 read]
+            assert_equal "zero" [$reader1 read]
         }
     }
 }

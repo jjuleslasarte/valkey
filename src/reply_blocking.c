@@ -9,7 +9,6 @@
 
 // TODO: handle PSYNC
 // TODO: remove debug logging
-// TODO: handle lua & multi
 // TODO: handle blocking commands
 // TODO: handle DB level commands (swap flushall etc)
 // TODO: handle monitors
@@ -177,6 +176,82 @@ unsigned long long getUncommittedKeysCleanupTimeLimit(unsigned long long num_unc
         time_limit_ms = ceil(server.durability.keys_cleanup_time_limit_ms * MIN(1, (double)(num_uncommitted_keys / 1000000.0)));
     }
     return time_limit_ms;
+}
+
+static inline void handleDirtyDatabase(client *c, serverDb *db) {
+    if ((c->flag.multi) || scriptIsRunning()) {
+        // For multi-commands transaction, queue up the uncommitted DB for later.
+        // If all the databases are already dirty, no need to do anything more
+        if (all_dbs_dirty_in_current_cmd) return;
+        if (db != NULL) {
+            // Current database is dirty
+            listAddNodeTail(pending_uncommitted_dbs, db);
+        } else {
+            // All databases are dirty.
+            all_dbs_dirty_in_current_cmd = true;
+            // Here we no longer need to track any dirty keys or databases as all DBs
+            // will be dirty on the final offset of the command block
+            listEmpty(pending_uncommitted_keys);
+            listEmpty(pending_uncommitted_dbs);
+        }
+    } else {
+        // For single command, simply mark the DB dirty at the current offset
+        if (db != NULL) {
+            db->dirty_repl_offset = server.primary_repl_offset;
+        } else {
+            // For FLUSHALL command, we track all the databases to be dirty
+            for (int i = 0; i < server.dbnum; i++) {
+                if (server.db[i] != NULL) {
+                    server.db[i]->dirty_repl_offset = server.primary_repl_offset;
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Get parameters for the SWAPDB command.
+ * The optional permission_client allows for checking of a client's permission for swapdb.
+ * Returns true if command would be executed.
+ */
+bool swapDBGetParams(robj **argv, int argc, client *permission_client, int *id1_p, int *id2_p) {
+    static struct serverCommand *swapdb_cmd = NULL;
+
+    long long dbid1, dbid2;
+    if (argc != 3) return false;
+    if (server.cluster_enabled) return false;
+    if (getLongLongFromObject(argv[1], &dbid1) != C_OK) return false;
+    if (getLongLongFromObject(argv[2], &dbid2) != C_OK) return false;
+    if (dbid1 < 0 || dbid1 >= server.dbnum) return false;
+    if (dbid2 < 0 || dbid2 >= server.dbnum) return false;
+    if (dbid1 == dbid2) return false;
+
+    *id1_p = (int)dbid1;
+    *id2_p = (int)dbid2;
+    return true;
+}
+
+/**
+ * Handle the client command which modifies entire valkey databases by
+ * tracking the uncommitted replication offset on a serverDb level.
+ * This includes commands FLUSHDB, FLUSHALL, and SWAPDB
+ * @param c Client
+ */
+static void handleDatabaseModification(struct client *c) {
+    if (c->cmd->proc == swapdbCommand && server.cluster_enabled == 0) {
+        // For SWAPDB command, we track both the databases to be dirty
+        int id1, id2;
+        if (swapDBGetParams(c->argv, c->argc, c, &id1, &id2)) {
+            handleDirtyDatabase(c, server.db[id1]);
+            handleDirtyDatabase(c, server.db[id2]);
+        }
+    } else if (c->cmd->proc == flushdbCommand) {
+        // For FLUSHDB command, we track the current database to be dirty
+        handleDirtyDatabase(c, c->db);
+    } else if (c->cmd->proc == flushallCommand) {
+        // For FLUSHALL command, we track all the databases to be dirty
+        handleDirtyDatabase(c, NULL);
+    }
 }
 
 /*================================= Replica offset management =============== */
@@ -662,7 +737,7 @@ long long syncReplicationPurgeAndGetUncommittedKeyOffset(const sds key, serverDb
  * @param key
  * @param db
  */
-void handleUncommittedKeyForClient(const client *c, const robj *key, const serverDb *db) {
+void handleUncommittedKeyForClient(const client *c, struct serverObject *key, serverDb *db) {
     // If we are in the context of a MULTI/EXEC transaction or a script, mark the dirty key
     // pending so it can be properly recorded later on with the final replication offset.
     if ((c != NULL) && ((c->flag.multi) || scriptIsRunning())) {
@@ -682,10 +757,6 @@ void handleUncommittedKeyForClient(const client *c, const robj *key, const serve
         // dirty at the current primary_repl_offset
         addUncommittedKey(objectGetVal(key), server.primary_repl_offset, db->uncommitted_keys);
     }
-}
-
-static void handleDatabaseModification(client *c) {
-    UNUSED(c);
 }
 
 /**
@@ -820,15 +891,65 @@ static int isSingleCommandAccessingUncommittedKeys(const serverDb *db, struct se
 }
 
 /**
+ * Get parameters for the SELECT command.
+ * The optional permission_client allows for checking of a client's permission for select.
+ * Returns true if command would be executed.
+ */
+bool amzSelectGetParams(robj **argv, int argc, client *permission_client, int *dbid_p) {
+    static struct serverCommand *select_cmd = NULL;
+
+    int dbid;
+    if (argc != 2) return false;
+    if (server.cluster_enabled) return false;
+    if (getIntFromObject(argv[1], &dbid) != C_OK) return false;
+    if (dbid < 0 || dbid >= server.dbnum) return false;
+
+    *dbid_p = dbid;
+    return true;
+}
+
+/**
  * Determine if a client is trying to access uncommitted keys.
  * Returns 1 if so, 0 otherwise.
  */
 static int isAccessingUncommittedData(client *c) {
+    // Single command handling
     if (isSingleCommandAccessingUncommittedKeys(c->db, c->cmd, c->argv, c->argc)) {
         return 1;
     }
-    // TODO: handle other commands
-    return 0;
+
+    int ret_val = 0;
+    // MULTI/EXEC transaction handling
+    if ((c->flag.multi) && c->cmd->proc == execCommand) {
+        // We need to track the current database the client is on
+        serverDb *cur_db = c->db;
+        // Check if the keys accessed are dirty or not
+        for (int i = 0; i < c->mstate->count; i++) {
+            multiCmd mc = c->mstate->commands[i];
+            // If the current command is SELECT, then we need to switch
+            // the database referenced by the client
+            if (mc.cmd->proc == selectCommand) {
+                int db_id;
+                if (amzSelectGetParams(mc.argv, mc.argc, c, &db_id)) {
+                    c->db = server.db[db_id];
+                    continue;
+                } else {
+                    discardTransaction(c);
+                    ret_val = 1;
+                    break;
+                }
+            }
+            if (isSingleCommandAccessingUncommittedKeys(c->db, mc.cmd, mc.argv, mc.argc)) {
+                discardTransaction(c);
+                ret_val = 1;
+                break;
+                }
+        }
+        // At the end of pre-processing the MULTI/EXEC, we need to
+        // restore the current database referenced by the client.
+        c->db = cur_db;
+    }
+    return ret_val;
 }
 
 /**
