@@ -143,6 +143,38 @@ static int clientMatchesIpFilter(client *c, sds ip);
 static int clientMatchesCapaFilter(client *c, sds capa_filter);
 static void freeClientFilter(clientFilter *filter);
 static bool consumeCommandQueue(client *c);
+static void parseRequestHeaders(client *c);
+
+/* RESP4 request headers: value destructor that calls decrRefCount. */
+static void requestHeaderValDestructor(void *val) {
+    if (val) decrRefCount((robj *)val);
+}
+
+/* RESP4 request headers dict type: sds keys (case-insensitive), robj* values. */
+static dictType requestHeadersDictType = {
+    dictSdsCaseHash,              /* hash function */
+    NULL,                         /* key dup */
+    dictSdsKeyCaseCompare,        /* key compare (case-insensitive) */
+    dictSdsDestructor,            /* key destructor */
+    requestHeaderValDestructor,   /* val destructor */
+    NULL                          /* allow to expand */
+};
+
+/* Helper to free client request headers dict. */
+static void freeClientRequestHeaders(client *c) {
+    if (c->request_headers) {
+        dictRelease(c->request_headers);
+        c->request_headers = NULL;
+    }
+    if (c->pending_header_key) {
+        sdsfree(c->pending_header_key);
+        c->pending_header_key = NULL;
+    }
+    c->header_count = 0;
+    c->headers_parsed = 0;
+    c->header_bulklen = -1;
+    c->header_parse_state = 0;
+}
 static int parseMultibulk(client *c,
                           int *argc,
                           robj ***argv,
@@ -325,6 +357,13 @@ client *createClient(connection *conn) {
     c->cur_script = NULL;
     c->multibulklen = 0;
     c->bulklen = -1;
+    c->request_headers = NULL;
+    c->header_count = 0;
+    c->headers_parsed = 0;
+    c->pending_header_key = NULL;
+    c->header_bulklen = -1;
+    c->header_parse_state = 0;
+    c->commandlog_metadata = NULL;
     c->raw_flag = 0;
     c->capa = 0;
     c->slot = -1;
@@ -1230,7 +1269,7 @@ writePreparedClient *prepareClientForFutureWrites(client *c) {
 
 /* Add a double as a bulk reply */
 void addReplyDouble(client *c, double d) {
-    if (c->resp == 3) {
+    if (c->resp >= 3) {
         char dbuf[MAX_D2STRING_CHARS + 3];
         dbuf[0] = ',';
         const int dlen = d2string(dbuf + 1, sizeof(dbuf) - 1, d);
@@ -2043,6 +2082,9 @@ void clearClientConnectionState(client *c) {
     c->flag.reply_skip_next = 0;
     c->flag.no_touch = 0;
     c->flag.no_evict = 0;
+
+    /* Clear RESP4 request headers on connection reset. */
+    freeClientRequestHeaders(c);
 }
 
 void freeClient(client *c) {
@@ -2161,6 +2203,7 @@ void freeClient(client *c) {
     if (c->lib_name) decrRefCount(c->lib_name);
     if (c->lib_ver) decrRefCount(c->lib_ver);
     freeClientMultiState(c);
+    freeClientRequestHeaders(c);
     sdsfree(c->peerid);
     sdsfree(c->sockname);
     zfree(c);
@@ -3064,6 +3107,9 @@ void handleParseError(client *c) {
     } else if (flags & READ_FLAGS_ERROR_INVALID_CRLF) {
         addReplyError(c, "Protocol error: invalid CRLF in request");
         setProtocolError("invalid CRLF in request", c);
+    } else if (flags & READ_FLAGS_ERROR_RESP4_HEADER) {
+        addReplyError(c, "Protocol error: invalid RESP4 header");
+        setProtocolError("invalid RESP4 header", c);
     } else if (flags & READ_FLAGS_ERROR_UNEXPECTED_INLINE_FROM_REPLICATED_CLIENT) {
         if (getClientType(c) == CLIENT_TYPE_SLOT_IMPORT) {
             serverLog(LL_WARNING, "WARNING: Receiving inline protocol from slot import, import stream corruption? Closing the "
@@ -3085,7 +3131,7 @@ int isParsingError(client *c) {
                             READ_FLAGS_ERROR_UNAUTHENTICATED_BULK_LEN | READ_FLAGS_ERROR_MBULK_INVALID_BULK_LEN |
                             READ_FLAGS_ERROR_BIG_BULK_COUNT | READ_FLAGS_ERROR_MBULK_UNEXPECTED_CHARACTER |
                             READ_FLAGS_ERROR_UNEXPECTED_INLINE_FROM_REPLICATED_CLIENT | READ_FLAGS_ERROR_UNBALANCED_QUOTES |
-                            READ_FLAGS_ERROR_INVALID_CRLF);
+                            READ_FLAGS_ERROR_INVALID_CRLF | READ_FLAGS_ERROR_RESP4_HEADER);
 }
 
 /* This function is called after the query-buffer was parsed.
@@ -3282,6 +3328,19 @@ void resetClient(client *c) {
     if (c->flag.reply_skip_next) {
         c->flag.reply_skip = 1;
         c->flag.reply_skip_next = 0;
+    }
+
+    /* Clear RESP4 request headers after command execution.
+     * Headers are scoped to a single command and must not persist. */
+    if (c->request_headers) {
+        dictRelease(c->request_headers);
+        c->request_headers = NULL;
+    }
+
+    /* Clear commandlog metadata set by modules during command execution. */
+    if (c->commandlog_metadata) {
+        dictRelease(c->commandlog_metadata);
+        c->commandlog_metadata = NULL;
     }
 }
 
@@ -3855,6 +3914,119 @@ int processPendingCommandAndInputBuffer(client *c) {
  * Sets the client's read_flags to indicate the parsing outcome. If multiple
  * commands could be parsed, additional parsed commands are stored in the
  * client's command queue. */
+/* Parse RESP4 request-side attributes (headers) from the query buffer.
+ * Format: |N\r\n followed by N key-value pairs (bulk strings), then *M command.
+ *
+ * This is a stub implementation for Phase 2 that simply skips over the
+ * attribute block. The headers are stored on client->request_headers for
+ * later use by modules (Phase 4).
+ *
+ * After all headers are parsed, reqtype is reset to 0 so the next call to
+ * parseInputBuffer() will detect '*' and parse the command normally. */
+static void parseRequestHeaders(client *c) {
+    char *newline;
+    int ok;
+    long long ll;
+
+    /* State 0: parse |N\r\n to get header count */
+    if (c->header_parse_state == 0) {
+        newline = memchr(c->querybuf + c->qb_pos, '\r', sdslen(c->querybuf) - c->qb_pos);
+        if (newline == NULL) {
+            if (sdslen(c->querybuf) - c->qb_pos > PROTO_INLINE_MAX_SIZE) {
+                c->read_flags |= READ_FLAGS_ERROR_RESP4_HEADER;
+            }
+            return;
+        }
+        if (newline - (c->querybuf + c->qb_pos) > (ssize_t)(sdslen(c->querybuf) - c->qb_pos - 2)) return;
+        if (newline[1] != '\n') {
+            c->read_flags |= READ_FLAGS_ERROR_INVALID_CRLF;
+            return;
+        }
+
+        serverAssert(c->querybuf[c->qb_pos] == '|');
+        ok = string2ll(c->querybuf + c->qb_pos + 1, newline - (c->querybuf + c->qb_pos + 1), &ll);
+        if (!ok || ll < 0 || ll > server.resp4_max_headers) {
+            c->read_flags |= READ_FLAGS_ERROR_RESP4_HEADER;
+            return;
+        }
+        c->qb_pos = (newline - c->querybuf) + 2;
+        c->header_count = (int)ll;
+        c->headers_parsed = 0;
+        c->header_parse_state = 1; /* Move to reading key */
+        c->header_bulklen = -1;
+
+        if (c->header_count == 0) {
+            /* No headers, done. Reset to detect command. */
+            c->reqtype = 0;
+            c->header_parse_state = 0;
+            return;
+        }
+
+        /* Lazily allocate headers dict */
+        if (!c->request_headers) {
+            c->request_headers = dictCreate(&requestHeadersDictType);
+        }
+    }
+
+    /* Parse key-value pairs */
+    while (c->headers_parsed < c->header_count) {
+        /* Parse a bulk string (key or value) */
+        if (c->header_bulklen == -1) {
+            newline = memchr(c->querybuf + c->qb_pos, '\r', sdslen(c->querybuf) - c->qb_pos);
+            if (newline == NULL) return; /* Need more data */
+            if (newline - (c->querybuf + c->qb_pos) > (ssize_t)(sdslen(c->querybuf) - c->qb_pos - 2)) return;
+            if (newline[1] != '\n') {
+                c->read_flags |= READ_FLAGS_ERROR_INVALID_CRLF;
+                return;
+            }
+            if (c->querybuf[c->qb_pos] != '$') {
+                c->read_flags |= READ_FLAGS_ERROR_RESP4_HEADER;
+                return;
+            }
+            ok = string2ll(c->querybuf + c->qb_pos + 1, newline - (c->querybuf + c->qb_pos + 1), &ll);
+            if (!ok || ll < 0 || ll > server.resp4_max_header_value_len) {
+                c->read_flags |= READ_FLAGS_ERROR_RESP4_HEADER;
+                return;
+            }
+            c->qb_pos = (newline - c->querybuf) + 2;
+            c->header_bulklen = (long)ll;
+        }
+
+        /* Read bulk data */
+        if (sdslen(c->querybuf) - c->qb_pos < (size_t)(c->header_bulklen + 2)) {
+            return; /* Need more data */
+        }
+        if (c->querybuf[c->qb_pos + c->header_bulklen] != '\r' ||
+            c->querybuf[c->qb_pos + c->header_bulklen + 1] != '\n') {
+            c->read_flags |= READ_FLAGS_ERROR_INVALID_CRLF;
+            return;
+        }
+
+        if (c->header_parse_state == 1) {
+            /* This is a key */
+            sds key = sdsnewlen(c->querybuf + c->qb_pos, c->header_bulklen);
+            sdstolower(key);
+            c->pending_header_key = key;
+            c->header_parse_state = 2; /* Next: value */
+        } else {
+            /* This is a value — store in dict */
+            robj *val = createStringObject(c->querybuf + c->qb_pos, c->header_bulklen);
+            dictReplace(c->request_headers, c->pending_header_key, val);
+            c->pending_header_key = NULL; /* Ownership transferred to dict */
+            c->headers_parsed++;
+            c->header_parse_state = 1; /* Next pair: key */
+        }
+        c->qb_pos += c->header_bulklen + 2;
+        c->header_bulklen = -1;
+    }
+
+    /* All headers parsed. Reset state and let parseInputBuffer detect '*' next. */
+    c->reqtype = 0;
+    c->header_parse_state = 0;
+    c->header_count = 0;
+    c->headers_parsed = 0;
+}
+
 void parseInputBuffer(client *c) {
     /* The command queue must be emptied before parsing. */
     serverAssert(c->cmd_queue.len == 0);
@@ -3863,6 +4035,8 @@ void parseInputBuffer(client *c) {
     if (!c->reqtype) {
         if (c->querybuf[c->qb_pos] == '*') {
             c->reqtype = PROTO_REQ_MULTIBULK;
+        } else if (c->querybuf[c->qb_pos] == '|' && c->resp >= 4) {
+            c->reqtype = PROTO_REQ_RESP4_HEADER;
         } else {
             c->reqtype = PROTO_REQ_INLINE;
         }
@@ -3870,6 +4044,25 @@ void parseInputBuffer(client *c) {
 
     if (c->reqtype == PROTO_REQ_INLINE) {
         parseInlineBuffer(c);
+    } else if (c->reqtype == PROTO_REQ_RESP4_HEADER) {
+        parseRequestHeaders(c);
+        /* After headers are fully parsed, reqtype is reset to 0.
+         * If there's more data and no error, re-detect type and parse the command. */
+        if (c->reqtype == 0 && !(c->read_flags & READ_FLAGS_ERROR_RESP4_HEADER) &&
+            !(c->read_flags & READ_FLAGS_ERROR_INVALID_CRLF) &&
+            c->qb_pos < sdslen(c->querybuf)) {
+            if (c->querybuf[c->qb_pos] == '*') {
+                c->reqtype = PROTO_REQ_MULTIBULK;
+            } else {
+                c->reqtype = PROTO_REQ_INLINE;
+            }
+            if (c->reqtype == PROTO_REQ_MULTIBULK) {
+                parseMultibulkBuffer(c);
+            } else {
+                parseInlineBuffer(c);
+            }
+        }
+        return;
     } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
         parseMultibulkBuffer(c);
     } else {
@@ -5674,7 +5867,7 @@ void helloCommand(client *c) {
             return;
         }
 
-        if (ver < 2 || ver > 3) {
+        if (ver < 2 || ver > 4) {
             addReplyError(c, "-NOPROTO unsupported protocol version");
             return;
         }

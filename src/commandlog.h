@@ -44,6 +44,7 @@ typedef struct commandlogEntry {
     time_t time;     /* Unix time at which the query was executed. */
     sds cname;       /* Client name. */
     sds peerid;      /* Client network address. */
+    dict *metadata;  /* Optional module-set metadata (sds key -> sds value). NULL if none. */
 } commandlogEntry;
 
 /* Exported API */

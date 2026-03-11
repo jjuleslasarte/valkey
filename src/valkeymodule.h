@@ -1341,6 +1341,7 @@ typedef struct ValkeyModuleDict ValkeyModuleDict;
 typedef struct ValkeyModuleDictIter ValkeyModuleDictIter;
 typedef struct ValkeyModuleCommandFilterCtx ValkeyModuleCommandFilterCtx;
 typedef struct ValkeyModuleCommandFilter ValkeyModuleCommandFilter;
+typedef struct ValkeyModuleRequestHeaderIter ValkeyModuleRequestHeaderIter;
 typedef struct ValkeyModuleServerInfoData ValkeyModuleServerInfoData;
 typedef struct ValkeyModuleScanCursor ValkeyModuleScanCursor;
 typedef struct ValkeyModuleUser ValkeyModuleUser;
@@ -2192,6 +2193,32 @@ VALKEYMODULE_API int (*ValkeyModule_ACLCheckKeyPrefixPermissions)(ValkeyModuleUs
                                                                   size_t len,
                                                                   unsigned int flags) VALKEYMODULE_ATTR;
 
+/* RESP4 Request Header APIs */
+VALKEYMODULE_API int (*ValkeyModule_RegisterRequestHeader)(ValkeyModuleCtx *ctx,
+                                                           const char *name,
+                                                           int flags,
+                                                           int expected_type) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_RequestHeaderExists)(ValkeyModuleCtx *ctx,
+                                                         const char *name) VALKEYMODULE_ATTR;
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_GetRequestHeader)(ValkeyModuleCtx *ctx,
+                                                                      const char *name) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_GetRequestHeaderLongLong)(ValkeyModuleCtx *ctx,
+                                                              const char *name,
+                                                              long long *ll) VALKEYMODULE_ATTR;
+VALKEYMODULE_API ValkeyModuleRequestHeaderIter *(*ValkeyModule_RequestHeaderIterStart)(ValkeyModuleCtx *ctx)
+    VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_RequestHeaderIterNext)(ValkeyModuleRequestHeaderIter *iter,
+                                                           ValkeyModuleString **name,
+                                                           ValkeyModuleString **value) VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_RequestHeaderIterStop)(ValkeyModuleRequestHeaderIter *iter) VALKEYMODULE_ATTR;
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CommandFilterGetRequestHeader)(
+    ValkeyModuleCommandFilterCtx *fctx,
+    const char *name) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_CommandFilterSetCommandlogMetadata)(
+    ValkeyModuleCommandFilterCtx *fctx,
+    const char *key,
+    ValkeyModuleString *value) VALKEYMODULE_ATTR;
+
 #define ValkeyModule_IsAOFClient(id) ((id) == UINT64_MAX)
 /* This is included inline inside each Valkey module. */
 static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, int apiver) VALKEYMODULE_ATTR_UNUSED;
@@ -2573,6 +2600,15 @@ static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, in
     VALKEYMODULE_GET_API(ScriptingEngineDebuggerFlushLogs);
     VALKEYMODULE_GET_API(ScriptingEngineDebuggerProcessCommands);
     VALKEYMODULE_GET_API(ACLCheckKeyPrefixPermissions);
+    VALKEYMODULE_GET_API(RegisterRequestHeader);
+    VALKEYMODULE_GET_API(RequestHeaderExists);
+    VALKEYMODULE_GET_API(GetRequestHeader);
+    VALKEYMODULE_GET_API(GetRequestHeaderLongLong);
+    VALKEYMODULE_GET_API(RequestHeaderIterStart);
+    VALKEYMODULE_GET_API(RequestHeaderIterNext);
+    VALKEYMODULE_GET_API(RequestHeaderIterStop);
+    VALKEYMODULE_GET_API(CommandFilterGetRequestHeader);
+    VALKEYMODULE_GET_API(CommandFilterSetCommandlogMetadata);
 
     if (ValkeyModule_IsModuleNameBusy && ValkeyModule_IsModuleNameBusy(name)) return VALKEYMODULE_ERR;
     ValkeyModule_SetModuleAttribs(ctx, name, ver, apiver);

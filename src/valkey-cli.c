@@ -165,6 +165,13 @@
 
 #define HOTKEYS_COUNT 16
 
+/* RESP4 pending header for CLI --header flag and HEADER REPL command. */
+typedef struct cliPendingHeader {
+    sds name;
+    sds value;
+    struct cliPendingHeader *next;
+} cliPendingHeader;
+
 /* cliConnect() flags. */
 #define CC_FORCE (1 << 0) /* Re-connect if already connected. */
 #define CC_QUIET (1 << 1) /* Don't log connecting errors. */
@@ -285,6 +292,7 @@ static struct config {
     int no_auth_warning;
     int resp2;         /* value of 1: specified explicitly with option -2 */
     int resp3;         /* value of 1: specified explicitly, value of 2: implicit like --json option */
+    int resp4;         /* value of 1: specified explicitly with --resp4 option */
     int current_resp3; /* 1 if we have RESP3 right now in the current connection. */
     int in_multi;
     int pre_multi_dbnum;
@@ -293,6 +301,8 @@ static struct config {
     char *test_hint_file;
     int prefer_ipv4; /* Prefer IPv4 over IPv6 on DNS lookup. */
     int prefer_ipv6; /* Prefer IPv6 over IPv4 on DNS lookup. */
+    cliPendingHeader *pending_headers; /* RESP4 headers queued for next command */
+    int pending_header_count;          /* Number of queued headers */
 } config;
 
 /* User preferences. */
@@ -1585,12 +1595,14 @@ static int cliSelect(struct config *config, valkeyContext *ctx) {
     return result;
 }
 
-/* Select RESP3 mode if valkey-cli was started with the -3 option.  */
+/* Select RESP3/RESP4 mode if valkey-cli was started with the -3 or --resp4 option.  */
 static int cliSwitchProto(void) {
     valkeyReply *reply;
-    if (!config.resp3 || config.resp2) return VALKEY_OK;
+    if (config.resp2) return VALKEY_OK;
+    if (!config.resp3 && !config.resp4) return VALKEY_OK;
 
-    reply = valkeyCommand(context, "HELLO 3");
+    int target_resp = config.resp4 ? 4 : 3;
+    reply = valkeyCommand(context, "HELLO %d", target_resp);
     if (reply == NULL) {
         fprintf(stderr, "\nI/O error\n");
         return VALKEY_ERR;
@@ -2335,6 +2347,60 @@ static void cliWaitForMessagesOrStdin(void) {
     cliRestoreTTY();
 }
 
+/*------------------------------------------------------------------------------
+ * RESP4 pending header helpers
+ *--------------------------------------------------------------------------- */
+
+/* Add a header to the pending list. */
+static void cliAddPendingHeader(const char *name, const char *value) {
+    cliPendingHeader *h = zmalloc(sizeof(cliPendingHeader));
+    h->name = sdsnew(name);
+    h->value = sdsnew(value);
+    h->next = NULL;
+    if (config.pending_headers == NULL) {
+        config.pending_headers = h;
+    } else {
+        cliPendingHeader *tail = config.pending_headers;
+        while (tail->next) tail = tail->next;
+        tail->next = h;
+    }
+    config.pending_header_count++;
+}
+
+/* Free all pending headers. */
+static void cliClearPendingHeaders(void) {
+    cliPendingHeader *h = config.pending_headers;
+    while (h) {
+        cliPendingHeader *next = h->next;
+        sdsfree(h->name);
+        sdsfree(h->value);
+        zfree(h);
+        h = next;
+    }
+    config.pending_headers = NULL;
+    config.pending_header_count = 0;
+}
+
+/* Build and send the RESP4 |N attribute block for pending headers,
+ * then clear them. Called before valkeyAppendCommandArgv(). */
+static void cliSendPendingHeaders(void) {
+    if (!config.resp4 || config.pending_header_count == 0 || context == NULL) return;
+
+    sds hdr = sdscatfmt(sdsempty(), "|%i\r\n", config.pending_header_count);
+    cliPendingHeader *h = config.pending_headers;
+    while (h) {
+        hdr = sdscatfmt(hdr, "$%i\r\n%S\r\n$%i\r\n%S\r\n",
+                         (int)sdslen(h->name), h->name,
+                         (int)sdslen(h->value), h->value);
+        h = h->next;
+    }
+    /* Write raw bytes directly before the command via libvalkey's
+     * formatted command append, which just appends to the output buffer. */
+    valkeyAppendFormattedCommand(context, hdr, sdslen(hdr));
+    sdsfree(hdr);
+    cliClearPendingHeaders();
+}
+
 static int cliSendCommand(int argc, char **argv, long repeat) {
     char *command = argv[0];
     size_t *argvlen;
@@ -2395,6 +2461,8 @@ static int cliSendCommand(int argc, char **argv, long repeat) {
     /* Negative repeat is allowed and causes infinite loop,
        works well with the interval option. */
     while (repeat < 0 || repeat-- > 0) {
+        /* Send any pending RESP4 headers before the command. */
+        cliSendPendingHeaders();
         valkeyAppendCommandArgv(context, argc, (const char **)argv, argvlen);
 
         if (config.monitor_mode) {
@@ -2844,6 +2912,17 @@ static int parseOptions(int argc, char **argv) {
             config.resp2 = 1;
         } else if (!strcmp(argv[i], "-3")) {
             config.resp3 = 1;
+        } else if (!strcmp(argv[i], "--resp4")) {
+            config.resp4 = 1;
+        } else if (!strcmp(argv[i], "--header") && !lastarg) {
+            char *hdrarg = argv[++i];
+            char *eq = strchr(hdrarg, '=');
+            if (eq == NULL) {
+                fprintf(stderr, "Invalid --header format. Use --header name=value\n");
+                exit(1);
+            }
+            *eq = '\0';
+            cliAddPendingHeader(hdrarg, eq + 1);
         } else if (!strcmp(argv[i], "--show-pushes") && !lastarg) {
             char *argval = argv[++i];
             if (!strncasecmp(argval, "n", 1)) {
@@ -3409,6 +3488,26 @@ static void repl(void) {
                 cliConnect(CC_FORCE);
             } else if (argc == 1 && !strcasecmp(argv[0], "clear")) {
                 linenoiseClearScreen();
+            } else if (!strcasecmp(argv[0], "header") && argc == 3) {
+                /* HEADER name value — queue a RESP4 header for the next command */
+                if (!config.resp4) {
+                    printf("(error) HEADER requires --resp4 mode\n");
+                } else {
+                    cliAddPendingHeader(argv[1], argv[2]);
+                    printf("OK (header queued for next command)\n");
+                }
+                fflush(stdout);
+                sdsfreesplitres(argv, argc);
+                linenoiseFree(line);
+                continue;
+            } else if (!strcasecmp(argv[0], "clearheaders") && argc == 1) {
+                /* CLEARHEADERS — discard any queued headers */
+                cliClearPendingHeaders();
+                printf("OK (pending headers cleared)\n");
+                fflush(stdout);
+                sdsfreesplitres(argv, argc);
+                linenoiseFree(line);
+                continue;
             } else {
                 long long start_time = mstime(), elapsed;
 
@@ -10040,6 +10139,8 @@ int main(int argc, char **argv) {
     config.server_version = NULL;
     config.prefer_ipv4 = 0;
     config.prefer_ipv6 = 0;
+    config.pending_headers = NULL;
+    config.pending_header_count = 0;
     config.cluster_manager_command.name = NULL;
     config.cluster_manager_command.argc = 0;
     config.cluster_manager_command.argv = NULL;

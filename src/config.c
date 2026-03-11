@@ -148,6 +148,12 @@ configEnum sanitize_dump_payload_enum[] = {
     {"clients", SANITIZE_DUMP_CLIENTS},
     {NULL, 0}};
 
+configEnum resp4_unknown_header_policy_enum[] = {
+    {"ignore", 0},
+    {"error", 1},
+    {NULL, 0},
+};
+
 configEnum protected_action_enum[] = {
     {"no", PROTECTED_ACTION_ALLOWED_NO},
     {"yes", PROTECTED_ACTION_ALLOWED_YES},
@@ -3318,6 +3324,7 @@ standardConfig static_configs[] = {
     createEnumConfig("log-format", NULL, MODIFIABLE_CONFIG, log_format_enum, server.log_format, LOG_FORMAT_LEGACY, NULL, NULL),
     createEnumConfig("log-timestamp-format", NULL, MODIFIABLE_CONFIG, log_timestamp_format_enum, server.log_timestamp_format, LOG_TIMESTAMP_LEGACY, NULL, NULL),
     createEnumConfig("rdb-version-check", NULL, MODIFIABLE_CONFIG, rdb_version_check_enum, server.rdb_version_check, RDB_VERSION_CHECK_STRICT, NULL, NULL),
+    createEnumConfig("resp4-unknown-header-policy", NULL, MODIFIABLE_CONFIG, resp4_unknown_header_policy_enum, server.resp4_unknown_header_policy, 0, NULL, NULL),
 
     /* Integer configs */
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
@@ -3401,6 +3408,10 @@ standardConfig static_configs[] = {
     createLongLongConfig("commandlog-reply-larger-than", NULL, MODIFIABLE_CONFIG, -1, LLONG_MAX, server.commandlog[COMMANDLOG_TYPE_LARGE_REPLY].threshold, 1024 * 1024, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("latency-monitor-threshold", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.latency_monitor_threshold, 0, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("proto-max-bulk-len", NULL, DEBUG_CONFIG | MODIFIABLE_CONFIG, 1024 * 1024, LONG_MAX, server.proto_max_bulk_len, 512ll * 1024 * 1024, MEMORY_CONFIG, NULL, NULL), /* Bulk request max size */
+    /* RESP4 request header limits */
+    createIntConfig("resp4-max-headers", NULL, MODIFIABLE_CONFIG, 1, 64, server.resp4_max_headers, 8, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("resp4-max-header-key-len", NULL, MODIFIABLE_CONFIG, 1, 1024, server.resp4_max_header_key_len, 64, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("resp4-max-header-value-len", NULL, MODIFIABLE_CONFIG, 64, 65536, server.resp4_max_header_value_len, 4096, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("stream-node-max-entries", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.stream_node_max_entries, 100, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("repl-backlog-size", NULL, MODIFIABLE_CONFIG, 1, LLONG_MAX, server.repl_backlog_size, 10 * 1024 * 1024, MEMORY_CONFIG, NULL, updateReplBacklogSize), /* Default: 10mb */
     createLongLongConfig("cluster-manual-failover-timeout", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.cluster_mf_timeout, 5000, INTEGER_CONFIG, NULL, NULL),

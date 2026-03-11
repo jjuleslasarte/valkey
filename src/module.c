@@ -109,6 +109,44 @@ typedef struct ValkeyModuleSharedAPI ValkeyModuleSharedAPI;
 
 dict *modules; /* Hash table of modules. SDS -> ValkeyModule ptr.*/
 
+/* --------------------------------------------------------------------------
+ * RESP4 Request Header Registration
+ *
+ * Modules can register interest in specific RESP4 request headers.
+ * The global dict maps lowercase header name (sds) -> RequestHeaderRegistration*.
+ * -------------------------------------------------------------------------- */
+
+typedef struct RequestHeaderRegistration {
+    sds name;                   /* Header name (case-insensitive, stored lowercase) */
+    struct ValkeyModule *module; /* Owning module */
+    int expected_type;          /* RESP type constraint, or -1 for any */
+    int flags;                  /* Reserved for future use */
+} RequestHeaderRegistration;
+
+static dict *registeredRequestHeaders; /* Global dict: sds name -> RequestHeaderRegistration* */
+
+/* Dict type for registeredRequestHeaders: sds keys, RequestHeaderRegistration* values */
+static void requestHeaderRegistrationDestructor(void *val) {
+    RequestHeaderRegistration *reg = val;
+    sdsfree(reg->name);
+    zfree(reg);
+}
+
+static dictType requestHeaderRegistrationDictType = {
+    dictSdsCaseHash,                    /* hash function */
+    NULL,                               /* key dup */
+    dictSdsKeyCaseCompare,              /* key compare */
+    dictSdsDestructor,                  /* key destructor */
+    requestHeaderRegistrationDestructor, /* val destructor */
+    NULL                                /* allow to expand */
+};
+
+/* Iterator wrapper for ValkeyModuleRequestHeaderIter */
+typedef struct ValkeyModuleRequestHeaderIter {
+    dictIterator *di;
+    dict *headers;
+} ValkeyModuleRequestHeaderIter;
+
 /* Entries in the context->amqueue array, representing objects to free
  * when the callback returns. */
 struct AutoMemEntry {
@@ -4092,7 +4130,7 @@ int VM_GetContextFlags(ValkeyModuleCtx *ctx) {
             if (ctx->client->flag.deny_blocking) flags |= VALKEYMODULE_CTX_FLAGS_DENY_BLOCKING;
             /* Module command received from PRIMARY or slot import, is replicated. */
             if (isReplicatedClient(ctx->client)) flags |= VALKEYMODULE_CTX_FLAGS_REPLICATED;
-            if (ctx->client->resp == 3) {
+            if (ctx->client->resp >= 3) {
                 flags |= VALKEYMODULE_CTX_FLAGS_RESP3;
             }
             if (ctx->client->slot_migration_job && isImportSlotMigrationJob(ctx->client->slot_migration_job)) {
@@ -12488,6 +12526,7 @@ int moduleRegisterApi(const char *funcname, void *funcptr) {
 
 /* Global initialization at server startup. */
 void moduleRegisterCoreAPI(void);
+static void moduleUnregisterRequestHeaders(ValkeyModule *module);
 
 /* Currently, this function is just a placeholder for the module system
  * initialization steps that need to be run after server initialization.
@@ -12521,6 +12560,9 @@ void moduleInitModulesSystem(void) {
 
     /* Set up filter list */
     moduleCommandFilters = listCreate();
+
+    /* Set up RESP4 request header registrations dict */
+    registeredRequestHeaders = dictCreate(&requestHeaderRegistrationDictType);
 
     moduleRegisterCoreAPI();
 
@@ -12807,6 +12849,7 @@ void moduleUnregisterCleanup(ValkeyModule *module) {
     moduleUnsubscribeAllServerEvents(module);
     moduleRemoveConfigs(module);
     moduleUnregisterAuthCBs(module);
+    moduleUnregisterRequestHeaders(module);
 }
 
 /* Load a module and initialize it. On success C_OK is returned, otherwise
@@ -14427,6 +14470,194 @@ int VM_ACLCheckKeyPrefixPermissions(ValkeyModuleUser *user, const char *key, siz
     return VALKEYMODULE_OK;
 }
 
+/* --------------------------------------------------------------------------
+ * ## RESP4 Request Header Module API
+ *
+ * These functions allow modules to register, query, and iterate over
+ * RESP4 request-side headers (attributes) sent by clients.
+ * -------------------------------------------------------------------------- */
+
+/* Register interest in a request header. Returns VALKEYMODULE_OK on success,
+ * VALKEYMODULE_ERR if the name is already registered by another module.
+ * expected_type is reserved (-1 for any). flags is reserved (0). */
+int VM_RegisterRequestHeader(ValkeyModuleCtx *ctx,
+                             const char *name,
+                             int flags,
+                             int expected_type) {
+    UNUSED(flags);
+    if (!ctx || !ctx->module || !name) return VALKEYMODULE_ERR;
+
+    sds lower = sdsnew(name);
+    sdstolower(lower);
+
+    /* Check if already registered by another module. */
+    dictEntry *existing = dictFind(registeredRequestHeaders, lower);
+    if (existing) {
+        RequestHeaderRegistration *reg = dictGetVal(existing);
+        if (reg->module != ctx->module) {
+            sdsfree(lower);
+            return VALKEYMODULE_ERR;
+        }
+        /* Same module re-registering same header — update and return OK. */
+        reg->expected_type = expected_type;
+        sdsfree(lower);
+        return VALKEYMODULE_OK;
+    }
+
+    RequestHeaderRegistration *reg = zmalloc(sizeof(*reg));
+    reg->name = sdsdup(lower);
+    reg->module = ctx->module;
+    reg->expected_type = expected_type;
+    reg->flags = 0;
+
+    dictAdd(registeredRequestHeaders, lower, reg);
+    /* lower is now owned by the dict (key). */
+    return VALKEYMODULE_OK;
+}
+
+/* Check if a header was present on the current request.
+ * Returns non-zero if the header exists, 0 otherwise. */
+int VM_RequestHeaderExists(ValkeyModuleCtx *ctx, const char *name) {
+    if (!ctx || !ctx->client || !ctx->client->request_headers) return 0;
+    sds lower = sdsnew(name);
+    sdstolower(lower);
+    int exists = (dictFind(ctx->client->request_headers, lower) != NULL);
+    sdsfree(lower);
+    return exists;
+}
+
+/* Get a header value as a ValkeyModuleString. Returns NULL if absent.
+ * The returned value is valid only for the duration of the command callback.
+ * Modules MUST NOT free or retain it beyond the callback lifetime. */
+ValkeyModuleString *VM_GetRequestHeader(ValkeyModuleCtx *ctx, const char *name) {
+    if (!ctx || !ctx->client || !ctx->client->request_headers) return NULL;
+    sds lower = sdsnew(name);
+    sdstolower(lower);
+    dictEntry *de = dictFind(ctx->client->request_headers, lower);
+    sdsfree(lower);
+    if (!de) return NULL;
+    return dictGetVal(de);
+}
+
+/* Get header value as a long long. Returns VALKEYMODULE_OK on success,
+ * VALKEYMODULE_ERR if absent or not convertible to integer. */
+int VM_GetRequestHeaderLongLong(ValkeyModuleCtx *ctx,
+                                const char *name,
+                                long long *ll) {
+    ValkeyModuleString *val = VM_GetRequestHeader(ctx, name);
+    if (!val) return VALKEYMODULE_ERR;
+    if (getLongLongFromObject(val, ll) != C_OK) return VALKEYMODULE_ERR;
+    return VALKEYMODULE_OK;
+}
+
+/* Start iterating over all request headers on the current command.
+ * Returns NULL if no headers present. The iterator must be stopped
+ * with VM_RequestHeaderIterStop(). */
+ValkeyModuleRequestHeaderIter *VM_RequestHeaderIterStart(ValkeyModuleCtx *ctx) {
+    if (!ctx || !ctx->client || !ctx->client->request_headers ||
+        dictSize(ctx->client->request_headers) == 0)
+        return NULL;
+
+    ValkeyModuleRequestHeaderIter *iter = zmalloc(sizeof(*iter));
+    iter->headers = ctx->client->request_headers;
+    iter->di = dictGetIterator(iter->headers);
+    return iter;
+}
+
+/* Advance the iterator. Returns 1 if an entry was found (name and value
+ * are set), 0 if iteration is done. The returned name/value pointers are
+ * temporary sds/robj owned by the dict — valid until headers are cleared. */
+int VM_RequestHeaderIterNext(ValkeyModuleRequestHeaderIter *iter,
+                             ValkeyModuleString **name,
+                             ValkeyModuleString **value) {
+    if (!iter || !iter->di) return 0;
+    dictEntry *de = dictNext(iter->di);
+    if (!de) return 0;
+
+    /* We create a temporary robj wrapping the sds key for the caller.
+     * Since we can't safely return raw sds as ValkeyModuleString,
+     * and header iteration is a rare operation, this is acceptable. */
+    if (name) {
+        /* We return the value robj for value. For name, the dict key is sds.
+         * We'll wrap it in a static string object for the caller. */
+        sds key = dictGetKey(de);
+        /* Store in thread-local static to avoid allocation —
+         * only valid until the next call. */
+        static robj nameObj;
+        nameObj.type = OBJ_STRING;
+        nameObj.encoding = OBJ_ENCODING_RAW;
+        nameObj.refcount = OBJ_STATIC_REFCOUNT;
+        nameObj.hasexpire = 0;
+        nameObj.hasembkey = 0;
+        nameObj.hasembval = 0;
+        nameObj.val_ptr = key;
+        *name = &nameObj;
+    }
+    if (value) *value = dictGetVal(de);
+    return 1;
+}
+
+/* Stop the request header iterator and free its resources. */
+void VM_RequestHeaderIterStop(ValkeyModuleRequestHeaderIter *iter) {
+    if (!iter) return;
+    if (iter->di) dictReleaseIterator(iter->di);
+    zfree(iter);
+}
+
+/* Get a request header value from within a command filter context.
+ * Returns NULL if absent or if the client has no headers. */
+ValkeyModuleString *VM_CommandFilterGetRequestHeader(
+    ValkeyModuleCommandFilterCtx *fctx, const char *name) {
+    if (!fctx || !fctx->c || !fctx->c->request_headers) return NULL;
+    sds lower = sdsnew(name);
+    sdstolower(lower);
+    dictEntry *de = dictFind(fctx->c->request_headers, lower);
+    sdsfree(lower);
+    if (!de) return NULL;
+    return dictGetVal(de);
+}
+
+/* Set commandlog metadata from a command filter context.
+ * This attaches a key-value metadata pair to the current command's client.
+ * If the command ends up in the commandlog (slowlog), the metadata will
+ * be included in the commandlog entry.
+ *
+ * The metadata dict on the client uses sds keys and sds values (sdsSdsDictType).
+ * It is lazily allocated and cleared after each command in resetClient(). */
+int VM_CommandFilterSetCommandlogMetadata(ValkeyModuleCommandFilterCtx *fctx,
+                                          const char *key,
+                                          ValkeyModuleString *value) {
+    if (!fctx || !fctx->c || !key || !value) return VALKEYMODULE_ERR;
+    client *c = fctx->c;
+
+    /* Lazily allocate the metadata dict. */
+    if (!c->commandlog_metadata) {
+        c->commandlog_metadata = dictCreate(&sdsSdsDictType);
+    }
+
+    size_t vallen;
+    const char *valstr = VM_StringPtrLen(value, &vallen);
+    sds sdskey = sdsnew(key);
+    sds sdsval = sdsnewlen(valstr, vallen);
+    dictReplace(c->commandlog_metadata, sdskey, sdsval);
+    return VALKEYMODULE_OK;
+}
+
+/* Unregister all request headers registered by a given module.
+ * Called during module unload cleanup. */
+static void moduleUnregisterRequestHeaders(ValkeyModule *module) {
+    if (!registeredRequestHeaders) return;
+    dictIterator *di = dictGetSafeIterator(registeredRequestHeaders);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        RequestHeaderRegistration *reg = dictGetVal(de);
+        if (reg->module == module) {
+            dictDelete(registeredRequestHeaders, dictGetKey(de));
+        }
+    }
+    dictReleaseIterator(di);
+}
+
 /* Register all the APIs we export. Keep this function at the end of the
  * file so that's easy to seek it to add new entries. */
 void moduleRegisterCoreAPI(void) {
@@ -14806,4 +15037,13 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(ScriptingEngineDebuggerFlushLogs);
     REGISTER_API(ScriptingEngineDebuggerProcessCommands);
     REGISTER_API(ACLCheckKeyPrefixPermissions);
+    REGISTER_API(RegisterRequestHeader);
+    REGISTER_API(RequestHeaderExists);
+    REGISTER_API(GetRequestHeader);
+    REGISTER_API(GetRequestHeaderLongLong);
+    REGISTER_API(RequestHeaderIterStart);
+    REGISTER_API(RequestHeaderIterNext);
+    REGISTER_API(RequestHeaderIterStop);
+    REGISTER_API(CommandFilterGetRequestHeader);
+    REGISTER_API(CommandFilterSetCommandlogMetadata);
 }

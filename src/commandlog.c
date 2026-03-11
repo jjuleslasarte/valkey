@@ -69,6 +69,21 @@ static commandlogEntry *commandlogCreateEntry(client *c, robj **argv, int argc, 
     ce->id = server.commandlog[type].entry_id++;
     ce->peerid = sdsnew(getClientPeerId(c));
     ce->cname = c->name ? sdsnew(objectGetVal(c->name)) : sdsempty();
+
+    /* Copy module-set commandlog metadata from client if present. */
+    if (c->commandlog_metadata && dictSize(c->commandlog_metadata) > 0) {
+        ce->metadata = dictCreate(&sdsSdsDictType);
+        dictIterator *di = dictGetIterator(c->commandlog_metadata);
+        dictEntry *de;
+        while ((de = dictNext(di)) != NULL) {
+            sds key = sdsdup(dictGetKey(de));
+            sds val = sdsdup(dictGetVal(de));
+            dictAdd(ce->metadata, key, val);
+        }
+        dictReleaseIterator(di);
+    } else {
+        ce->metadata = NULL;
+    }
     return ce;
 }
 
@@ -84,6 +99,7 @@ static void commandlogFreeEntry(void *ceptr) {
     zfree(ce->argv);
     sdsfree(ce->peerid);
     sdsfree(ce->cname);
+    if (ce->metadata) dictRelease(ce->metadata);
     zfree(ce);
 }
 
@@ -130,7 +146,7 @@ static void commandlogGetReply(client *c, int type, long count) {
 
         ln = listNext(&li);
         ce = ln->value;
-        addReplyArrayLen(c, 6);
+        addReplyArrayLen(c, ce->metadata ? 7 : 6);
         addReplyLongLong(c, ce->id);
         addReplyLongLong(c, ce->time);
         addReplyLongLong(c, ce->value);
@@ -138,6 +154,19 @@ static void commandlogGetReply(client *c, int type, long count) {
         for (j = 0; j < ce->argc; j++) addReplyBulk(c, ce->argv[j]);
         addReplyBulkCBuffer(c, ce->peerid, sdslen(ce->peerid));
         addReplyBulkCBuffer(c, ce->cname, sdslen(ce->cname));
+        if (ce->metadata) {
+            unsigned long nfields = dictSize(ce->metadata);
+            addReplyArrayLen(c, nfields * 2);
+            dictIterator *di = dictGetIterator(ce->metadata);
+            dictEntry *de;
+            while ((de = dictNext(di)) != NULL) {
+                sds key = dictGetKey(de);
+                sds val = dictGetVal(de);
+                addReplyBulkCBuffer(c, key, sdslen(key));
+                addReplyBulkCBuffer(c, val, sdslen(val));
+            }
+            dictReleaseIterator(di);
+        }
     }
 }
 

@@ -392,6 +392,7 @@ typedef enum blocking_type {
 /* Client request types */
 #define PROTO_REQ_INLINE 1
 #define PROTO_REQ_MULTIBULK 2
+#define PROTO_REQ_RESP4_HEADER 3
 
 /* Client classes for client limits, currently used only for
  * the max-client-output-buffer limit implementation. */
@@ -1308,6 +1309,7 @@ typedef struct parsedCommand {
     size_t argv_len_sum;
     unsigned long long input_bytes;
     struct serverCommand *cmd;
+    dict *request_headers; /* RESP4 request headers for this queued command (pipelining). NULL if none. */
 } parsedCommand;
 
 /* Queue of parsed commands. */
@@ -1345,6 +1347,15 @@ typedef struct client {
     long bulklen;        /* Length of bulk argument in multi bulk request. */
     long long woff;      /* Last write global replication offset. */
     cmdQueue cmd_queue;  /* Parsed commands queue */
+    /* RESP4 request header parsing state */
+    dict *request_headers;    /* RESP4 request headers for current command. NULL when no headers. */
+    int header_count;         /* Total expected headers from |N */
+    int headers_parsed;       /* Number of header key-value pairs parsed so far */
+    sds pending_header_key;   /* Key parsed but value not yet complete */
+    long header_bulklen;      /* Bulk length of current header key/value being parsed */
+    int header_parse_state;   /* 0=reading count, 1=reading key, 2=reading value */
+    /* RESP4 commandlog metadata set by modules during command execution */
+    dict *commandlog_metadata; /* Module-set metadata for commandlog entries. NULL when none. */
     /* Command execution state and command information */
     struct serverCommand *cmd;        /* Current command. */
     struct serverCommand *lastcmd;    /* Last command executed. */
@@ -2210,6 +2221,11 @@ struct valkeyServer {
     int maxmemory_samples;                      /* Precision of random sampling */
     int maxmemory_eviction_tenacity;            /* Aggressiveness of eviction processing */
     long long proto_max_bulk_len;               /* Protocol bulk length maximum size. */
+    /* RESP4 request header limits */
+    int resp4_max_headers;                      /* Max number of headers per command (default 8). */
+    int resp4_max_header_key_len;               /* Max header key length in bytes (default 64). */
+    int resp4_max_header_value_len;             /* Max header value length in bytes (default 4096). */
+    int resp4_unknown_header_policy;            /* 0=ignore (default), 1=error for unregistered headers. */
     int oom_score_adj_values[CONFIG_OOM_COUNT]; /* Linux oom_score_adj configuration */
     int oom_score_adj;                          /* If true, oom_score_adj is managed */
     int disable_thp;                            /* If true, disable THP by syscall */
@@ -2812,6 +2828,7 @@ extern hashtableType hashWithVolatileItemsHashtableType;
 extern dictType stringSetDictType;
 extern dictType externalStringType;
 extern dictType sdsHashDictType;
+extern dictType sdsSdsDictType;
 extern hashtableType clientHashtableType;
 extern dictType objToDictDictType;
 extern hashtableType kvstoreChannelHashtableType;
@@ -2878,6 +2895,7 @@ void dictVanillaFree(void *val);
 #define READ_FLAGS_CROSSSLOT (1 << 20)
 #define READ_FLAGS_PREFETCHED (1 << 21)
 #define READ_FLAGS_ERROR_INVALID_CRLF (1 << 22)
+#define READ_FLAGS_ERROR_RESP4_HEADER (1 << 23)
 
 /* Write flags for various write errors and states */
 #define WRITE_FLAGS_WRITE_ERROR (1 << 0)

@@ -1567,7 +1567,7 @@ void clusterCommandSlots(client *c) {
     int conn_type = 0;
     if (shouldReturnTlsInfo()) conn_type |= CACHE_CONN_TYPE_TLS;
     if (isClientConnIpV6(c)) conn_type |= CACHE_CONN_TYPE_IPv6;
-    if (c->resp == 3) conn_type |= CACHE_CONN_TYPE_RESP3;
+    if (c->resp >= 3) conn_type |= CACHE_CONN_TYPE_RESP3;
 
     if (detectAndUpdateCachedNodeHealth()) clearCachedClusterSlotsResponse();
 

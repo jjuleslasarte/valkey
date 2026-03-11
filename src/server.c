@@ -797,6 +797,17 @@ dictType sdsHashDictType = {
     NULL                   /* allow to expand */
 };
 
+/* Dict type for sds key -> sds value mappings where both keys and values
+ * are sds strings. Used by commandlog metadata, for example. */
+dictType sdsSdsDictType = {
+    dictSdsCaseHash,       /* hash function */
+    NULL,                  /* key dup */
+    dictSdsKeyCaseCompare, /* key compare */
+    dictSdsDestructor,     /* key destructor */
+    dictSdsDestructor,     /* val destructor */
+    NULL                   /* allow to expand */
+};
+
 size_t clientHashtableTypeMetadataSize(void) {
     return sizeof(void *);
 }
