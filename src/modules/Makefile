@@ -20,7 +20,7 @@ endif
 
 .SUFFIXES: .c .so .xo .o
 
-all: helloworld.so hellotype.so helloblock.so hellocluster.so hellotimer.so hellodict.so hellohook.so helloacl.so helloheaders.so
+all: helloworld.so hellotype.so helloblock.so hellocluster.so hellotimer.so hellodict.so hellohook.so helloacl.so helloheaders.so otelmodule.so
 
 .c.xo:
 	$(CC) -I. $(CFLAGS) $(SHOBJ_CFLAGS) -fPIC -c $< -o $@
@@ -68,6 +68,11 @@ helloacl.so: helloacl.xo
 helloheaders.xo: ../valkeymodule.h
 
 helloheaders.so: helloheaders.xo
+	$(LD) -o $@ $^ $(SHOBJ_LDFLAGS) $(LIBS) -lc
+
+otelmodule.xo: ../valkeymodule.h
+
+otelmodule.so: otelmodule.xo
 	$(LD) -o $@ $^ $(SHOBJ_LDFLAGS) $(LIBS) -lc
 
 clean:

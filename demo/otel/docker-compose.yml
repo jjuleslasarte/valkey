@@ -1,0 +1,21 @@
+# Jaeger All-in-One for OpenTelemetry trace visualization
+# Provides: OTLP collector (gRPC + HTTP), Jaeger UI, in-memory storage
+#
+# Ports:
+#   16686 - Jaeger UI (open in browser)
+#   4317  - OTLP gRPC receiver
+#   4318  - OTLP HTTP receiver (used by our Python demo)
+
+version: "3.8"
+
+services:
+  jaeger:
+    image: jaegertracing/jaeger:2.6.0
+    container_name: valkey-otel-jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
