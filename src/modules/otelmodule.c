@@ -70,6 +70,40 @@ static long long stats_commands_total = 0;         /* Total commands seen by fil
 static long long stats_traceparent_invalid = 0;    /* traceparent headers that failed validation */
 static long long stats_tracestate_received = 0;    /* Commands that had tracestate */
 static long long stats_baggage_received = 0;       /* Commands that had baggage */
+static long long stats_keyspace_events = 0;        /* Total keyspace events observed */
+static long long stats_key_misses = 0;             /* Key miss events */
+static long long stats_key_overwrites = 0;         /* Key overwrite events */
+static long long stats_key_expirations = 0;        /* Key expiration events */
+static long long stats_key_evictions = 0;          /* Key eviction events */
+static long long stats_client_connects = 0;        /* Client connection events */
+static long long stats_client_disconnects = 0;     /* Client disconnection events */
+
+/* ============================================================================
+ * Recent events ring buffer — stores last N traced events for OTEL.EVENTS
+ * ============================================================================ */
+
+#define MAX_EVENTS 64
+
+typedef struct {
+    long long timestamp_ms;   /* Milliseconds since epoch */
+    char type[32];            /* Event type: "keyspace", "key_miss", "expired", etc. */
+    char detail[128];         /* Event detail: key name, event info */
+} OtelEvent;
+
+static OtelEvent event_ring[MAX_EVENTS];
+static int event_ring_pos = 0;
+static int event_ring_count = 0;
+
+static void record_event(const char *type, const char *detail, long long ts) {
+    OtelEvent *ev = &event_ring[event_ring_pos % MAX_EVENTS];
+    ev->timestamp_ms = ts;
+    strncpy(ev->type, type, sizeof(ev->type) - 1);
+    ev->type[sizeof(ev->type) - 1] = '\0';
+    strncpy(ev->detail, detail, sizeof(ev->detail) - 1);
+    ev->detail[sizeof(ev->detail) - 1] = '\0';
+    event_ring_pos = (event_ring_pos + 1) % MAX_EVENTS;
+    if (event_ring_count < MAX_EVENTS) event_ring_count++;
+}
 
 /* ============================================================================
  * Utility — W3C traceparent validation
@@ -326,7 +360,7 @@ int OtelStatsCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
     VALKEYMODULE_NOT_USED(argv);
     if (argc != 1) return ValkeyModule_WrongArity(ctx);
 
-    ValkeyModule_ReplyWithMap(ctx, 6);
+    ValkeyModule_ReplyWithMap(ctx, 13);
 
     ValkeyModule_ReplyWithCString(ctx, "commands_total");
     ValkeyModule_ReplyWithLongLong(ctx, stats_commands_total);
@@ -349,6 +383,157 @@ int OtelStatsCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
             (double)stats_commands_traced / (double)stats_commands_total);
     } else {
         ValkeyModule_ReplyWithDouble(ctx, 0.0);
+    }
+
+    /* Hook-based stats */
+    ValkeyModule_ReplyWithCString(ctx, "keyspace_events");
+    ValkeyModule_ReplyWithLongLong(ctx, stats_keyspace_events);
+
+    ValkeyModule_ReplyWithCString(ctx, "key_misses");
+    ValkeyModule_ReplyWithLongLong(ctx, stats_key_misses);
+
+    ValkeyModule_ReplyWithCString(ctx, "key_overwrites");
+    ValkeyModule_ReplyWithLongLong(ctx, stats_key_overwrites);
+
+    ValkeyModule_ReplyWithCString(ctx, "key_expirations");
+    ValkeyModule_ReplyWithLongLong(ctx, stats_key_expirations);
+
+    ValkeyModule_ReplyWithCString(ctx, "key_evictions");
+    ValkeyModule_ReplyWithLongLong(ctx, stats_key_evictions);
+
+    ValkeyModule_ReplyWithCString(ctx, "client_connects");
+    ValkeyModule_ReplyWithLongLong(ctx, stats_client_connects);
+
+    ValkeyModule_ReplyWithCString(ctx, "client_disconnects");
+    ValkeyModule_ReplyWithLongLong(ctx, stats_client_disconnects);
+
+    return VALKEYMODULE_OK;
+}
+
+/* ============================================================================
+ * Keyspace Notification Callback — tracks key-level events
+ * ============================================================================ */
+
+/* Called for every keyspace event (SET, DEL, EXPIRE, EVICT, etc.).
+ * We record the event in our ring buffer and update stats. */
+int OtelKeyspaceCallback(ValkeyModuleCtx *ctx, int type, const char *event,
+                         ValkeyModuleString *key) {
+    VALKEYMODULE_NOT_USED(ctx);
+    stats_keyspace_events++;
+
+    size_t key_len;
+    const char *key_str = ValkeyModule_StringPtrLen(key, &key_len);
+    mstime_t now = ValkeyModule_Milliseconds();
+
+    /* Build detail string: "event_name key_name" */
+    char detail[128];
+    snprintf(detail, sizeof(detail), "%s %.90s", event, key_str);
+
+    /* Categorize by notification type */
+    if (type & VALKEYMODULE_NOTIFY_KEY_MISS) {
+        stats_key_misses++;
+        record_event("key_miss", detail, now);
+    } else if (type & VALKEYMODULE_NOTIFY_EXPIRED) {
+        stats_key_expirations++;
+        record_event("expired", detail, now);
+    } else if (type & VALKEYMODULE_NOTIFY_EVICTED) {
+        stats_key_evictions++;
+        record_event("evicted", detail, now);
+    } else if (type & VALKEYMODULE_NOTIFY_NEW) {
+        record_event("new_key", detail, now);
+    } else {
+        record_event("keyspace", detail, now);
+    }
+
+    return VALKEYMODULE_OK;
+}
+
+/* ============================================================================
+ * Server Event Callback — tracks client connections and key lifecycle
+ * ============================================================================ */
+
+void OtelServerEventCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent eid,
+                             uint64_t subevent, void *data) {
+    VALKEYMODULE_NOT_USED(ctx);
+    mstime_t now = ValkeyModule_Milliseconds();
+
+    if (eid.id == VALKEYMODULE_EVENT_CLIENT_CHANGE) {
+        if (subevent == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) {
+            stats_client_connects++;
+            record_event("client_connect", "new client connected", now);
+        } else if (subevent == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_DISCONNECTED) {
+            stats_client_disconnects++;
+            record_event("client_disconnect", "client disconnected", now);
+        }
+    } else if (eid.id == VALKEYMODULE_EVENT_KEY) {
+        const char *key_name = "(unknown)";
+        /* ValkeyModuleKeyInfoV1 contains a ValkeyModuleKey* (opened key handle).
+         * We just use a placeholder since extracting the key name from
+         * ValkeyModuleKey* requires ValkeyModule_KeyName() which needs a
+         * non-NULL opened key — and the data pointer may not always be safe. */
+        (void)data;
+        char detail[128];
+        if (subevent == VALKEYMODULE_SUBEVENT_KEY_DELETED) {
+            snprintf(detail, sizeof(detail), "del %.100s", key_name);
+            record_event("key_deleted", detail, now);
+        } else if (subevent == VALKEYMODULE_SUBEVENT_KEY_EXPIRED) {
+            stats_key_expirations++;
+            snprintf(detail, sizeof(detail), "expire %.100s", key_name);
+            record_event("key_expired", detail, now);
+        } else if (subevent == VALKEYMODULE_SUBEVENT_KEY_EVICTED) {
+            stats_key_evictions++;
+            snprintf(detail, sizeof(detail), "evict %.100s", key_name);
+            record_event("key_evicted", detail, now);
+        } else if (subevent == VALKEYMODULE_SUBEVENT_KEY_OVERWRITTEN) {
+            stats_key_overwrites++;
+            snprintf(detail, sizeof(detail), "overwrite %.100s", key_name);
+            record_event("key_overwrite", detail, now);
+        }
+    } else if (eid.id == VALKEYMODULE_EVENT_PERSISTENCE) {
+        if (subevent == 0) {
+            record_event("rdb_start", "RDB save started", now);
+        } else {
+            record_event("rdb_end", "RDB save ended", now);
+        }
+    }
+}
+
+/* ============================================================================
+ * OTEL.EVENTS — Return recent traced events from the ring buffer
+ * ============================================================================ */
+
+/* OTEL.EVENTS [count]
+ * Returns the last N events (default 10, max 64) from the event ring buffer.
+ * Each event is a map with: timestamp_ms, type, detail */
+int OtelEventsCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    long long count = 10;
+    if (argc > 2) return ValkeyModule_WrongArity(ctx);
+    if (argc == 2) {
+        if (ValkeyModule_StringToLongLong(argv[1], &count) != VALKEYMODULE_OK) {
+            ValkeyModule_ReplyWithError(ctx, "ERR count must be a number");
+            return VALKEYMODULE_OK;
+        }
+        if (count < 0) count = 0;
+        if (count > MAX_EVENTS) count = MAX_EVENTS;
+    }
+
+    int avail = event_ring_count;
+    if (count > avail) count = avail;
+
+    ValkeyModule_ReplyWithArray(ctx, count);
+
+    /* Walk backward from the most recent event */
+    for (int i = 0; i < (int)count; i++) {
+        int idx = (event_ring_pos - 1 - i + MAX_EVENTS) % MAX_EVENTS;
+        OtelEvent *ev = &event_ring[idx];
+
+        ValkeyModule_ReplyWithMap(ctx, 3);
+        ValkeyModule_ReplyWithCString(ctx, "timestamp_ms");
+        ValkeyModule_ReplyWithLongLong(ctx, ev->timestamp_ms);
+        ValkeyModule_ReplyWithCString(ctx, "type");
+        ValkeyModule_ReplyWithCString(ctx, ev->type);
+        ValkeyModule_ReplyWithCString(ctx, "detail");
+        ValkeyModule_ReplyWithCString(ctx, ev->detail);
     }
 
     return VALKEYMODULE_OK;
@@ -393,19 +578,21 @@ int OtelExecCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     /* Get the command name */
     const char *cmd = ValkeyModule_StringPtrLen(argv[1], NULL);
 
+    /* Snapshot the event ring position BEFORE executing the command.
+     * Any events that fire during ValkeyModule_Call() (keyspace notifications,
+     * key lifecycle hooks) will appear after this position. */
+    int events_before_pos = event_ring_pos;
+    int events_before_count = event_ring_count;
+
     /* Capture start timestamp */
     mstime_t start_ms = ValkeyModule_Milliseconds();
-    /* For microsecond precision, we use ms * 1000 as an approximation.
-     * True microsecond timestamps would require clock_gettime in the module. */
     long long start_us = (long long)start_ms * 1000;
 
-    /* Build the argument list for ValkeyModule_Call (skip argv[0]=OTEL.EXEC, argv[1]=cmd) */
+    /* Execute the command */
     ValkeyModuleCallReply *reply;
     if (argc == 2) {
-        /* Command with no arguments */
         reply = ValkeyModule_Call(ctx, cmd, "");
     } else {
-        /* Command with arguments: use "v" format for variadic ValkeyModuleString args */
         reply = ValkeyModule_Call(ctx, cmd, "v", argv + 2, argc - 2);
     }
 
@@ -414,8 +601,17 @@ int OtelExecCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     long long end_us = (long long)end_ms * 1000;
     long long duration_us = end_us - start_us;
 
-    /* Send reply attributes with server timing (only visible to RESP4/RESP3 clients) */
-    ValkeyModule_ReplyWithAttribute(ctx, 4);
+    /* Count events that fired DURING this command */
+    int new_events = event_ring_count - events_before_count;
+    if (event_ring_count == events_before_count) {
+        /* Ring count didn't change but pos might have wrapped */
+        new_events = (event_ring_pos - events_before_pos + MAX_EVENTS) % MAX_EVENTS;
+    }
+    if (new_events < 0) new_events = 0;
+    if (new_events > MAX_EVENTS) new_events = MAX_EVENTS;
+
+    /* Send reply attributes: timing + events that fired during this command */
+    ValkeyModule_ReplyWithAttribute(ctx, 5);
 
     ValkeyModule_ReplyWithCString(ctx, "server-start-us");
     ValkeyModule_ReplyWithLongLong(ctx, start_us);
@@ -434,6 +630,22 @@ int OtelExecCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         ValkeyModule_ReplyWithString(ctx, traceparent);
     } else {
         ValkeyModule_ReplyWithNull(ctx);
+    }
+
+    /* Include the events that fired during this command as an array of maps.
+     * This lets the client create child spans for each internal step. */
+    ValkeyModule_ReplyWithCString(ctx, "events");
+    ValkeyModule_ReplyWithArray(ctx, new_events);
+    for (int i = 0; i < new_events; i++) {
+        int idx = (events_before_pos + i) % MAX_EVENTS;
+        OtelEvent *ev = &event_ring[idx];
+        ValkeyModule_ReplyWithMap(ctx, 3);
+        ValkeyModule_ReplyWithCString(ctx, "timestamp_ms");
+        ValkeyModule_ReplyWithLongLong(ctx, ev->timestamp_ms);
+        ValkeyModule_ReplyWithCString(ctx, "type");
+        ValkeyModule_ReplyWithCString(ctx, ev->type);
+        ValkeyModule_ReplyWithCString(ctx, "detail");
+        ValkeyModule_ReplyWithCString(ctx, ev->detail);
     }
 
     /* Forward the actual reply */
@@ -522,9 +734,47 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
             OtelExecCommand, "write", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, "otel.events",
+            OtelEventsCommand, "fast", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    /* ---- Subscribe to keyspace notifications ----
+     * This captures key-level events: writes, expirations, evictions, misses.
+     * Events are recorded in the ring buffer and exposed via OTEL.EVENTS. */
+    if (ValkeyModule_SubscribeToKeyspaceEvents(ctx,
+            VALKEYMODULE_NOTIFY_ALL | VALKEYMODULE_NOTIFY_KEY_MISS | VALKEYMODULE_NOTIFY_NEW,
+            OtelKeyspaceCallback) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning", "otel: failed to subscribe to keyspace events");
+        /* Non-fatal: continue without keyspace tracking */
+    } else {
+        ValkeyModule_Log(ctx, "notice", "otel: subscribed to keyspace notifications");
+    }
+
+    /* ---- Subscribe to server events ----
+     * Track client connections/disconnections and key lifecycle events. */
+    if (ValkeyModule_SubscribeToServerEvent(ctx,
+            ValkeyModuleEvent_ClientChange,
+            OtelServerEventCallback) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning", "otel: failed to subscribe to client change events");
+    }
+
+    if (ValkeyModule_SubscribeToServerEvent(ctx,
+            ValkeyModuleEvent_Key,
+            OtelServerEventCallback) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning", "otel: failed to subscribe to key events");
+    }
+
+    if (ValkeyModule_SubscribeToServerEvent(ctx,
+            ValkeyModuleEvent_Persistence,
+            OtelServerEventCallback) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning", "otel: failed to subscribe to persistence events");
+    }
+
+    ValkeyModule_Log(ctx, "notice", "otel: subscribed to server events (client, key, persistence)");
+
     ValkeyModule_Log(ctx, "notice",
         "otel: OpenTelemetry tracing module loaded. "
-        "Commands: OTEL.TRACE, OTEL.CONTEXT, OTEL.TRACEID, OTEL.SPANID, OTEL.STATS, OTEL.EXEC");
+        "Commands: OTEL.TRACE, OTEL.CONTEXT, OTEL.TRACEID, OTEL.SPANID, OTEL.STATS, OTEL.EXEC, OTEL.EVENTS");
 
     return VALKEYMODULE_OK;
 }

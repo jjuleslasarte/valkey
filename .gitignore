@@ -58,3 +58,7 @@ cmake-build-debug/
 cmake-build-release/
 __pycache__
 src/unit/.flags
+demo/otel/.grafana
+demo/otel/.venv
+demo/otel/.grafana-data
+demo/otel/.jaeger

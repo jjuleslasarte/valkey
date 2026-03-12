@@ -2,309 +2,319 @@
 """
 OpenTelemetry + RESP4 Demo for Valkey
 
-This demo shows end-to-end distributed tracing through Valkey using RESP4
-request headers. It creates OpenTelemetry spans, injects W3C Trace Context
-into RESP4 headers, and exports traces to Jaeger for visualization.
+Demonstrates 4 distinct tracing patterns, each producing a separate trace
+in Jaeger/Grafana. Each trace tells a clear story.
 
 Usage:
     python3 demo.py [--host HOST] [--port PORT] [--jaeger-endpoint URL]
-
-After running, open Jaeger UI at http://localhost:16686 and search for
-service "valkey-otel-demo" to see the traces.
 """
 
 import argparse
-import os
 import sys
 import time
-import random
 import json
 
-# OpenTelemetry imports
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-# Our minimal RESP4 client
 from resp4_client import Resp4Client
 
 
-# ============================================================================
-# Setup OpenTelemetry
-# ============================================================================
-
 def setup_otel(jaeger_endpoint, service_name="valkey-otel-demo"):
-    """Configure OpenTelemetry with OTLP exporter (to Jaeger) + console exporter."""
     resource = Resource.create({
         "service.name": service_name,
         "service.version": "1.0.0",
-        "deployment.environment": "demo",
     })
-
     provider = TracerProvider(resource=resource)
-
-    # OTLP HTTP exporter -> Jaeger
-    otlp_exporter = OTLPSpanExporter(endpoint=f"{jaeger_endpoint}/v1/traces")
-    provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
-
-    # Uncomment below to also see spans printed to console (verbose):
-    # provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-
+    provider.add_span_processor(BatchSpanProcessor(
+        OTLPSpanExporter(endpoint=f"{jaeger_endpoint}/v1/traces")))
     trace.set_tracer_provider(provider)
     return trace.get_tracer("valkey-resp4-demo")
 
 
-# ============================================================================
-# RESP4 + OTel Integration
-# ============================================================================
-
-def inject_trace_headers():
-    """
-    Extract W3C Trace Context from the current span into a dict
-    suitable for RESP4 request headers.
-    """
-    propagator = TraceContextTextMapPropagator()
+def inject_headers():
+    """Get W3C traceparent from current span context."""
     carrier = {}
-    propagator.inject(carrier)
+    TraceContextTextMapPropagator().inject(carrier)
     return carrier
 
 
-def traced_command(client, tracer, *args):
-    """
-    Execute a Valkey command within an OTel span, sending trace context
-    as RESP4 headers.
-    """
-    cmd_name = args[0].upper()
-    key = args[1] if len(args) > 1 else ""
+def valkey_cmd(client, tracer, *args):
+    """Execute a Valkey command as a child span with RESP4 trace headers."""
+    cmd = args[0].upper()
+    stmt = " ".join(str(a) for a in args)
 
     with tracer.start_as_current_span(
-        f"valkey {cmd_name}",
+        f"valkey {cmd}",
         kind=trace.SpanKind.CLIENT,
         attributes={
             "db.system": "valkey",
-            "db.operation": cmd_name,
-            "db.statement": " ".join(str(a) for a in args),
+            "db.operation": cmd,
+            "db.statement": stmt,
             "server.address": client.host,
             "server.port": client.port,
-            "network.transport": "tcp",
         },
     ) as span:
-        # Inject W3C trace context into RESP4 headers
-        headers = inject_trace_headers()
+        headers = inject_headers()
+        result = client.command(*args, headers=headers)
+        if isinstance(result, Exception):
+            span.set_status(trace.StatusCode.ERROR, str(result))
+        else:
+            span.set_status(trace.StatusCode.OK)
+            span.set_attribute("db.response", str(result)[:100])
+        return result
 
-        try:
-            result = client.command(*args, headers=headers)
 
-            if isinstance(result, Exception):
-                span.set_status(trace.StatusCode.ERROR, str(result))
-                span.record_exception(result)
-            else:
-                span.set_status(trace.StatusCode.OK)
-                span.set_attribute("db.response", str(result)[:200])
+def valkey_exec(client, tracer, *args):
+    """Execute via OTEL.EXEC — returns server timing + internal events as child spans.
+    
+    For a single command like SET key value, the trace looks like:
+    
+      valkey SET (client)            ← network RTT + server time
+        └── valkey SET (server)      ← server-reported execution  
+              ├── keyspace: set key  ← hook: keyspace notification fired
+              └── new_key: key       ← hook: new key created
+    """
+    cmd = args[0].upper()
+    stmt = " ".join(str(a) for a in args)
 
-            return result
+    with tracer.start_as_current_span(
+        f"valkey {cmd}",
+        kind=trace.SpanKind.CLIENT,
+        attributes={
+            "db.system": "valkey",
+            "db.operation": cmd,
+            "db.statement": stmt,
+        },
+    ) as span:
+        headers = inject_headers()
+        result = client.command("OTEL.EXEC", *args, headers=headers)
+        attrs = client.last_reply_attributes or {}
+        dur = attrs.get("server-duration-us", 0)
+        events = attrs.get("events", [])
 
-        except Exception as e:
-            span.set_status(trace.StatusCode.ERROR, str(e))
-            span.record_exception(e)
-            raise
+        span.set_attribute("server.duration_us", dur if isinstance(dur, int) else 0)
+        span.set_status(trace.StatusCode.OK)
+        span.set_attribute("db.response", str(result)[:100])
+        span.set_attribute("server.events_count", len(events) if isinstance(events, list) else 0)
+
+        # Create server-side span with hook events as children
+        with tracer.start_as_current_span(
+            f"valkey.server {cmd}",
+            kind=trace.SpanKind.SERVER,
+            attributes={
+                "db.system": "valkey",
+                "db.operation": cmd,
+                "server.duration_us": dur if isinstance(dur, int) else 0,
+            },
+        ):
+            # Each hook event that fired DURING this command becomes a child span
+            if isinstance(events, list):
+                for ev in events:
+                    if not isinstance(ev, dict):
+                        continue
+                    etype = ev.get('type', '?')
+                    detail = ev.get('detail', '')
+                    ts = ev.get('timestamp_ms', 0)
+
+                    # Parse detail for descriptive name
+                    parts = detail.split(' ', 1) if detail else ['?']
+                    ev_cmd = parts[0] if parts else '?'
+                    ev_key = parts[1] if len(parts) > 1 else ''
+
+                    if etype == 'new_key':
+                        name = f"hook: NEW_KEY {ev_key}"
+                    elif etype == 'key_overwrite':
+                        name = f"hook: OVERWRITE {ev_key}"
+                    elif etype == 'keyspace':
+                        name = f"hook: {ev_cmd} {ev_key}"
+                    else:
+                        name = f"hook: {etype} {detail}"
+
+                    with tracer.start_as_current_span(
+                        name,
+                        kind=trace.SpanKind.INTERNAL,
+                        attributes={
+                            "event.type": etype,
+                            "event.detail": detail,
+                            "event.timestamp_ms": ts,
+                        },
+                    ):
+                        pass
+
+        return result
 
 
 # ============================================================================
-# Demo Scenarios
+# Trace 1: Simple SET → GET flow
 # ============================================================================
+# Shows: Client app → valkey SET → valkey GET
+# In Jaeger this looks like:
+#   user-request
+#     ├── valkey SET user:alice
+#     └── valkey GET user:alice
 
-def demo_basic_operations(client, tracer):
-    """Demo 1: Basic SET/GET with trace context."""
+def trace_simple_set_get(client, tracer):
     print("\n" + "=" * 60)
-    print("  Demo 1: Basic SET/GET with trace context")
-    print("=" * 60)
-
-    with tracer.start_as_current_span("demo.basic_operations") as parent:
-        # SET
-        result = traced_command(client, tracer, "SET", "user:1001", "Alice")
-        print(f"  SET user:1001 Alice -> {result}")
-
-        # GET (key exists — avoids nil-return server issue)
-        result = traced_command(client, tracer, "GET", "user:1001")
-        print(f"  GET user:1001 -> {result}")
-
-        # SET another key
-        result = traced_command(client, tracer, "SET", "user:1002", "Bob")
-        print(f"  SET user:1002 Bob -> {result}")
-
-    print("  ✓ 3 commands traced with W3C traceparent headers")
-
-
-def demo_pipeline_simulation(client, tracer):
-    """Demo 2: Simulate a request pipeline (e.g., web request handling)."""
-    print("\n" + "=" * 60)
-    print("  Demo 2: Simulated web request pipeline")
+    print("  Trace 1: Simple SET → GET (2 spans)")
+    print("  One trace, two commands, clear parent-child")
     print("=" * 60)
 
     with tracer.start_as_current_span(
-        "http.request GET /api/user/42",
+        "user-request: store and read user",
+        attributes={"user.id": "alice"},
+    ):
+        result = valkey_cmd(client, tracer, "SET", "user:alice", "Alice Smith")
+        print(f"  SET user:alice -> {result}")
+
+        result = valkey_cmd(client, tracer, "GET", "user:alice")
+        print(f"  GET user:alice -> {result}")
+
+    print("  → In Grafana: 1 trace, 3 spans (parent + SET + GET)")
+
+
+# ============================================================================
+# Trace 2: Cache-aside pattern
+# ============================================================================
+# Shows: HTTP request → cache SET → cache EXPIRE → cache GET
+# Simulates: app stores data in cache, then reads it back
+
+def trace_cache_aside(client, tracer):
+    print("\n" + "=" * 60)
+    print("  Trace 2: Cache-aside pattern (store + read)")
+    print("  HTTP request → write cache → read cache")
+    print("=" * 60)
+
+    with tracer.start_as_current_span(
+        "GET /api/product/42",
         kind=trace.SpanKind.SERVER,
-        attributes={"http.method": "GET", "http.url": "/api/user/42"},
+        attributes={"http.method": "GET", "http.route": "/api/product/:id"},
     ):
-        # Simulate DB query
-        with tracer.start_as_current_span("db.query", attributes={"db.system": "postgresql"}):
-            time.sleep(0.01)  # Simulate DB latency
-            user_data = json.dumps({"id": 42, "name": "Bob", "email": "bob@example.com"})
+        # Simulate DB fetch
+        with tracer.start_as_current_span("postgresql.query"):
+            time.sleep(0.005)
+            data = json.dumps({"id": 42, "name": "Widget", "price": 9.99})
 
-        # Store in cache
-        with tracer.start_as_current_span("cache.store"):
-            traced_command(client, tracer, "SET", "cache:user:42", user_data)
-            traced_command(client, tracer, "EXPIRE", "cache:user:42", "300")
-            print(f"  Stored user data in cache with 300s TTL")
+        # Store in Valkey cache
+        valkey_cmd(client, tracer, "SET", "cache:product:42", data)
+        valkey_cmd(client, tracer, "EXPIRE", "cache:product:42", "300")
+        print(f"  Cached product:42 with 300s TTL")
 
-        # Read back from cache (key now exists)
-        with tracer.start_as_current_span("cache.lookup"):
-            result = traced_command(client, tracer, "GET", "cache:user:42")
-            print(f"  Cache lookup -> {str(result)[:60]}")
+        # Read back from cache
+        result = valkey_cmd(client, tracer, "GET", "cache:product:42")
+        print(f"  Cache hit -> {result[:40]}...")
 
-        # Increment request counter
-        traced_command(client, tracer, "INCR", "stats:api:requests")
-        print(f"  Incremented request counter")
-
-    print("  ✓ Multi-step pipeline traced end-to-end")
+    print("  → In Grafana: 1 trace, 5 spans (HTTP → DB + SET + EXPIRE + GET)")
 
 
-def demo_batch_operations(client, tracer):
-    """Demo 3: Batch operations (e.g., leaderboard update)."""
+# ============================================================================
+# Trace 3: OTEL.EXEC — server-side timing
+# ============================================================================
+# Shows: For each command, TWO spans: client-side and server-side
+# The server span comes from OTEL.EXEC reply attributes
+
+def trace_server_timing(client, tracer):
     print("\n" + "=" * 60)
-    print("  Demo 3: Leaderboard batch update")
-    print("=" * 60)
-
-    players = [
-        ("player:alice", random.randint(100, 999)),
-        ("player:bob", random.randint(100, 999)),
-        ("player:charlie", random.randint(100, 999)),
-        ("player:diana", random.randint(100, 999)),
-        ("player:eve", random.randint(100, 999)),
-    ]
-
-    with tracer.start_as_current_span(
-        "leaderboard.update",
-        attributes={"leaderboard.player_count": len(players)},
-    ):
-        for player, score in players:
-            traced_command(client, tracer, "ZADD", "leaderboard:weekly", str(score), player)
-            print(f"  ZADD leaderboard:weekly {score} {player}")
-
-        # Get top 3
-        result = traced_command(client, tracer, "ZREVRANGE", "leaderboard:weekly", "0", "2", "WITHSCORES")
-        print(f"  Top 3: {result}")
-
-    print(f"  ✓ {len(players)} score updates + 1 query, all traced")
-
-
-def demo_server_side_tracing(client, tracer):
-    """Demo 4: Server-side execution tracing via OTEL.EXEC."""
-    print("\n" + "=" * 60)
-    print("  Demo 4: Server-side execution tracing (OTEL.EXEC)")
+    print("  Trace 3: Server-side timing via OTEL.EXEC")
+    print("  Each command shows client span + server span")
     print("=" * 60)
 
     with tracer.start_as_current_span(
-        "demo.server_side_tracing",
-        attributes={"description": "Demonstrates server-side timing via reply attributes"},
+        "instrumented-write: SET with server timing",
     ):
-        # Use OTEL.EXEC to wrap a SET command — server returns timing as reply attributes
-        headers = inject_trace_headers()
-        result = client.command("OTEL.EXEC", "SET", "traced:key1", "hello-from-otel-exec", headers=headers)
-        attrs = client.last_reply_attributes
-        print(f"  OTEL.EXEC SET traced:key1 -> {result}")
-        if attrs:
-            duration = attrs.get('server-duration-us', '?')
-            print(f"    ↳ Reply attributes (server timing):")
-            print(f"      server-start-us:    {attrs.get('server-start-us', 'N/A')}")
-            print(f"      server-end-us:      {attrs.get('server-end-us', 'N/A')}")
-            print(f"      server-duration-us:  {duration}")
-            print(f"      traceparent echoed:  {attrs.get('traceparent', 'N/A')[:40]}...")
+        result = valkey_exec(client, tracer, "SET", "timed:key", "hello-with-timing")
+        attrs = client.last_reply_attributes or {}
+        print(f"  OTEL.EXEC SET -> {result}")
+        print(f"    server-duration-us: {attrs.get('server-duration-us', '?')}")
 
-            # Create a server-side child span using the reported timing
-            with tracer.start_as_current_span(
-                "valkey.server SET (server-reported)",
-                kind=trace.SpanKind.SERVER,
-                attributes={
-                    "db.system": "valkey",
-                    "db.operation": "SET",
-                    "server.duration_us": duration if isinstance(duration, int) else 0,
-                    "server.reported": True,
-                    "note": "Timing from OTEL.EXEC reply attributes",
-                },
-            ):
-                pass  # Span represents the server-side execution window
+        result = valkey_exec(client, tracer, "INCR", "timed:counter")
+        attrs = client.last_reply_attributes or {}
+        print(f"  OTEL.EXEC INCR -> {result}")
+        print(f"    server-duration-us: {attrs.get('server-duration-us', '?')}")
 
-        # Wrap a ZADD with server timing
-        headers = inject_trace_headers()
-        result = client.command("OTEL.EXEC", "ZADD", "traced:scores", "100", "player:traced", headers=headers)
-        attrs = client.last_reply_attributes
-        print(f"  OTEL.EXEC ZADD traced:scores 100 player:traced -> {result}")
-        if attrs:
-            print(f"    ↳ server-duration-us: {attrs.get('server-duration-us', '?')}")
-
-        # Wrap an INCR
-        headers = inject_trace_headers()
-        result = client.command("OTEL.EXEC", "INCR", "traced:counter", headers=headers)
-        attrs = client.last_reply_attributes
-        print(f"  OTEL.EXEC INCR traced:counter -> {result}")
-        if attrs:
-            print(f"    ↳ server-duration-us: {attrs.get('server-duration-us', '?')}")
-
-    print("  ✓ Server-side timing captured via RESP4 reply attributes")
-    print("    In Jaeger, you'll see both client AND server-reported spans")
+    print("  → In Grafana: 1 trace with client+server span pairs")
 
 
-def demo_otel_commands(client, tracer):
-    """Demo 5: Use the OTEL module diagnostic commands."""
+# ============================================================================
+# Trace 4: Server events — what the hooks captured
+# ============================================================================
+# Shows: Query OTEL.EVENTS, create one span per server event
+# These are keyspace notifications and client lifecycle events
+
+def trace_server_events(client, tracer):
     print("\n" + "=" * 60)
-    print("  Demo 5: OTEL module diagnostic commands")
+    print("  Trace 4: Server hook events (keyspace + lifecycle)")
+    print("  Each event from OTEL.EVENTS becomes a span")
     print("=" * 60)
 
-    with tracer.start_as_current_span("demo.otel_commands") as span:
-        headers = inject_trace_headers()
+    with tracer.start_as_current_span(
+        "server-event-log",
+        attributes={"description": "Events from Valkey keyspace hooks"},
+    ):
+        events = client.command("OTEL.EVENTS", "15")
+        if isinstance(events, list) and events:
+            print(f"  {len(events)} server events captured:")
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                ts = ev.get('timestamp_ms', 0)
+                etype = ev.get('type', '?')
+                detail = ev.get('detail', '')
 
-        # OTEL.TRACE — echo back the trace context
-        result = client.command("OTEL.TRACE", headers=headers)
-        print(f"  OTEL.TRACE -> {result}")
+                # Parse detail: "command key" → descriptive span name
+                parts = detail.split(' ', 1) if detail else ['?']
+                cmd = parts[0].upper() if parts else '?'
+                key = parts[1] if len(parts) > 1 else ''
 
-        # OTEL.TRACEID — extract trace-id
-        result = client.command("OTEL.TRACEID", headers=headers)
-        print(f"  OTEL.TRACEID -> {result}")
+                if etype == 'keyspace':
+                    name = f"valkey.server {cmd} {key}"
+                elif etype == 'new_key':
+                    name = f"valkey.server NEW_KEY {key}"
+                elif etype == 'key_overwrite':
+                    name = f"valkey.server OVERWRITE {key}"
+                elif etype == 'client_connect':
+                    name = "valkey.server CLIENT_CONNECT"
+                elif etype == 'client_disconnect':
+                    name = "valkey.server CLIENT_DISCONNECT"
+                else:
+                    name = f"valkey.server {etype}"
 
-        # OTEL.SPANID — extract span-id
-        result = client.command("OTEL.SPANID", headers=headers)
-        print(f"  OTEL.SPANID -> {result}")
+                print(f"    {name}")
 
-        # OTEL.CONTEXT — all headers
-        headers_with_extras = dict(headers)
-        headers_with_extras["baggage"] = "userId=42,region=us-west-2"
-        headers_with_extras["otel-resource"] = "valkey-otel-demo"
-        result = client.command("OTEL.CONTEXT", headers=headers_with_extras)
-        print(f"  OTEL.CONTEXT -> {result}")
+                with tracer.start_as_current_span(
+                    name,
+                    kind=trace.SpanKind.SERVER,
+                    attributes={
+                        "db.system": "valkey",
+                        "db.operation": cmd,
+                        "db.key": key,
+                        "event.type": etype,
+                        "event.timestamp_ms": ts,
+                    },
+                ):
+                    pass
+        else:
+            print("  No events yet")
 
-    print("  ✓ Module diagnostic commands working")
+    print("  → In Grafana: 1 trace, one span per server event")
 
 
-def demo_stats(client):
-    """Demo 5: Show module statistics."""
+# ============================================================================
+# Stats summary
+# ============================================================================
+
+def show_stats(client):
     print("\n" + "=" * 60)
-    print("  Demo 5: Module statistics")
+    print("  Module Statistics (OTEL.STATS)")
     print("=" * 60)
-
-    result = client.command("OTEL.STATS")
-    print(f"  Module stats:")
-    if isinstance(result, dict):
-        for k, v in result.items():
+    stats = client.command("OTEL.STATS")
+    if isinstance(stats, dict):
+        for k, v in stats.items():
             print(f"    {k}: {v}")
-    else:
-        print(f"    {result}")
-
-    print("  ✓ Statistics collected across all demos")
 
 
 # ============================================================================
@@ -312,67 +322,47 @@ def demo_stats(client):
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="OpenTelemetry + RESP4 Demo for Valkey"
-    )
-    parser.add_argument("--host", default="127.0.0.1", help="Valkey host")
-    parser.add_argument("--port", type=int, default=6379, help="Valkey port")
-    parser.add_argument(
-        "--jaeger-endpoint",
-        default="http://localhost:4318",
-        help="Jaeger OTLP HTTP endpoint",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=6379)
+    parser.add_argument("--jaeger-endpoint", default="http://localhost:4318")
     args = parser.parse_args()
 
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║     OpenTelemetry + RESP4 Request Headers Demo          ║")
-    print("║     Distributed Tracing through Valkey                  ║")
+    print("║     RESP4 + OpenTelemetry Tracing Demo                  ║")
+    print("║     4 distinct traces, each tells a different story     ║")
     print("╚══════════════════════════════════════════════════════════╝")
 
-    # Setup OpenTelemetry
-    print(f"\n→ Configuring OpenTelemetry (exporting to {args.jaeger_endpoint})...")
     tracer = setup_otel(args.jaeger_endpoint)
 
-    # Connect to Valkey with RESP4
-    print(f"→ Connecting to Valkey at {args.host}:{args.port} with RESP4...")
+    print(f"\n→ Connecting to Valkey at {args.host}:{args.port} with RESP4...")
     client = Resp4Client(host=args.host, port=args.port)
     try:
-        hello_reply = client.connect()
-        print(f"  Connected! HELLO reply: proto={hello_reply.get('proto', '?')}, "
-              f"server={hello_reply.get('server', '?')}, "
-              f"version={hello_reply.get('version', '?')}")
+        r = client.connect()
+        print(f"  Connected! proto={r.get('proto')}, version={r.get('version')}")
     except Exception as e:
-        print(f"\n✗ Failed to connect to Valkey: {e}")
-        print(f"  Make sure Valkey is running with the otelmodule loaded:")
-        print(f"  ./src/valkey-server --loadmodule ./src/modules/otelmodule.so")
+        print(f"\n✗ Connection failed: {e}")
         sys.exit(1)
 
     try:
-        # Run demos
-        demo_basic_operations(client, tracer)
-        demo_pipeline_simulation(client, tracer)
-        demo_batch_operations(client, tracer)
-        demo_server_side_tracing(client, tracer)
-        demo_otel_commands(client, tracer)
-        demo_stats(client)
+        trace_simple_set_get(client, tracer)
+        trace_cache_aside(client, tracer)
+        trace_server_timing(client, tracer)
+        trace_server_events(client, tracer)
+        show_stats(client)
 
-        # Flush traces
-        print("\n→ Flushing traces to Jaeger...")
+        print("\n→ Flushing traces...")
         trace.get_tracer_provider().force_flush()
         time.sleep(1)
 
         print("\n╔══════════════════════════════════════════════════════════╗")
-        print("║  ✓ Demo complete!                                       ║")
+        print("║  ✓ Done! 4 traces exported to Grafana/Jaeger            ║")
         print("║                                                          ║")
-        print("║  Open Jaeger UI to see traces:                           ║")
-        print("║    http://localhost:16686                                 ║")
-        print("║                                                          ║")
-        print("║  Search for service: valkey-otel-demo                    ║")
-        print("║                                                          ║")
-        print("║  Each Valkey command appears as a span with:             ║")
-        print("║    - traceparent sent as RESP4 header                    ║")
-        print("║    - Full parent/child span hierarchy                    ║")
-        print("║    - Command details in span attributes                  ║")
+        print("║  In Grafana Explore (Jaeger datasource):                 ║")
+        print("║    Trace 1: 'user-request: store and read user'          ║")
+        print("║    Trace 2: 'GET /api/product/42'                        ║")
+        print("║    Trace 3: 'instrumented-write: SET with server timing' ║")
+        print("║    Trace 4: 'server-event-log'                           ║")
         print("╚══════════════════════════════════════════════════════════╝")
 
     finally:
