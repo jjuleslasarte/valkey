@@ -61,4 +61,4 @@ src/unit/.flags
 demo/otel/.grafana
 demo/otel/.venv
 demo/otel/.grafana-data
-demo/otel/.jaeger
+demo/otel/.jaegerdemo/otel/.jaeger/jaeger

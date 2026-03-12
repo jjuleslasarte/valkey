@@ -9,6 +9,7 @@ list(APPEND MODULES_LIST "hellotype")
 list(APPEND MODULES_LIST "helloworld")
 list(APPEND MODULES_LIST "helloheaders")
 list(APPEND MODULES_LIST "otelmodule")
+list(APPEND MODULES_LIST "idempotency")
 
 foreach (MODULE_NAME ${MODULES_LIST})
     message(STATUS "Building module: ${MODULE_NAME}")
