@@ -1070,12 +1070,18 @@ void debugCommand(client *c) {
         if (!strcasecmp(objectGetVal(c->argv[2]), "aof")) {
             pauseAofReplyBlocking();
             addReply(c, shared.ok);
+        } else if (!strcasecmp(objectGetVal(c->argv[2]), "replication")) {
+            pauseSyncReplicationReplyBlocking();
+            addReply(c, shared.ok);
         } else {
             addReplyError(c, "No such reply-blocking provider");
         }
     } else if (!strcasecmp(objectGetVal(c->argv[1]), "reply-blocking-resume") && c->argc == 3) {
         if (!strcasecmp(objectGetVal(c->argv[2]), "aof")) {
             resumeAofReplyBlocking();
+            addReply(c, shared.ok);
+        } else if (!strcasecmp(objectGetVal(c->argv[2]), "replication")) {
+            resumeSyncReplicationReplyBlocking();
             addReply(c, shared.ok);
         } else {
             addReplyError(c, "No such reply-blocking provider");

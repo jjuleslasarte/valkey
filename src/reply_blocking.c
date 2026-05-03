@@ -47,21 +47,102 @@ int isAofReplyBlockingEnabled(void) {
     return server.aof_state != AOF_OFF && server.aof_fsync == AOF_FSYNC_ALWAYS;
 }
 
-/* Returns the replication offset that has been durably committed locally.
+/*================================= Sync Replication Provider ================ */
+
+/* The sync replication provider is enabled when min-sync-replicas > 0.
+ * This implements the sync replication data path from the PacificA framework:
+ * writes are only considered committed once acknowledged by at least
+ * min-sync-replicas sync replicas (replicas with REPLICA_CAPA_SYNC flag). */
+int isSyncReplicationEnabled(void) {
+    return server.sync_replication_enabled == 1;
+}
+
+/* Compute the consensus offset across all sync replicas.
  *
- * When AOF synchronous reply-blocking is enabled, this is the AOF-acknowledged
- * offset (or the snapshot captured at pause time, when paused via DEBUG).
- * When AOF synchronous reply-blocking is disabled, no local reply-blocking gate
- * is in effect, so the primary's current replication offset is returned
+ * For every REPLCONF ACK, we calculate the minimum ack offset of all
+ * online sync replicas (those in the ISR — with is_in_sync flag set).
+ *
+ * consensus_offset = minimum_ack_offset(list of sync replicas)
+ *
+ * A replica is in the ISR when:
+ *   1. It declared REPLICA_CAPA_SYNC capability via REPLCONF
+ *   2. Its repl_ack_off caught up to the committed_offset
+ *   3. It has not timed out (checked by replicationCron)
+ *
+ * If there are fewer ISR members than min-sync-replicas,
+ * returns -1 to block consensus advancement (the shard is not writable). */
+long long getSyncReplicationAckedOffset(void) {
+    listIter li;
+    listNode *ln;
+    int sync_replica_count = 0;
+    long long min_offset = LLONG_MAX;
+
+    listRewind(server.replicas, &li);
+    while ((ln = listNext(&li))) {
+        client *replica = ln->value;
+
+        /* Only consider replicas that are online and in the ISR. */
+        if (replica->repl_data->repl_state != REPLICA_STATE_ONLINE) continue;
+        if (!replica->repl_data->is_in_sync) continue;
+
+        sync_replica_count++;
+        if (replica->repl_data->repl_ack_off < min_offset) {
+            min_offset = replica->repl_data->repl_ack_off;
+        }
+    }
+
+    /* If we don't have enough sync replicas, block consensus. */
+    if (sync_replica_count < server.min_sync_replicas) {
+        return -1;
+    }
+
+    return (min_offset == LLONG_MAX) ? 0 : min_offset;
+}
+
+/*================================= Committed Offset Calculation ============= */
+
+/* Returns the replication offset that has been durably committed.
+ *
+ * The consensus offset is the MIN of all enabled providers (AND semantics):
+ * - AOF provider: offset fsynced to disk
+ * - Sync replication provider: minimum ack offset across ISR replicas
+ *
+ * If a provider returns -1, consensus is blocked (e.g. insufficient replicas).
+ * If no providers are enabled, returns server.primary_repl_offset
  * (i.e. nothing is reply-blocked). */
 long long getDurablyCommittedOffset(void) {
-    if (!isAofReplyBlockingEnabled()) {
-        return server.primary_repl_offset;
+    long long consensus = server.primary_repl_offset;
+    int any_enabled = 0;
+
+    /* AOF provider */
+    if (isAofReplyBlockingEnabled()) {
+        any_enabled = 1;
+        long long aof_offset;
+        if (server.reply_blocking.aof_paused) {
+            aof_offset = server.reply_blocking.aof_paused_offset;
+        } else {
+            aof_offset = aofAckedOffset();
+        }
+        if (aof_offset < consensus) consensus = aof_offset;
     }
-    if (server.reply_blocking.aof_paused) {
-        return server.reply_blocking.aof_paused_offset;
+
+    /* Sync replication provider */
+    if (isSyncReplicationEnabled()) {
+        any_enabled = 1;
+        long long repl_offset;
+        if (server.reply_blocking.repl_paused) {
+            repl_offset = server.reply_blocking.repl_paused_offset;
+        } else {
+            repl_offset = getSyncReplicationAckedOffset();
+        }
+        if (repl_offset == -1) {
+            /* Provider cannot make progress — block consensus. */
+            return -1;
+        }
+        if (repl_offset < consensus) consensus = repl_offset;
     }
-    return aofAckedOffset();
+
+    return any_enabled ? consensus : server.primary_repl_offset;
 }
 
 /* Pause AOF reply-blocking progress (via DEBUG command).
@@ -86,12 +167,27 @@ void resumeAofReplyBlocking(void) {
     serverLog(LL_NOTICE, "Resumed AOF reply-blocking");
 }
 
+/* Pause sync-replication reply-blocking progress (via DEBUG command). */
+void pauseSyncReplicationReplyBlocking(void) {
+    server.reply_blocking.repl_paused_offset = getSyncReplicationAckedOffset();
+    server.reply_blocking.repl_paused = true;
+    serverLog(LL_NOTICE, "Paused sync-replication reply-blocking (frozen at offset %lld)",
+              server.reply_blocking.repl_paused_offset);
+}
+
+/* Resume sync-replication reply-blocking progress (via DEBUG command). */
+void resumeSyncReplicationReplyBlocking(void) {
+    server.reply_blocking.repl_paused = false;
+    notifyReplyBlockingProgress();
+    serverLog(LL_NOTICE, "Resumed sync-replication reply-blocking");
+}
+
 /* Utility function to determine whether reply-blocking is enabled.
  * Reply-blocking is enabled when the BIO AOF offload path is active and the
  * AOF subsystem is configured for synchronous reply-blocking (appendonly +
  * appendfsync always). */
 int isReplyBlockingEnabled(void) {
-    return server.bio_aof_offload_enabled && isAofReplyBlockingEnabled();
+    return (server.bio_aof_offload_enabled && isAofReplyBlockingEnabled()) || isSyncReplicationEnabled();
 }
 
 // Utility function to determine whether reply-blocking is enabled on a primary node.
@@ -768,13 +864,17 @@ sds genReplyBlockingInfoString(sds info) {
                         "reply_blocking_clients_waiting_ack:%lu\r\n"
                         "reply_blocking_uncommitted_keys:%llu\r\n"
                         "reply_blocking_previous_acked_offset:%lld\r\n"
-                        "reply_blocking_primary_repl_offset:%lld\r\n",
+                        "reply_blocking_primary_repl_offset:%lld\r\n"
+                        "reply_blocking_sync_replicas:%d\r\n"
+                        "reply_blocking_min_sync_replicas:%d\r\n",
                         server.reply_blocking.read_responses_blocked,
                         server.reply_blocking.write_responses_blocked,
                         listLength(server.reply_blocking.clients_waiting_ack),
                         getNumberOfUncommittedKeys(),
                         server.reply_blocking.previous_acked_offset,
-                        server.primary_repl_offset);
+                        server.primary_repl_offset,
+                        getSyncReplicaCount(),
+                        server.min_sync_replicas);
 
     return info;
 }
