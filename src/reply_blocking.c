@@ -54,7 +54,7 @@ int isAofReplyBlockingEnabled(void) {
  * writes are only considered committed once acknowledged by at least
  * min-sync-replicas sync replicas (replicas with REPLICA_CAPA_SYNC flag). */
 int isSyncReplicationEnabled(void) {
-    return server.sync_replication_enabled == 1;
+    return server.min_sync_replicas > 0;
 }
 
 /* Compute the consensus offset across all sync replicas.
@@ -278,11 +278,14 @@ static bool isClientDoingTransaction(client *c) {
     return c->cmd->proc == execCommand || IS_SCRIPT_CALL_CMD(c->cmd);
 }
 
-// Returns true if the client is eligible for keyspace tracking on a primary node.
+/* Returns true if the client is eligible for response tracking.
+ * [WBL] On a replica, the primary's replication connection must NOT be tracked —
+ * blocking it would stall the replication stream. */
 static bool clientEligibleForResponseTracking(client *c) {
-    serverAssert(iAmPrimary());
-
     if (c->cmd == NULL) return false;
+
+    /* [WBL] Never block the replication stream from the primary. */
+    if (c->flag.primary) return false;
 
     bool is_keyspace_informational_cmd = IS_KEYSPACE_INFORMATIONAL(c->cmd);
 
@@ -654,6 +657,15 @@ static long long getSingleCommandBlockingOffsetForConsistentWrites(struct client
         blocking_repl_offset = server.primary_repl_offset;
     } else if ((server.primary_repl_offset > server.reply_blocking.pre_call_replication_offset) || (server.also_propagate.numops > server.reply_blocking.pre_call_num_ops_pending_propagation)) {
         blocking_repl_offset = getSingleCommandBlockingOffsetForReplicatingCommand(c);
+    } else if (c->flag.primary && (c->cmd->flags & CMD_WRITE)) {
+        /* [WBL] On a replica, write commands from the replication stream don't
+         * advance primary_repl_offset (no sub-replicas), but we still
+         * need to track their keys as uncommitted until REPLCONF COMMIT
+         * confirms the offset. Call the replicating-command path to
+         * register the keys, but return -1 so we don't block the
+         * replication stream client itself. */
+        getSingleCommandBlockingOffsetForReplicatingCommand(c);
+        blocking_repl_offset = -1;
     } else {
         blocking_repl_offset = getSingleCommandBlockingOffsetForNonReplicatingCommand(c);
     }
@@ -725,7 +737,7 @@ int preCommandExec(client *c) {
     c->reply_blocking_state.current_command_repl_offset = -1;
     c->reply_blocking_state.module_cmd_blocking_offset = -1;
 
-    if (iAmPrimary() && clientEligibleForResponseTracking(c)) {
+    if (isReplyBlockingEnabled() && clientEligibleForResponseTracking(c)) {
         trackCommandPreExecutionPosition(c);
 
         if (isCommandReplicatedToMonitors()) {
