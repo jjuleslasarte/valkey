@@ -119,7 +119,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-allow-replica
     test "Migration target is auto-updated after failover in target shard" {
         # Trigger an auto-failover from R1 to R4
         fail_server 1
-        # Wait for R1 to become a replica
+        # Wait for R4 to win the election before asserting R1 demoted
+        wait_for_role 4 master
         wait_for_role 1 slave
         # Validate final states
         wait_for_slot_state 0 "\[609->-$R4_id\]"
@@ -139,7 +140,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-allow-replica
     test "Migration source is auto-updated after failover in source shard" {
         # Trigger an auto-failover from R0 to R3
         fail_server 0
-        # Wait for R0 to become a replica
+        # Wait for R3 to win the election before asserting R0 demoted
+        wait_for_role 3 master
         wait_for_role 0 slave
         # Validate final states
         wait_for_slot_state 0 "\[609->-$R1_id\]"
@@ -292,7 +294,8 @@ start_cluster 3 5 {tags {external:skip cluster} overrides {cluster-allow-replica
         wait_for_role 6 master
         # Trigger an auto-failover from R6 to R7
         fail_server 6
-        # Wait for R6 to become a replica
+        # Wait for R7 to win the election before asserting R6 demoted
+        wait_for_role 7 master
         wait_for_role 6 slave
         # Validate final states
         wait_for_slot_state 0 "\[609->-$R7_id\]"
@@ -313,7 +316,8 @@ start_cluster 3 5 {tags {external:skip cluster} overrides {cluster-allow-replica
         wait_for_role 0 master
         # Trigger an auto-failover from R0 to R3
         fail_server 0
-        # Wait for R0 to become a replica
+        # Wait for R3 to win the election before asserting R0 demoted
+        wait_for_role 3 master
         wait_for_role 0 slave
         # Validate final states
         wait_for_slot_state 0 "\[609->-$R6_id\]"
