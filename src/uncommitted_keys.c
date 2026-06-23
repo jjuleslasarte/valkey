@@ -122,9 +122,9 @@ static bool addUncommittedKey(const sds key, const long long offset, hashtable *
 /* Retrieve the uncommitted replication offset for a given key.
  * Returns -1 if the key is not tracked or has already been committed
  * (offset <= previous_acked_offset). Does NOT purge — cleanup is handled
- * by drainCommittedKeys(). */
+ * by drainCommittedKeys().
+ * [WBL] Also used on replicas to track keys from the replication stream. */
 long long getUncommittedKeyOffset(const sds key, serverDb *db, long long previous_acked_offset) {
-    serverAssert(iAmPrimary());
     uncommittedKeyEntry *entry = NULL;
     if (!hashtableFind(db->uncommitted_keys, key, (void **)&entry)) {
         return -1;
@@ -173,8 +173,15 @@ void handleUncommittedKeyForClient(const client *c, robj *key, serverDb *db) {
             listAddNodeTail(pending_uncommitted_keys, dirty_key);
         }
     } else {
-        // Single command: mark dirty with real offset
-        addUncommittedKey(keystr, server.primary_repl_offset, db->uncommitted_keys);
+         /* [WBL] - On a replica, primary_repl_offset doesn't advance for
+         * commands from the replication stream. Use the primary
+         * client's applied replication offset instead. */
+        long long offset = server.primary_repl_offset;
+        if (server.primary != NULL && server.current_client != NULL &&
+            server.current_client->flag.primary) {
+            offset = server.primary->repl_data->reploff;
+        }
+        addUncommittedKey(keystr, offset, db->uncommitted_keys);
     }
 }
 

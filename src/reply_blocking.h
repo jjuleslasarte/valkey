@@ -110,6 +110,11 @@ typedef struct reply_blocking_t {
     /* Snapshot of the AOF-acked offset captured at pause time so that writes
      * already acknowledged remain unblocked while new writes block. */
     long long aof_paused_offset;
+
+    /* When true (set via DEBUG reply-blocking-pause replication), the sync
+     * replication provider is frozen at repl_paused_offset. */
+    bool repl_paused;
+    long long repl_paused_offset;
 } reply_blocking_t;
 
 /* Define the type of command being blocked */
@@ -206,6 +211,10 @@ int isAofReplyBlockingEnabled(void);
 long long getDurablyCommittedOffset(void);
 void pauseAofReplyBlocking(void);
 void resumeAofReplyBlocking(void);
+void pauseSyncReplicationReplyBlocking(void);
+void resumeSyncReplicationReplyBlocking(void);
+int isSyncReplicationEnabled(void);
+long long getSyncReplicationAckedOffset(void);
 bool isClientReplyBufferLimited(client *c);
 sds genReplyBlockingInfoString(sds info);
 
