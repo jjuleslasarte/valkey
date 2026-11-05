@@ -88,6 +88,23 @@ invariant" and "Proof status" below is the one that standalone Core proof used.
 RestartProof's invariant generalizes it (see "Invariant changes" in the ReconProof and
 RestartProof sections). The old files are in git history.
 
+## Proof style
+
+Conventions, following *Theorem Proving in Lean 4* ch. 5 (Structuring Tactic
+Proofs) and the robustness notes there:
+
+- Every sub-goal is a bullet (`·`) closed in place; `show` states the goal
+  where it is not obvious from the field name.
+- Hypotheses introduced by a case split are named at the split
+  (`split_ifs with e`, `cases hs with | append p …`, `obtain ⟨…⟩`), never
+  recovered afterwards with `rename_i`. The tree has no `rename_i`.
+- `simp` with the default simp set is used only to close a goal. When a
+  tactic follows, the call is `simp only [...]` with the lemmas named, so a
+  change in the simp set cannot change the shape of the goal the next tactic
+  sees.
+- Layer assemblies (`inv_takeover : Inv … where …`) are term-style; the field
+  names carry the structure.
+
 ## Result
 
 `CoreProof.safety` (`CoreProof/Safety.lean`):

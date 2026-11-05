@@ -37,9 +37,9 @@ theorem config_takeover : ConfigInv (takeover s n) := by
   knownEq := by
     intro x hx; change ((takeover s n).known x).ver = s.cfg.ver + 1 at hx
     show (takeover s n).known x = takeoverCfg s n
-    rw [hK] at hx ⊢; split
+    rw [hK] at hx ⊢; split_ifs with e
     · rfl
-    · rename_i e; rw [if_neg e] at hx; have := h.knownLe x; omega
+    · rw [if_neg e] at hx; have := h.knownLe x; omega
   primKnows := by show (takeover s n).known n = takeoverCfg s n; rw [hK, if_pos rfl]
   incLe := h.incLe
   knownIncLe := by

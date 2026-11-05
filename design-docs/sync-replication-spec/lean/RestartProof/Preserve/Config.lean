@@ -36,9 +36,9 @@ theorem config_learn : ConfigInv (learn s n) := by
     · exact Nat.le_refl _
     · exact h.knownLe x
   knownEq := by
-    intro x hx; show (learn s n).known x = s.cfg; rw [hK] at hx ⊢; split
+    intro x hx; show (learn s n).known x = s.cfg; rw [hK] at hx ⊢; split_ifs with e
     · rfl
-    · rename_i e; rw [if_neg e] at hx; exact h.knownEq x hx
+    · rw [if_neg e] at hx; exact h.knownEq x hx
   primKnows := by show (learn s n).known s.cfg.prim = s.cfg; rw [hK, if_neg (Ne.symm hnp)]; exact h.primKnows
   incLe := h.incLe
   knownIncLe := by
@@ -71,8 +71,8 @@ theorem repl_learn : ReplInv (learn s n) := by
     obtain ⟨hpn, hp'⟩ := htp p hp
     change (if m = n then s.cfg else s.known m).prim = p at hf
     show (s.log p).take (s.acked p m) <+: s.log m
-    split at hf
-    · rename_i e; subst e
+    split_ifs at hf with e
+    · subst e
       by_cases hf0 : (s.known m).prim = p
       · exact h.ackHolds p m hp' hm hf0
       · rw [← hf] at hf0 ⊢; rw [h.ackedPrim m hf0]; simp
@@ -112,10 +112,9 @@ theorem membership_learn : MembershipInv (learn s n) := by
     change (if m = n then s.cfg else s.known m).prim ≠ s.cfg.prim at hf
     show ((learn s n).known ((learn s n).known m).prim).elig m = true
     rw [hK m]
-    split at hf
+    split_ifs at hf with e
     · exact absurd rfl hf
-    · rename_i e
-      rw [if_neg e, hK]
+    · rw [if_neg e, hK]
       split
       · exact he
       · exact h.eligFol m he hf }
@@ -223,13 +222,13 @@ theorem config_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
   knownEq := by
     intro x hx; change ((makeElig s s.cfg.prim r).known x).ver = s.cfg.ver + 1 at hx
     show (makeElig s s.cfg.prim r).known x = makeEligCfg s r
-    rw [hK] at hx ⊢; split
+    rw [hK] at hx ⊢; split_ifs with e
     · rfl
-    · rename_i e; rw [if_neg e] at hx; have := h.knownLe x; omega
+    · rw [if_neg e] at hx; have := h.knownLe x; omega
   primKnows := by show (makeElig s s.cfg.prim r).known s.cfg.prim = _; rw [hK, if_pos rfl]; rfl
   incLe := by
-    intro x; show (makeElig s s.cfg.prim r).cfg.inc x ≤ s.inc x; rw [hI]; split
-    · rename_i e; subst e; exact Nat.le_refl _
+    intro x; show (makeElig s s.cfg.prim r).cfg.inc x ≤ s.inc x; rw [hI]; split_ifs with e
+    · subst e; exact Nat.le_refl _
     · exact h.incLe x
   knownIncLe := by
     intro x y; rw [hK]; split
@@ -279,8 +278,8 @@ theorem membership_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false)
     intro x y hx hy hi
     show s.sync x y = true
     rw [hK] at hy hi
-    split at hy
-    · rename_i e; subst e
+    split_ifs at hy with e
+    · subst e
       change (if y = r then true else s.cfg.elig y) = true at hy
       rw [if_pos rfl] at hi
       change upd s.cfg.inc r (s.inc r) y = s.inc y at hi
@@ -289,7 +288,7 @@ theorem membership_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false)
       · rw [if_neg ey] at hy; rw [upd_ne _ _ ey] at hi
         exact h.eligSync _ y (thinksPrimary_prim h hpa) (by rw [h.primKnows]; exact hy)
           (by rw [h.primKnows]; exact hi)
-    · rename_i e; rw [if_neg e] at hi; exact h.eligSync x y ((htp x).1 hx) hy hi
+    · rw [if_neg e] at hi; exact h.eligSync x y ((htp x).1 hx) hy hi
   syncNew := by
     intro x hx hxe
     rw [hE] at hxe
@@ -301,8 +300,8 @@ theorem membership_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false)
     rw [hKp] at hf
     change (s.known m).prim ≠ s.cfg.prim at hf
     rw [hE] at hm
-    split at hm
-    · rename_i e; subst e; exact absurd hrf hf
+    split_ifs at hm with e
+    · subst e; exact absurd hrf hf
     · rw [hKp, hK, if_neg hf]; exact h.eligFol m hm hf }
 
 /-- MakeEligible changes no commit point, catch-up point or history. -/
@@ -423,9 +422,9 @@ theorem config_makeInelig (_he : s.cfg.elig r = true) :
   knownEq := by
     intro x hx; change ((makeInelig s s.cfg.prim r).known x).ver = s.cfg.ver + 1 at hx
     show (makeInelig s s.cfg.prim r).known x = makeIneligCfg s r
-    rw [hK] at hx ⊢; split
+    rw [hK] at hx ⊢; split_ifs with e
     · rfl
-    · rename_i e; rw [if_neg e] at hx; have := h.knownLe x; omega
+    · rw [if_neg e] at hx; have := h.knownLe x; omega
   primKnows := by show (makeInelig s s.cfg.prim r).known s.cfg.prim = _; rw [hK, if_pos rfl]; rfl
   incLe := h.incLe
   knownIncLe := by
@@ -475,26 +474,24 @@ theorem membership_makeInelig (he : s.cfg.elig r = true) :
     intro x y hx hy hi
     rw [hS]
     rw [hK] at hy hi
-    split at hy
-    · rename_i e; subst e
+    split_ifs at hy with e
+    · subst e
       rw [if_pos rfl] at hi
       change (if y = r then false else s.cfg.elig y) = true at hy
       change s.cfg.inc y = s.inc y at hi
-      split at hy
-      · exact absurd hy Bool.false_ne_true
-      · rename_i ey
-        rw [if_neg (fun c => ey c.2)]
-        exact h.eligSync _ y (thinksPrimary_prim h hpa) (by rw [h.primKnows]; exact hy)
-          (by rw [h.primKnows]; exact hi)
-    · rename_i e; rw [if_neg e] at hi; rw [if_neg (fun c => e c.1)]
+      split_ifs at hy with ey
+      rw [if_neg (fun c => ey c.2)]
+      exact h.eligSync _ y (thinksPrimary_prim h hpa) (by rw [h.primKnows]; exact hy)
+        (by rw [h.primKnows]; exact hi)
+    · rw [if_neg e] at hi; rw [if_neg (fun c => e c.1)]
       exact h.eligSync x y ((htp x).1 hx) hy hi
   syncNew := by
     intro x hx hxe
     have hx0 := hSle _ _ hx
     rw [hS] at hx
     rw [hE] at hxe
-    split at hxe
-    · rename_i e; subst e; rw [if_pos ⟨rfl, rfl⟩] at hx; exact absurd hx Bool.false_ne_true
+    split_ifs at hxe with e
+    · subst e; rw [if_pos ⟨rfl, rfl⟩] at hx; exact absurd hx Bool.false_ne_true
     · obtain ⟨a, b⟩ := h.syncNew x hx0 hxe; rw [hKp]; exact ⟨a, b⟩
   eligFol := by
     intro m hm hf

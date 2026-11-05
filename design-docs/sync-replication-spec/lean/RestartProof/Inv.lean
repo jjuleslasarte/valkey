@@ -363,16 +363,16 @@ end
 /-- CatchUpPoint is at least the committed offset. -/
 theorem commit_le_catchUpPoint {s : State Node} (h : Inv s) (p : Node) : s.commit p ≤ catchUpPoint true s p := by
   have := h.caLen p
-  unfold catchUpPoint; split
-  · rename_i c; omega
+  unfold catchUpPoint; split_ifs with c
+  · omega
   · exact Nat.le_refl _
 
 /-- For the current primary, CatchUpPoint covers the reconciliation point. -/
 theorem recon_le_catchUpPoint {s : State Node} (h : Inv s) : s.recon s.cfg.prim ≤ catchUpPoint true s s.cfg.prim := by
   have := h.reconLen
-  unfold catchUpPoint; split
+  unfold catchUpPoint; split_ifs with c
   · omega
-  · rename_i c; simp at c; exact c
+  · simp at c; exact c
 
 theorem catchUpPoint_le_len {s : State Node} (h : Inv s) (p : Node) : catchUpPoint true s p ≤ (s.log p).length := by
   unfold catchUpPoint; split

@@ -82,27 +82,27 @@ theorem repl_ack : ReplInv (ack s r) := by
   ackedPrim := by
     intro x hx
     show (ack s r).acked s.cfg.prim x = 0
-    rw [hA]; split
-    · rename_i hc; obtain ⟨h1, rfl⟩ := hc; exact absurd (h1 ▸ hfol) hx
+    rw [hA]; split_ifs with hc
+    · obtain ⟨h1, rfl⟩ := hc; exact absurd (h1 ▸ hfol) hx
     · exact h.ackedPrim x hx
   ackedLe := by
     intro q x hq
     show (ack s r).acked q x ≤ _
-    rw [hA]; split
-    · rename_i hc; obtain ⟨rfl, rfl⟩ := hc; exact hpre.length_le
+    rw [hA]; split_ifs with hc
+    · obtain ⟨rfl, rfl⟩ := hc; exact hpre.length_le
     · exact h.ackedLe q x hq
   ackHolds := by
     intro q n hq hn hf
     show (s.log q).take ((ack s r).acked q n) <+: s.log n
-    rw [hA]; split
-    · rename_i hc; obtain ⟨rfl, rfl⟩ := hc
+    rw [hA]; split_ifs with hc
+    · obtain ⟨rfl, rfl⟩ := hc
       rw [← prefix_take_eq hpre (Nat.le_refl _), List.take_length]
     · exact h.ackHolds q n hq hn hf
   syncCommit := by
     intro q x hq hs
     show _ ≤ (ack s r).acked q x
-    rw [hA]; split
-    · rename_i hc; obtain ⟨rfl, rfl⟩ := hc; exact Nat.le_trans (h.syncCommit _ _ hq hs) (Nat.le_of_lt hlt)
+    rw [hA]; split_ifs with hc
+    · obtain ⟨rfl, rfl⟩ := hc; exact Nat.le_trans (h.syncCommit _ _ hq hs) (Nat.le_of_lt hlt)
     · exact h.syncCommit q x hq hs }
 
 /-- Acknowledgements only grow, so a counted replica stays caught up. -/
@@ -115,8 +115,8 @@ theorem membership_ack : MembershipInv (ack s r) := by
     obtain ⟨a, b⟩ := h.syncNew x hs he
     refine ⟨a, ?_⟩
     show _ ≤ (ack s r).acked s.cfg.prim x
-    rw [hA]; split
-    · rename_i hc; obtain ⟨h1, rfl⟩ := hc
+    rw [hA]; split_ifs with hc
+    · obtain ⟨h1, rfl⟩ := hc
       show s.recon s.cfg.prim ≤ _; have := hlt; rw [← h1] at this; omega
     · exact b
   eligFol := h.eligFol }
@@ -137,8 +137,8 @@ theorem failover_ack : FailoverInv (ack s r) := by
       (fun x => h.ackedLe p x hp) (fun _ x => x) ?_
     intro x hx
     show (ack s r).acked p x = s.acked p x
-    rw [hA]; split
-    · rename_i hc; obtain ⟨rfl, rfl⟩ := hc; exact absurd hfol hx
+    rw [hA]; split_ifs with hc
+    · obtain ⟨rfl, rfl⟩ := hc; exact absurd hfol hx
     · rfl
   authEx := h.authEx }
 
@@ -206,10 +206,9 @@ theorem repl_resync : ReplInv (resync true s r) := by
     intro p m hp hm hf
     show ((resync true s r).log p).take ((resync true s r).acked p m) <+: (resync true s r).log m
     rw [hLo p (htpne p hp), hA]
-    split
+    split_ifs with c
     · simp
-    · rename_i c
-      by_cases em : m = r
+    · by_cases em : m = r
       · subst em; exact absurd ⟨hf.symm, rfl⟩ c
       · rw [hLo m em]; exact h.ackHolds p m hp hm hf
   syncCommit := by

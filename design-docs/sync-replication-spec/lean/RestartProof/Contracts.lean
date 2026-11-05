@@ -132,8 +132,8 @@ theorem makeElig_known (x : Node) : (makeElig s s.cfg.prim r).known x =
 
 theorem makeElig_known_prim (hkp : s.known s.cfg.prim = s.cfg) (x : Node) :
     ((makeElig s s.cfg.prim r).known x).prim = (s.known x).prim := by
-  rw [makeElig_known]; split
-  · rename_i e; subst e; rw [hkp]; rfl
+  rw [makeElig_known]; split_ifs with e
+  · subst e; rw [hkp]; rfl
   · rfl
 
 theorem makeElig_elig (x : Node) :
@@ -145,8 +145,8 @@ theorem makeElig_inc (x : Node) :
 
 theorem makeElig_known_inc (hkp : s.known s.cfg.prim = s.cfg) (hrp : r ≠ s.cfg.prim) (x : Node) :
     ((makeElig s s.cfg.prim r).known x).inc x = (s.known x).inc x := by
-  rw [makeElig_known]; split
-  · rename_i e; subst e; rw [hkp]
+  rw [makeElig_known]; split_ifs with e
+  · subst e; rw [hkp]
     show upd s.cfg.inc r (s.inc r) s.cfg.prim = s.cfg.inc s.cfg.prim
     exact upd_ne _ _ (Ne.symm hrp)
   · rfl
@@ -172,14 +172,14 @@ theorem makeInelig_known (x : Node) : (makeInelig s s.cfg.prim r).known x =
 
 theorem makeInelig_known_prim (hkp : s.known s.cfg.prim = s.cfg) (x : Node) :
     ((makeInelig s s.cfg.prim r).known x).prim = (s.known x).prim := by
-  rw [makeInelig_known]; split
-  · rename_i e; subst e; rw [hkp]; rfl
+  rw [makeInelig_known]; split_ifs with e
+  · subst e; rw [hkp]; rfl
   · rfl
 
 theorem makeInelig_known_inc (hkp : s.known s.cfg.prim = s.cfg) (x : Node) :
     ((makeInelig s s.cfg.prim r).known x).inc = (s.known x).inc := by
-  rw [makeInelig_known]; split
-  · rename_i e; subst e; rw [hkp]; rfl
+  rw [makeInelig_known]; split_ifs with e
+  · subst e; rw [hkp]; rfl
   · rfl
 
 theorem makeInelig_elig (x : Node) :
@@ -207,9 +207,8 @@ theorem makeInelig_thinksPrimary (hkp : s.known s.cfg.prim = s.cfg) (x : Node) :
 
 theorem makeInelig_elig_true {m : Node} (hm : (makeInelig s s.cfg.prim r).cfg.elig m = true) :
     m ≠ r ∧ s.cfg.elig m = true := by
-  rw [makeInelig_elig] at hm; split at hm
-  · exact absurd hm Bool.false_ne_true
-  · rename_i e; exact ⟨e, hm⟩
+  rw [makeInelig_elig] at hm; split_ifs at hm with e
+  exact ⟨e, hm⟩
 
 /-- Demotion makes no node authoritative. -/
 theorem makeInelig_isAuthoritative {x : Node} (hx : IsAuthoritative (makeInelig s s.cfg.prim r) x) :
@@ -305,8 +304,8 @@ theorem resync_acked_le (q x : Node) : (resync true s r).acked q x ≤ s.acked q
 /-- Acknowledgements the primary counts are untouched, because `r` is not counted. -/
 theorem resync_acked_sync (hsy : s.sync (primaryOf s r) r = false) {q x : Node}
     (hs : s.sync q x = true) : (resync true s r).acked q x = s.acked q x := by
-  rw [resync_acked]; split
-  · rename_i c; obtain ⟨rfl, rfl⟩ := c; rw [hsy] at hs; exact absurd hs (by decide)
+  rw [resync_acked]; split_ifs with c
+  · obtain ⟨rfl, rfl⟩ := c; rw [hsy] at hs; exact absurd hs (by decide)
   · rfl
 
 end resync

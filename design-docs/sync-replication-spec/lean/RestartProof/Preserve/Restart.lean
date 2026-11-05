@@ -31,12 +31,12 @@ theorem config_restartEmpty : ConfigInv (restartEmpty s n) := by
   knownEq := h.knownEq
   primKnows := h.primKnows
   incLe := by
-    intro x; show s.cfg.inc x ≤ (restartEmpty s n).inc x; rw [hI]; split
-    · rename_i e; subst e; have := h.incLe x; omega
+    intro x; show s.cfg.inc x ≤ (restartEmpty s n).inc x; rw [hI]; split_ifs with e
+    · subst e; have := h.incLe x; omega
     · exact h.incLe x
   knownIncLe := by
-    intro x y; show (s.known x).inc y ≤ (restartEmpty s n).inc y; rw [hI]; split
-    · rename_i e; subst e; have := h.knownIncLe x y; omega
+    intro x y; show (s.known x).inc y ≤ (restartEmpty s n).inc y; rw [hI]; split_ifs with e
+    · subst e; have := h.knownIncLe x y; omega
     · exact h.knownIncLe x y }
 
 /-- `n` loses its acknowledgements and sync replica set, and the current primary forgets `n`'s acknowledgement. -/
@@ -81,9 +81,9 @@ theorem repl_restartEmpty : ReplInv (restartEmpty s n) := by
     rw [hCo q hqn]
     have hs' := hS q r; rw [hs, if_neg hqn] at hs'
     rw [hA, if_neg hqn]
-    split
-    · rename_i c; rw [if_pos c] at hs'; exact absurd hs' (by decide)
-    · rename_i c; rw [if_neg c] at hs'; exact h.syncCommit q r hq' hs'.symm }
+    split_ifs with c
+    · rw [if_pos c] at hs'; exact absurd hs' (by decide)
+    · rw [if_neg c] at hs'; exact h.syncCommit q r hq' hs'.symm }
 
 /-- `n` no longer matches its recorded incarnation, so no primary has to count it. -/
 theorem membership_restartEmpty : MembershipInv (restartEmpty s n) := by

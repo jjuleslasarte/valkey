@@ -63,8 +63,8 @@ theorem repl_commit : ReplInv (commitNext s p) := by
   syncCommit := by
     intro q r hq hs
     show (commitNext s p).commit q ≤ _
-    rw [hC]; split
-    · rename_i hx; subst hx; exact hcap r hs
+    rw [hC]; split_ifs with hx
+    · subst hx; exact hcap r hs
     · exact h.syncCommit q r hq hs }
 
 /-- Commit changes no sync replica set or eligibility. -/
@@ -102,20 +102,20 @@ theorem commit_commit : CommitInv (commitNext s p) := by
   obtain ⟨hH1, hH2, hH3, hH4⟩ := hH
   exact {
   caLen := by
-    intro x; show (commitNext s p).commit x ≤ _; rw [hC]; split
-    · rename_i hx; subst hx; exact hlen
+    intro x; show (commitNext s p).commit x ≤ _; rw [hC]; split_ifs with hx
+    · subst hx; exact hlen
     · exact h.caLen x
   caHist := by
-    intro x; show (commitNext s p).commit x ≤ (commitNext s p).hist.length; rw [hC]; split
-    · rename_i hx; subst hx
+    intro x; show (commitNext s p).commit x ≤ (commitNext s p).hist.length; rw [hC]; split_ifs with hx
+    · subst hx
       have := hH1; have hl := congrArg List.length this
       rw [List.length_take_of_le hlen] at hl
-      simp [List.length_take] at hl; omega
+      simp only [List.length_take] at hl; omega
     · exact Nat.le_trans (h.caHist x) hH2.length_le
   caEq := by
     intro x; show (s.log x).take ((commitNext s p).commit x) = (commitNext s p).hist.take _; rw [hC]
-    split
-    · rename_i hx; subst hx; exact hH1.symm
+    split_ifs with hx
+    · subst hx; exact hH1.symm
     · rw [h.caEq x]; exact prefix_take_eq hH2 (h.caHist x)
   reconLen := h.reconLen
   histLe := by
@@ -245,7 +245,7 @@ theorem repl_count : ReplInv (count s p r) := by
   have hle : s.commit p ≤ s.acked p r := Nat.le_trans (commit_le_catchUpPoint h p) hcup
   have hS := count_sync (s := s) p r
   exact {
-  noSelfSync := by intro q; show (count s p r).sync q q = false; rw [hS]; simp [h.noSelfSync q]; intro e; subst e; exact fun e => hrp e.symm
+  noSelfSync := by intro q; show (count s p r).sync q q = false; rw [hS, h.noSelfSync q]; simp only [Bool.false_or, decide_eq_false_iff_not]; exact fun ⟨e1, e2⟩ => hrp (e2.symm.trans e1)
   ackedPrim := h.ackedPrim
   ackedLe := h.ackedLe
   ackHolds := h.ackHolds
