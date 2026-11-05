@@ -443,6 +443,10 @@ Mathlib's prebuilt files once with `../tools/lean.sh lake exe cache get` (about
   branch, `FINDINGS.md` and `spec/`.
 - W. Lin, M. Yang, L. Zhang, L. Zhou. PacificA: Replication in Log-Based
   Distributed Storage Systems. Microsoft Research, MSR-TR-2008-25, 2008.
+- J. Avigad, L. de Moura, S. Kong, S. Ullrich, with contributions from the
+  Lean community. *Theorem Proving in Lean 4*.
+  <https://lean-lang.org/theorem_proving_in_lean4/>. The reference for every
+  Lean construct used here (Appendix A.7).
 
 ---
 
@@ -579,6 +583,38 @@ From most to least trusted:
 4. Trust the kernel for the rest. `lake build` with no errors and `Check.lean`
    printing only the three standard axioms is the whole verification; nothing
    else needs re-reading to confirm the theorems hold.
+
+### A.7 The Lean used here, and where it is explained
+
+The proofs use a small part of Lean 4. Each construct below is explained in
+*Theorem Proving in Lean 4* by Jeremy Avigad, Leonardo de Moura, Soonho Kong
+and Sebastian Ullrich, with contributions from the Lean community (open
+access, <https://lean-lang.org/theorem_proving_in_lean4/>; hereafter *TPIL*,
+cited by chapter). The book is the standard introduction and is written for
+readers who have not used a proof assistant. The descriptions below are ours;
+the book is the reference.
+
+| In this proof | What it is | TPIL |
+|---|---|---|
+| `inductive Step`, `inductive Reachable` | Propositions defined by their introduction rules. A `Step m rf rb s s'` can only be built from one of the listed constructors, so a proof of it is a record of which action fired and evidence that its guards held. `Reachable` is the same for "a finite sequence of steps from `init`". These are *inductively defined propositions*; because they are indexed by states they are also *inductive families*. | Ch. 7, Inductive Types (§7.3, §7.7) |
+| `cases hs with \| append … \| replicate …` in `inv_step` | Case analysis on which constructor built the step. Lean checks that every constructor is handled. This is the proof-side counterpart of `Step`'s definition. | Ch. 7 (§7.6, Tactics for Inductive Types) |
+| `induction h` in `inv_reachable` | The induction that turns "`Inv` holds initially and every step keeps it" into "`Inv` holds in every reachable state". | Ch. 7, Ch. 8 |
+| `structure ConfigInv … `, `structure Inv … extends …` | Record types whose fields are propositions. `Inv` extends five sub-records, so each conjunct has a name (`h.knownEq`), can be cited alone, and the five layers can be proved separately and assembled with `where`. | Ch. 9, Structures and Records |
+| `theorem inv_takeover : Inv … where toConfigInv := …` | A proof written as a term, field by field, rather than as a tactic script. TPIL contrasts term-style and tactic-style proofs and notes that tactic proofs are harder to read because the reader must predict the effect of each step; where a proof is an assembly of named parts we write it as a term. | Ch. 3, Ch. 5 (introduction) |
+| `by … · … · …`, `show …`, `have …`, `refine ⟨…, ?_⟩`, `exact …` | Tactic proofs structured so each sub-goal is a bullet (`·`) that must be closed in place, with `show` stating the goal being proved. TPIL recommends this structure for readability and robustness, and recommends `exact` over `apply` where the term should close the goal exactly, because a failure then points at the real problem. | Ch. 5, Tactics (§5.4, Structuring Tactic Proofs) |
+| `variable {Node : Type} [DecidableEq Node]`, section variables for guards in `Preserve/` | Parameters shared by every declaration in a section or file, so a theorem's statement shows only what is specific to it. | Ch. 6, Interacting with Lean (§6.3, §6.4) |
+| `⟨…, …⟩` | Anonymous constructor notation, used to build a conjunction, an existential, or a structure in one expression. | Ch. 3, Ch. 9 |
+| `by decide` in `Counterexample.lean` | Lean evaluates a decidable proposition on concrete data and the evaluation is the proof. The guards and properties are decidable on `Fin 3` states, so each counterexample run is checked by running it. | Ch. 10, Type Classes (Decidable Propositions) |
+| `noncomputable def fence … := sInf …` | A definition that uses classical reasoning and so has no executable code. Lean requires it to be marked. | Ch. 12, Axioms and Computation |
+| `#print axioms` in `Check.lean`; `propext`, `Classical.choice`, `Quot.sound` | The command that lists what a theorem rests on, and the three axioms Lean's standard library and Mathlib build on. `Quot.sound` enters through function extensionality (`funext`), `Classical.choice` through `sInf` and `Set.encard`. A `sorry` would appear here as `sorryAx`. | Ch. 12, Axioms and Computation |
+
+A note on reading proof bodies, for anyone who wants to. TPIL's point about
+tactic proofs applies: the text alone does not show the goal at each step. Open
+the file in VS Code with the Lean extension and the goal view shows the
+hypotheses and the goal wherever the cursor is. That is how the proofs were
+written, and it is the only practical way to read `Preserve/`. The theorem
+statements, `Model.lean`, and the docstrings in `Inv.lean` are written to be
+read without it.
 
 ---
 
