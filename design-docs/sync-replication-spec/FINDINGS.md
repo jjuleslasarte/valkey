@@ -2,13 +2,26 @@
 
 Source: [Valkey Durability: Synchronous Replication Architecture](https://docs.google.com/document/d/15-VWM9KR2dfG4Y05RVF3tOnaVoYgKhmiFQ8jJZtxirg/edit?tab=t.0#heading=h.2sacx7to1xu)
 (`design-docs/sync-replication.md` in
-[valkey#5286](https://github.com/valkey-io/valkey/pull/5286)). Each finding has a TLC counterexample in
-`spec/results/` and was independently reviewed by three reviewers.
+[valkey#5286](https://github.com/valkey-io/valkey/pull/5286)). F1-F12 were
+independently reviewed by three reviewers.
 
-The findings come from bounded model checking. The fixes for F1, F2, F5 and
-the lease timing (F11, F12) are also proven in Lean without bounds; each
-entry says which. Bounds are stated with
-each result.
+The findings come from bounded model checking. Each TLC result is a named
+configuration in `spec/`; `spec/expected.tsv` records its expected outcome and
+`spec/regress.sh` re-checks it. The TLC output files are not kept in the
+repository, so rerun a configuration to see its trace. F3 and F4 are
+observations from writing the model and have no counterexample.
+
+Where a fix is also proven in Lean without bounds, the entry names the theorem:
+F1, F2, F5, the incarnation check, and the lease timing (F11, F12). For F1, F2,
+F5, the incarnation check and the survival condition there is also a Lean
+counterexample: a run of the model with that item removed, every step checked
+by Lean. Bounds are stated with each result.
+
+The Lean counterexamples `RestartProof.noRebuild_unsafe`, `noIncCheck_unsafe`
+and `noSurvivor_loses` are on the Lean proof branch (`sync-repl-lean`,
+`design-docs/sync-replication-spec/lean/RestartProof/Counterexample.lean`);
+this branch's `lean/` predates them. Every other theorem named here is in
+this branch's `lean/`.
 
 ## F1. Promotion after takeover can lose an acknowledged write
 
@@ -58,9 +71,8 @@ only once the empty new primary commits and acknowledges a conflicting
 write. Safe runs (iteration 2, merged model): `Shard_m_safe` 24.2M distinct
 states, `Shard_m_safeMin0` 46.1M (3 nodes, 2 writes, 5 config changes,
 1 crash, no restarts); `Shard_f_safe` 1.04M (1 write, with restarts). The
-first two counts are as reported at the time; their TLC logs were not kept
-in `spec/results/`, so reproduce them with `spec/regress.sh` (several hours
-each). `Shard_f_safe.out` is in `spec/results/`.
+counts are as reported at the time; reproduce them with `spec/regress.sh`
+(the first two take several hours each).
 
 **Proof status (CoreRecon):** the fix as proposed, with promotion catch-up
 and full resync measured against the inherited log while unreconciled, is
@@ -70,21 +82,25 @@ promotion or resync until reconciled) is safe but deadlocks at min-sync ≥ 1
 after a takeover that leaves no sync replica: `CoreRecon_strictReachLoneReconMin1`
 explores the full state space without ever reconciling such a primary,
 while `CoreRecon_ReachLoneReconMin1` (the fix) reconciles it in 12 states.
+With restarts as well, the same fix is part of `RestartProof.safety` (see F5).
+Lean counterexample without the fix: `CoreProof.noReconcile_unsafe` (11 steps)
+and `ReconProof.noReconcile_unsafe`.
 
 ## F2. Held replies must be fenced by primaryship, not only by offset
 
 **Status:** confirmed by TLC, and all 3 reviewers agree.
 
-**Proof status:** with the F1 and F2 fixes, the Lean theorem
-`AckProof.ackSafety` (`lean/AckProof/`, `spec/CoreAck.tla`) proves that no
-acknowledged write is lost in Core, for any number of nodes and any log
-length. Scope: Core's model (min-sync = 0, no restarts, no data loss, no
-forced failover, writes identified by offset and primaryship term), and
-Core's stricter reconciliation rule. The fence uses the node's local,
-possibly stale view of its primaryship. Without the reply fence,
-`CoreAck_noReplyFence` (TLC) and `noReplyFence_unsafe` (Lean) acknowledge a
-write that is not in the history. Reviewed in round 4: sound within that
-scope.
+**Proof status:** with the F1 and F2 fixes, no acknowledged write is lost,
+for any number of nodes and any log length. `AckProof.ackSafety`
+(`lean/AckProof/`, `spec/CoreAck.tla`) proves it in Core's model: min-sync = 0,
+no restarts, Core's stricter reconciliation rule. `RestartProof.ackSafety` and
+`ackedHeld` prove it for every min-sync value, with restarts with and without
+data, given the F5 fix and the survival condition (see below). Neither covers
+forced failover. Writes are identified by offset and primaryship term, and the
+fence uses the node's local, possibly stale view of its primaryship. Without
+the reply fence, `CoreAck_noReplyFence` (TLC) and `AckProof.noReplyFence_unsafe`
+(Lean, 14 steps) acknowledge a write that is not in the history. Reviewed in
+round 4: sound within that scope.
 
 Section 1 releases a held reply when the committed offset passes a bare
 offset boundary in the output buffer. Offsets are reused after a full
@@ -131,41 +147,101 @@ the reason.
 
 ## F5. A restarted primary must rebuild its sync set from the config
 
-**Update (CoreRestart, commit 370ca9d):** without the fix, a committed
-write can be lost (`CoreRestart_noRebuildMin1Loss`, 22 states, min-sync =
-1): after the restart n1 commits with only n3's ack; n2, still eligible and
-without the write, takes over, resyncs n1 and commits a different write at
-offset 1. The lost write was committed but not acknowledged (its held reply
-was dropped at the restart). Shard's bounds (one client write) did not reach
-this. With the fix, `RestartProof.safety`, `ackSafety`, `ackedHeld` (Lean,
-every min-sync, unbounded restarts) prove no acknowledged write is lost
-while some other authoritative node keeps its data at every restart without
-data; `commit_two_copies` shows min-sync >= 1 puts each committed write on
-two authoritative nodes. The text below is the earlier status.
-
-**Status:** core invariant breaks; no client-visible loss found within
-bounds. Reviewers split 2/3 on calling it a doc gap. The third reviewer traced
-its first counterexample to a flaw in my model (reconciliation bypassed
-min-sync-replicas). That flaw is fixed, and the invariant still breaks at
-min-sync = 1.
+**Status:** confirmed: without the fix a committed write can be lost. The
+reviewers split 2/3 on calling it a doc gap when only the invariant was known
+to break (see "History" below); the loss found since settles it.
 
 The sync set the primary counts acks from lives in memory, while the doc
 records eligibility in Cluster V2. Section 5, "Restarts", says only that
-lease state is in memory. Counterexample `Shard_f_noRestoreMin1`, 12 states:
-1. n1 (primary) and n2 (eligible) are running.
-2. n1 crashes and restarts with its data, with an empty sync set.
-3. n1 promotes n3 and commits a write with only n3's ack.
-4. n2 is still eligible but does not have the write.
+lease state is in memory. A primary that restarts with its data comes back
+with an empty sync set and can commit without an eligible replica.
 
-That breaks "every eligible replica holds every committed write". No
-acknowledged write was lost within the bounds: `Shard_f_noRestoreMin1Loss`
-is clean at 5 configuration changes and also at 6 (4.04M distinct states).
-A loss would need n2 to take over afterwards and commit a conflicting write.
+**Counterexample** (Lean `RestartProof.noRebuild_unsafe`, 9 steps,
+min-sync = 1; TLC `CoreRestart_noRebuildMin1`, 10 states, breaks the same
+invariant):
+1. n0 is primary. It counts n1, makes it eligible, and writes.
+2. n0 restarts with its data. Its sync set is empty.
+3. n2 replicates and acknowledges the write; n0 counts n2 and makes it
+   eligible.
+4. n0 commits with n2's ack only. n1 is eligible and authoritative but does
+   not have the committed write.
+
+**Loss** (`CoreRestart_noRebuildMin1Loss`, 22 states, nodes n1-n3): after the
+restart n1 commits with only n3's ack; n2, still eligible and without the
+write, takes over, resyncs n1 and commits a different write at offset 1. The
+lost write was committed but not acknowledged (its held reply was dropped at
+the restart). `CoreRestart_noRebuildMin1Ack` shows an acknowledged write
+missing from an authoritative node.
 
 **Proposed doc change:** a primary that restarts with its data rebuilds its
 sync set from the eligible replicas in the current configuration (whose
 incarnations match), discards cached acks, and commits nothing until fresh
 acks arrive.
+
+**Proof status:** with the fix, `RestartProof.safety`, `ackSafety` and
+`ackedHeld` (Lean, every min-sync, any number of nodes, unbounded restarts)
+prove that every authoritative node holds the committed history and no
+acknowledged write is lost, given the survival condition at every restart
+without data. `commit_two_copies` shows min-sync >= 1 puts each committed
+write on two authoritative nodes.
+
+**History:** the first counterexample (`Shard_f_noRestoreMin1`, 12 states)
+broke only the invariant. Within Shard's bounds (one client write) no loss was
+found: `Shard_f_noRestoreMin1Loss` is clean at 5 and 6 configuration changes
+(4.04M distinct states). One reviewer traced an earlier version of that
+counterexample to a flaw in my model (reconciliation bypassed
+min-sync-replicas); that flaw was fixed and the invariant still broke.
+CoreRestart (commit 370ca9d) then found the loss above.
+
+## Incarnation check on primaryship
+
+**Status:** found while modelling restarts (CoreRestart). Not yet reviewed by
+the panel as a separate finding; it is in the Lean write-up, which was
+reviewed adversarially.
+
+Section 6 says the takeover compare-and-set checks the incarnation, so a node
+that came back empty cannot be promoted. That is not enough: the node may
+already be the primary.
+
+**Counterexample** (Lean `RestartProof.noIncCheck_unsafe`, 9 steps,
+min-sync = 1, every other fix on):
+1. A write commits on n0 (primary) and n1 (eligible).
+2. n0 restarts empty, with a new incarnation. n1 keeps the write.
+3. n0 keeps acting as primary on its stale configuration. It counts n2, whose
+   log is empty, and makes it eligible.
+4. n2 is authoritative without the committed write.
+
+TLC `CoreRestart_noIncMin1` finds the same violation with all three
+incarnation checks below removed at once.
+
+**Proposed doc change:** a node acts as primary (counts replicas, changes
+eligibility, commits, releases replies) only while its own configuration
+records its current incarnation.
+
+**Scope:** the model also checks incarnations in two other places: a primary
+does not count an eligible replica whose recorded incarnation does not match
+(`Count`), and only matching replicas count toward min-sync-replicas
+(`Writable`). The proofs use both, but no counterexample shows that either is
+needed on its own.
+
+## Survival condition (an assumption, not a defect)
+
+The design accepts that committed writes are lost if every member of the sync
+replica set loses its data at once (section 6, "Correlated data loss is
+detected"). The proofs therefore assume that at every restart without data,
+some other authoritative node keeps its data. This entry records that the
+guarantee depends on it.
+
+**Counterexample** (Lean `RestartProof.noSurvivor_loses`, 9 steps; TLC
+`CoreRestart_noSurvivorMin0`, `CoreRestart_noSurvivorMin1`): a write commits
+on n0 and n1, n1 restarts empty, then n0 restarts empty. No node holds the
+write, and no node is authoritative. Because no node is authoritative,
+"every authoritative node holds the committed history" holds only vacuously,
+so the Lean theorem states the loss directly.
+
+**Proposed doc change:** state the durability guarantee with this condition.
+The design's detection of the case (no eligible replica with a matching
+incarnation, so the shard stays unavailable) is not proven.
 
 ## F6. Re-promotion after a restart: not a doc gap if demotion is atomic
 
@@ -295,12 +371,16 @@ delay, in both the additive and the rate-bounded clock model):
 - `asym_safe`: with the asymmetric rule, `Margin >= 2 * Drift` rules out
   any overlap.
 - `asym_tight`: below that bound an overlap exists.
+- `asym_safe_iff`: the two together: safe exactly when `Margin >= 2 * Drift`,
+  apart from the degenerate case where the margin is the whole lease.
 - `literal_unsafe`: the literal reading (both sides subtract the margin) is
-  unsafe for every margin once drift is positive.
+  unsafe for every margin shorter than the lease once drift is positive.
 
 ## F12. The "Lease durations" rule leaves out the round trip and needs 2 × drift
 
-**Status:** proven in Lean (`lean/Lease/Durations.lean`). Not reviewed yet.
+**Status:** proven in Lean (`lean/Lease/Durations.lean`). Reviewed with the
+Lean write-up, which corrected an earlier claim: `demotion_in_time` gives a
+sufficient condition, not an exact one.
 
 Section 5, "Lease durations", says: read lease + time to commit a demotion
 to the cluster bus + drift margin < primary lease. The aim is that a failed
@@ -358,8 +438,10 @@ The review showed that is only half supported:
   They show nothing about replica reads. Not modelled: Cluster V2 commit
   delay during demotion (the doc's "read lease + bus commit + drift <
   primary lease"), restarts waiting one lease, and epoch/incarnation on
-  lease traffic. The shared host disk is at 100% (3 GB free), so the
-  re-runs are blocked.
+  lease traffic. The safe runs `Leases_safe`, `Leases_safe2` and
+  `Leases_safe2T7` (PrimDur=5, ReadDur=2) were stopped unfinished on
+  4 November when the host disk filled (`Leases_safe2` at 185M distinct
+  states) and have not been rerun.
 - Step 3: MaxOps = 1 (complete). The MaxOps = 2 run never ran (its config
   was deleted when the configs were regenerated). Config
   learning after a restart is instant, and ACKs carry no epoch or
