@@ -1,0 +1,11 @@
+*.bin
+spec/results/
+spec/traces/
+states/
+tools/*.jar
+tools/apalache-*/
+tools/elan/
+tools/elan-*
+xcheck/*.dot
+xcheck/tlc.out
+xcheck/tlc_ack.out

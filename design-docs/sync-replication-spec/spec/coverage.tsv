@@ -1,0 +1,21 @@
+# cfg	actions allowed to generate no state (comma-separated, sorted)	Reason
+DurableShard_safe.cfg	LossyTruncate	AllowLossyOps=FALSE
+SyncCommit_live.cfg	FinishPromote,Fsync,ReleaseReadUncommitted,ReleaseWriteUncommitted,StartPromote	AOF=FALSE; AtomicPromote=TRUE; HealthySpec has no demotion
+Shard_f_noCatchUp.cfg	EarlyUncount,FinishCount,ForceTakeover,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount)
+Shard_f_noCatchUpLoss.cfg	EarlyUncount,FinishCount,ForceTakeover,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount)
+Shard_f_noInc.cfg	EarlyUncount,FinishCount,ForceTakeover,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount)
+Shard_f_noRestoreLoss.cfg	EarlyUncount,FinishCount,ForceTakeover,RejectWrite,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount); MinSync=0: always writable
+Shard_f_noRestoreMin1Loss.cfg	EarlyUncount,FinishCount,ForceTakeover,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount)
+Shard_f_safe.cfg	EarlyUncount,FinishCount,ForceTakeover,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount)
+Shard_f_safeMin0.cfg	EarlyUncount,FinishCount,ForceTakeover,RejectWrite,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount); MinSync=0: always writable
+Shard_m_safe.cfg	EarlyUncount,FinishCount,ForceTakeover,Restart,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount); MaxRestarts=0 (Restart)
+Shard_m_safeMin0.cfg	EarlyUncount,FinishCount,ForceTakeover,RejectWrite,Restart,StartCount	AllowForce=FALSE; AtomicPromote=TRUE (StartCount, FinishCount); EarlyDrop=FALSE (EarlyUncount); MaxRestarts=0 (Restart); MinSync=0: always writable
+CoreAck_safe.cfg	CEarlyUncount	EarlyDrop=FALSE
+CoreRecon_safeMin0.cfg	EarlyUncount	EarlyDrop=FALSE
+CoreRecon_safeMin1.cfg	EarlyUncount	EarlyDrop=FALSE
+CoreRecon_strictMin0.cfg	EarlyUncount	EarlyDrop=FALSE
+CoreRecon_strictMin1.cfg	EarlyUncount	EarlyDrop=FALSE
+CoreRecon_strictReachLoneReconMin1.cfg	EarlyUncount	EarlyDrop=FALSE
+CoreRestart_safeMin0.cfg	EarlyUncount	EarlyDrop=FALSE
+CoreRestart_safeMin1.cfg	EarlyUncount	EarlyDrop=FALSE
+CoreRestart_twoCopiesMin1.cfg	EarlyUncount	EarlyDrop=FALSE
