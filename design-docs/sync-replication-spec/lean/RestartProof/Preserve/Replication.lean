@@ -40,6 +40,8 @@ theorem inv_grow {s : State Node} (h : Inv s) (L : Node → List Nat)
     show (L p).take (s.acked p n) <+: L n
     rw [← prefix_take_eq (hL p) (h.ackedLe p n hp)]
     exact (h.ackHolds p n hp hn hf).trans (hL n)
+  ackedHigh := h.ackedHigh
+  histAck := h.histAck
   syncNew := h.syncNew
   reconLen := Nat.le_trans h.reconLen (hL _).length_le
   syncCommit := h.syncCommit
@@ -48,7 +50,7 @@ theorem inv_grow {s : State Node} (h : Inv s) (L : Node → List Nat)
   knownIncLe := h.knownIncLe
   authEx := h.authEx
   histLe := h.histLe
-  stale := fun p hp hv => (h.stale p hp hv).mono rfl rfl rfl rfl hL
+  stale := fun p hp hv => (h.stale p hp hv).mono rfl rfl rfl rfl hL (fun _ => Nat.le_refl _)
     (fun r => h.ackedLe p r hp) (fun _ x => x) (fun _ _ => rfl)
 
 theorem grow_upd (L : Node → List Nat) (p : Node) (m : List Nat) :
@@ -98,6 +100,12 @@ theorem repl_ack : ReplInv (ack s r) := by
     · obtain ⟨rfl, rfl⟩ := hc
       rw [← prefix_take_eq hpre (Nat.le_refl _), List.take_length]
     · exact h.ackHolds q n hq hn hf
+  ackedHigh := by
+    intro q n hq hn hf
+    show (ack s r).acked q n ≤ (ack s r).ackHigh n
+    rw [hA]; split_ifs with hc
+    · obtain ⟨rfl, rfl⟩ := hc; exact ack_ackHigh_self _
+    · exact Nat.le_trans (h.ackedHigh q n hq hn hf) (ack_ackHigh_le _ n)
   syncCommit := by
     intro q x hq hs
     show _ ≤ (ack s r).acked q x
@@ -121,9 +129,14 @@ theorem membership_ack : MembershipInv (ack s r) := by
     · exact b
   eligFol := h.eligFol }
 
-/-- Ack changes no commit point, catch-up point or history. -/
-theorem commit_ack : CommitInv (ack s r) :=
-  (h.toCommitInv).frame rfl rfl rfl rfl rfl rfl
+/-- Ack changes no commit point, catch-up point or history, and only raises a high-water mark. -/
+theorem commit_ack : CommitInv (ack s r) where
+  caLen := h.caLen
+  caHist := h.caHist
+  caEq := h.caEq
+  reconLen := h.reconLen
+  histLe := h.histLe
+  histAck := fun n hn => Nat.le_trans (h.histAck n hn) (ack_ackHigh_le r n)
 
 /-- Only the acknowledgement of a replica that still follows its primary moves, so no fence moves. -/
 theorem failover_ack : FailoverInv (ack s r) := by
@@ -133,7 +146,7 @@ theorem failover_ack : FailoverInv (ack s r) := by
   stale := by
     -- Ack moves only the acknowledgement of a replica that follows its primary.
     intro p hp hv
-    refine (h.stale p hp hv).mono rfl rfl rfl rfl (fun _ => List.prefix_refl _)
+    refine (h.stale p hp hv).mono rfl rfl rfl rfl (fun _ => List.prefix_refl _) (ack_ackHigh_le r)
       (fun x => h.ackedLe p x hp) (fun _ x => x) ?_
     intro x hx
     show (ack s r).acked p x = s.acked p x
@@ -211,6 +224,12 @@ theorem repl_resync : ReplInv (resync true s r) := by
     · by_cases em : m = r
       · subst em; exact absurd ⟨hf.symm, rfl⟩ c
       · rw [hLo m em]; exact h.ackHolds p m hp hm hf
+  ackedHigh := by
+    intro p m hp hm hf
+    show (resync true s r).acked p m ≤ s.ackHigh m
+    rw [hA]; split_ifs with c
+    · exact Nat.zero_le _
+    · exact h.ackedHigh p m hp hm hf
   syncCommit := by
     intro q x hq hs
     rw [hCo q (htpne q hq), hAs q x hs]; exact h.syncCommit q x hq hs }
@@ -270,7 +289,8 @@ theorem commit_resync : CommitInv (resync true s r) := by
   histLe := by
     intro hpa
     show s.hist.length ≤ (resync true s r).commit s.cfg.prim ∨ _
-    rw [hCo _ (Ne.symm hrprim)]; exact h.histLe hpa }
+    rw [hCo _ (Ne.symm hrprim)]; exact h.histLe hpa
+  histAck := h.histAck }
 
 /-- `r` is neither a primary nor eligible (`resync_facts`), and no counted acknowledgement
 moves, so every fence and everything it covers is unchanged. -/
@@ -289,9 +309,11 @@ theorem failover_resync : FailoverInv (resync true s r) := by
   stale := by
     intro x hx hv
     have hxr := htpne x hx
-    exact (h.stale x hx hv).transfer rfl (fun _ => rfl) (hAs x) (hLo x hxr) rfl id
-      (fun _ => Nat.le_refl _) (fun _ => hLo _ (Ne.symm hrprim))
-      (fun m hm hi => Or.inl ⟨hm, hi, hLo m (hnotr m (Or.inl hm))⟩)
+    have hF := h.stale x hx hv
+    exact hF.transfer rfl (fun _ => rfl) (hAs x) (hLo x hxr) rfl id
+      (fun hq => hF.reconLe hq) (fun hq => by rw [hLo _ (Ne.symm hrprim)]; exact hF.primHolds hq)
+      (fun hq => hF.primAck hq)
+      (fun m hm hi => Or.inl ⟨hm, hi, hLo m (hnotr m (Or.inl hm)), Nat.le_refl _⟩)
   authEx := h.authEx }
 
 /-- `r` is not authoritative (`resync_facts`), and no authoritative node's log moves. -/

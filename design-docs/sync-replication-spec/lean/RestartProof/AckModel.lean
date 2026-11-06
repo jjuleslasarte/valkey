@@ -56,12 +56,13 @@ def dropHeld (held : List (Held Node)) (n : Node) : List (Held Node) :=
 own actions on held replies. -/
 inductive AAction (Node : Type)
   | core (μ : Action Node) | write (p : Node) | release (h : Held Node) | abort (h : Held Node)
-  | restartE (n : Node) | restartK (n : Node)
+  | restartE (n : Node) | restartK (n : Node) | restartP (n : Node) (k : Nat)
 
 /-- `m` = MinSync, `rf` = ReconcileFirst, `nf` = NoReplyFence, `rb` = RebuildSync. -/
 inductive AStep (m : Nat) (rf nf rb : Bool) : AState Node → AAction Node → AState Node → Prop
+  /-- A replication action other than a restart; held replies are unchanged (`Keep`). -/
   | core (a : AState Node) (μ : Action Node) (c : State Node) : Step m rf rb a.core μ c →
-      AStep m rf nf rb a (.core μ) ⟨c, a.held, a.okd⟩
+      μ.isRestart = false → AStep m rf nf rb a (.core μ) ⟨c, a.held, a.okd⟩
   | write (a : AState Node) (p : Node) : ThinksPrimary a.core p → Writable m a.core p →
       Reconciled rf a.core p → AStep m rf nf rb a (.write p) (write a p)
   | release (a : AState Node) (h : Held Node) : h ∈ a.held → h.2.1 ≤ a.core.commit h.1 →
@@ -72,6 +73,15 @@ inductive AStep (m : Nat) (rf nf rb : Bool) : AState Node → AAction Node → A
       AStep m rf nf rb a (.restartE n) ⟨restartEmpty a.core n, dropHeld a.held n, a.okd⟩
   | restartK (a : AState Node) (n : Node) : KnowsLatest a.core n →
       AStep m rf nf rb a (.restartK n) ⟨restartKeep rb a.core n, dropHeld a.held n, a.okd⟩
+  /-- RestartPartial, keeping the incarnation; `n`'s held replies are dropped with its
+  client connections, as for the other restarts. -/
+  | restartPK (a : AState Node) (n : Node) (k : Nat) : KnowsLatest a.core n →
+      k < (a.core.log n).length → a.core.ackHigh n ≤ k →
+      AStep m rf nf rb a (.restartP n k) ⟨restartPartialKeep rb a.core n k, dropHeld a.held n, a.okd⟩
+  /-- RestartPartial, taking a new incarnation. -/
+  | restartPF (a : AState Node) (n : Node) (k : Nat) : KnowsLatest a.core n →
+      k < (a.core.log n).length → k < a.core.ackHigh n → (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      AStep m rf nf rb a (.restartP n k) ⟨restartPartialFresh a.core n k, dropHeld a.held n, a.okd⟩
 
 /-- The acknowledgement layer as a labelled transition system. -/
 def alts (m : Nat) (rf nf rb : Bool) : LTS (AState Node) (AAction Node) where

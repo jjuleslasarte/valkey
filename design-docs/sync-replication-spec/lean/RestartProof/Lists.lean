@@ -30,6 +30,13 @@ theorem le_encard_iff_list (m : Nat) (S : Set α) :
           rw [Set.encard_coe_eq_coe_finsetCard, List.toFinset_card_of_nodup hn]
       _ ≤ S.encard := Set.encard_le_encard (fun r hr' => hr r (by simpa using hr'))
 
+/-- A prefix that fits in the first `k` entries is a prefix of those entries. -/
+theorem prefix_take_of_length_le {l L : List α} {k : Nat} (h : l <+: L) (hk : l.length ≤ k) :
+    l <+: L.take k := by
+  obtain ⟨t, rfl⟩ := h
+  rw [List.take_append, List.take_of_length_le hk]
+  exact List.prefix_append _ _
+
 /-- A prefix and its list agree on any shorter take. -/
 theorem prefix_take_eq {a l : List α} (h : a <+: l) {k : Nat} (hk : k ≤ a.length) :
     a.take k = l.take k := by

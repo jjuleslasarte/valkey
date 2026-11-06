@@ -46,10 +46,15 @@ structure Fenced (s : State Node) (p : Node) : Prop where
   reconLe   : PrimaryAuthoritative s → fence s p ≤ s.recon s.cfg.prim
   /-- While the current primary is authoritative, it holds `p`'s log up to the fence. -/
   primHolds : PrimaryAuthoritative s → (s.log p).take (fence s p) <+: s.log s.cfg.prim
-  /-- Every eligible replica holds `p`'s log up to the fence, or still follows `p`
-  and is counted by it (so `p` cannot commit past what that replica holds). -/
+  /-- ... and has acknowledged up to the fence, so a stale restore that keeps its
+  incarnation (`ackHigh ≤ k`) keeps `p`'s log up to the fence (RestartPartial). -/
+  primAck   : PrimaryAuthoritative s → fence s p ≤ s.ackHigh s.cfg.prim
+  /-- Every eligible replica holds, and has acknowledged, `p`'s log up to the fence, or
+  still follows `p` and is counted by it (so `p` cannot commit past what that replica
+  holds). -/
   eligHolds : ∀ m, s.cfg.elig m = true → s.cfg.inc m = s.inc m →
-    (s.log p).take (fence s p) <+: s.log m ∨ (s.sync p m = true ∧ (s.known m).prim = p)
+    ((s.log p).take (fence s p) <+: s.log m ∧ fence s p ≤ s.ackHigh m) ∨
+      (s.sync p m = true ∧ (s.known m).prim = p)
 
 theorem fence_le {s : State Node} {p r : Node} (hr : r ∈ leftSync s p) : fence s p ≤ s.acked p r :=
   Nat.sInf_le ⟨r, hr, rfl⟩
@@ -60,14 +65,17 @@ property still holds at a smaller offset. -/
 theorem Fenced.of_left {s : State Node} {p w : Node} (hw : w ∈ leftSync s p)
     (hrec : PrimaryAuthoritative s → s.acked p w ≤ s.recon s.cfg.prim)
     (hprim : PrimaryAuthoritative s → (s.log p).take (s.acked p w) <+: s.log s.cfg.prim)
+    (hprimAck : PrimaryAuthoritative s → s.acked p w ≤ s.ackHigh s.cfg.prim)
     (helig : ∀ m, s.cfg.elig m = true → s.cfg.inc m = s.inc m →
-      (s.log p).take (s.acked p w) <+: s.log m ∨ (s.sync p m = true ∧ (s.known m).prim = p)) :
+      ((s.log p).take (s.acked p w) <+: s.log m ∧ s.acked p w ≤ s.ackHigh m) ∨
+        (s.sync p m = true ∧ (s.known m).prim = p)) :
     Fenced s p := by
   have hle := fence_le hw
-  refine ⟨⟨w, hw⟩, fun hp => hle.trans (hrec hp), fun hp => take_mono_prefix hle (hprim hp), ?_⟩
+  refine ⟨⟨w, hw⟩, fun hp => hle.trans (hrec hp), fun hp => take_mono_prefix hle (hprim hp),
+    fun hp => hle.trans (hprimAck hp), ?_⟩
   intro m hm hi
-  rcases helig m hm hi with d | d
-  · exact Or.inl (take_mono_prefix hle d)
+  rcases helig m hm hi with ⟨d, da⟩ | d
+  · exact Or.inl ⟨take_mono_prefix hle d, hle.trans da⟩
   · exact Or.inr d
 
 /-- The fence is the acknowledgement of some replica that has left. -/
@@ -80,6 +88,7 @@ the nodes' views of it and `p`'s acknowledgements from departed replicas alone k
 theorem Fenced.mono {s s' : State Node} {p : Node} (hF : Fenced s p)
     (hcfg : s'.cfg = s.cfg) (hknown : s'.known = s.known) (hrecon : s'.recon = s.recon)
     (hinc : s'.inc = s.inc) (hgrow : ∀ x, s.log x <+: s'.log x)
+    (hah : ∀ x, s.ackHigh x ≤ s'.ackHigh x)
     (hlp : ∀ r, s.acked p r ≤ (s.log p).length)
     (hsync : ∀ r, s.sync p r = true → s'.sync p r = true)
     (hacked : ∀ r, (s.known r).prim ≠ p → s'.acked p r = s.acked p r) : Fenced s' p := by
@@ -89,38 +98,43 @@ theorem Fenced.mono {s s' : State Node} {p : Node} (hF : Fenced s p)
   have ha : s'.acked p w = fence s p := (hacked w hw2).trans hwF
   have e : (s'.log p).take (s'.acked p w) = (s.log p).take (fence s p) := by
     rw [ha]; exact (prefix_take_eq (hgrow p) (by rw [← hwF]; exact hlp w)).symm
-  refine Fenced.of_left (w := w) ⟨hsync w hw1, by rw [hknown]; exact hw2⟩ ?_ ?_ ?_
+  refine Fenced.of_left (w := w) ⟨hsync w hw1, by rw [hknown]; exact hw2⟩ ?_ ?_ ?_ ?_
   · intro hp; rw [ha, hrecon, hcfg]; exact hF.reconLe (hpa hp)
   · intro hp; rw [e, hcfg]; exact (hF.primHolds (hpa hp)).trans (hgrow _)
+  · intro hp; rw [ha, hcfg]; exact (hF.primAck (hpa hp)).trans (hah _)
   · intro m hm hi
     rw [hcfg] at hm; rw [hcfg, hinc] at hi
-    rcases hF.eligHolds m hm hi with d | ⟨d1, d2⟩
-    · left; rw [e]; exact d.trans (hgrow m)
+    rcases hF.eligHolds m hm hi with ⟨d, da⟩ | ⟨d1, d2⟩
+    · left; rw [e, ha]; exact ⟨d.trans (hgrow m), da.trans (hah m)⟩
     · right; exact ⟨hsync m d1, by rw [hknown]; exact d2⟩
 
-/-- A step that leaves `x`'s log, sync replica set and counted acknowledgements alone,
-does not move who follows whom, and gives every newly authoritative eligible replica
-`x`'s log up to the fence keeps `x` fenced (MakeEligible, MakeIneligible, Resync,
-the restarts of other nodes). -/
+/-- A step that leaves `x`'s log, sync replica set and counted acknowledgements alone
+and does not move who follows whom keeps `x` fenced, provided the current primary still
+satisfies the fence bounds and every authoritative eligible replica either is unchanged
+or holds (and has acknowledged) `x`'s log up to the fence (MakeEligible, MakeIneligible,
+Resync, the restarts). -/
 theorem Fenced.transfer {s s' : State Node} {x : Node} (hF : Fenced s x)
     (hsync : s'.sync x = s.sync x) (hkn : ∀ y, (s'.known y).prim = (s.known y).prim)
     (hack : ∀ r, s.sync x r = true → s'.acked x r = s.acked x r)
     (hlog : s'.log x = s.log x) (hprim : s'.cfg.prim = s.cfg.prim)
     (hpa : PrimaryAuthoritative s' → PrimaryAuthoritative s)
-    (hrec : PrimaryAuthoritative s' → s.recon s.cfg.prim ≤ s'.recon s.cfg.prim)
-    (hlp : PrimaryAuthoritative s' → s'.log s.cfg.prim = s.log s.cfg.prim)
+    (hrec : PrimaryAuthoritative s' → fence s x ≤ s'.recon s.cfg.prim)
+    (hlp : PrimaryAuthoritative s' → (s.log x).take (fence s x) <+: s'.log s.cfg.prim)
+    (hahp : PrimaryAuthoritative s' → fence s x ≤ s'.ackHigh s.cfg.prim)
     (hcov : ∀ m, s'.cfg.elig m = true → s'.cfg.inc m = s'.inc m →
-      (s.cfg.elig m = true ∧ s.cfg.inc m = s.inc m ∧ s'.log m = s.log m) ∨
-        (s.log x).take (fence s x) <+: s'.log m) : Fenced s' x := by
+      (s.cfg.elig m = true ∧ s.cfg.inc m = s.inc m ∧ s'.log m = s.log m ∧
+          s.ackHigh m ≤ s'.ackHigh m) ∨
+        ((s.log x).take (fence s x) <+: s'.log m ∧ fence s x ≤ s'.ackHigh m)) : Fenced s' x := by
   obtain ⟨w, ⟨hw1, hw2⟩, hwF⟩ := hF.attained
   have ha : s'.acked x w = fence s x := (hack w hw1).trans hwF
-  refine Fenced.of_left (w := w) ⟨by rw [hsync]; exact hw1, by rw [hkn]; exact hw2⟩ ?_ ?_ ?_
-  · intro hp; rw [ha, hprim]; exact (hF.reconLe (hpa hp)).trans (hrec hp)
-  · intro hp; rw [ha, hlog, hprim, hlp hp]; exact hF.primHolds (hpa hp)
+  refine Fenced.of_left (w := w) ⟨by rw [hsync]; exact hw1, by rw [hkn]; exact hw2⟩ ?_ ?_ ?_ ?_
+  · intro hp; rw [ha, hprim]; exact hrec hp
+  · intro hp; rw [ha, hlog, hprim]; exact hlp hp
+  · intro hp; rw [ha, hprim]; exact hahp hp
   · intro m hm hi
-    rcases hcov m hm hi with ⟨he, hi0, hl⟩ | d
-    · rcases hF.eligHolds m he hi0 with d | ⟨d1, d2⟩
-      · left; rw [ha, hlog, hl]; exact d
+    rcases hcov m hm hi with ⟨he, hi0, hl, hah⟩ | d
+    · rcases hF.eligHolds m he hi0 with ⟨d, da⟩ | ⟨d1, d2⟩
+      · left; rw [ha, hlog, hl]; exact ⟨d, da.trans hah⟩
       · right; rw [hsync, hkn]; exact ⟨d1, d2⟩
     · left; rw [ha, hlog]; exact d
 
@@ -170,6 +184,11 @@ structure ReplInv (s : State Node) : Prop where
   /-- A follower holds its primary's log up to the acknowledged offset. -/
   ackHolds   : ∀ p n, ThinksPrimary s p → n ≠ p → (s.known n).prim = p →
                  (s.log p).take (s.acked p n) <+: s.log n
+  /-- A follower's acknowledgement at its primary is within its own high-water mark:
+  what a primary believes a replica acknowledged, the replica remembers having
+  acknowledged. -/
+  ackedHigh  : ∀ p n, ThinksPrimary s p → n ≠ p → (s.known n).prim = p →
+                 s.acked p n ≤ s.ackHigh n
   /-- Commit rule: a primary never commits past a sync replica's acknowledgement. -/
   syncCommit : ∀ q r, ThinksPrimary s q → s.sync q r = true → s.commit q ≤ s.acked q r
 
@@ -204,6 +223,11 @@ structure CommitInv (s : State Node) : Prop where
   /-- While the current primary is authoritative, the whole committed history is below
   its commit point or its catch-up point: a new primary reconciles against all of it (F1). -/
   histLe     : PrimaryAuthoritative s → s.hist.length ≤ s.commit s.cfg.prim ∨ s.hist.length ≤ s.recon s.cfg.prim
+  /-- Every authoritative node has acknowledged the whole committed history: a replica
+  is counted, and so made eligible, only after acknowledging past the reconciliation
+  point, and a commit by the current primary waits for every counted replica. This is
+  what makes a stale restore at or above `ackHigh` safe (RestartPartial). -/
+  histAck    : ∀ n, IsAuthoritative s n → s.hist.length ≤ s.ackHigh n
 
 /-- **Failover.** A deposed primary cannot commit anything the new configuration does
 not hold ("Writes can't split-brain", design §5), and some node keeps the data (the
@@ -231,12 +255,15 @@ theorem ConfigInv.frame {s s' : State Node} (h : ConfigInv s)
 incarnation keeps `CommitInv`. -/
 theorem CommitInv.frame {s s' : State Node} (h : CommitInv s)
     (hcommit : s'.commit = s.commit) (hrecon : s'.recon = s.recon) (hlog : s'.log = s.log)
-    (hhist : s'.hist = s.hist) (hcfg : s'.cfg = s.cfg) (hinc : s'.inc = s.inc) : CommitInv s' := by
-  obtain ⟨h1, h2, h3, h4, h5⟩ := h
+    (hhist : s'.hist = s.hist) (hcfg : s'.cfg = s.cfg) (hinc : s'.inc = s.inc)
+    (hah : s'.ackHigh = s.ackHigh) : CommitInv s' := by
+  obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
   refine ⟨by rw [hcommit, hlog]; exact h1, by rw [hcommit, hhist]; exact h2,
-    by rw [hcommit, hlog, hhist]; exact h3, by rw [hrecon, hlog, hcfg]; exact h4, ?_⟩
-  intro hpa; rw [hhist, hcommit, hrecon, hcfg]
-  exact h5 (by unfold PrimaryAuthoritative at hpa ⊢; rw [hcfg, hinc] at hpa; exact hpa)
+    by rw [hcommit, hlog, hhist]; exact h3, by rw [hrecon, hlog, hcfg]; exact h4, ?_, ?_⟩
+  · intro hpa; rw [hhist, hcommit, hrecon, hcfg]
+    exact h5 (by unfold PrimaryAuthoritative at hpa ⊢; rw [hcfg, hinc] at hpa; exact hpa)
+  · intro n hn; rw [hhist, hah]
+    exact h6 n (by unfold IsAuthoritative at hn ⊢; rw [hcfg, hinc] at hn; exact hn)
 
 /-- A step that changes no sync replica set, acknowledgement, configuration, copy of it,
 incarnation or catch-up point keeps `MembershipInv`. -/
@@ -284,6 +311,8 @@ theorem inv_init (i : Node) : Inv (init i) where
   eligFol := by intro m h; simp [init, initCfg] at h
   histLe := by intro _; simp [init]
   stale := by intro p _ h; simp [init, initCfg] at h
+  ackedHigh := by intro p n _ _ _; simp [init]
+  histAck := by intro n _; simp [init]
 
 /-! ### Derived facts -/
 
@@ -348,12 +377,36 @@ theorem commit_holds {p : Node} (hp : ThinksPrimary s p) (hlen : s.commit p < (s
     obtain ⟨w, ⟨hw1, _⟩, hwF⟩ := hF.attained
     have hcw : s.commit p + 1 ≤ fence s p := hwF ▸ hcap w hw1
     rcases hm with he | rfl
-    · rcases hF.eligHolds m he hi with hd | ⟨hs, hf⟩
+    · rcases hF.eligHolds m he hi with ⟨hd, _⟩ | ⟨hs, hf⟩
       · exact take_mono_prefix hcw hd
       · by_cases hmp : m = p
         · subst hmp; exact List.take_prefix _ _
         · exact take_mono_prefix (hcap m hs) (h.ackHolds _ _ hp hmp hf)
     · exact take_mono_prefix hcw (hF.primHolds hi)
+
+/-- The acknowledgement side of `commit_holds`: if `p` may commit offset `c` by the
+commit rule, every other authoritative node has acknowledged the first `c+1` entries. -/
+theorem commit_ackHigh {p : Node} (hp : ThinksPrimary s p)
+    (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
+    ∀ m, IsAuthoritative s m → m ≠ p → s.commit p + 1 ≤ s.ackHigh m := by
+  intro m ⟨hm, hi⟩ hmp
+  rcases thinksPrimary_cases h hp with ⟨rfl, hk⟩ | hv
+  · -- `p` is the current primary: it counts `m`, and `m`'s acknowledgement is within
+    -- `m`'s high-water mark (or is 0, which the commit rule rules out).
+    rcases hm with he | rfl
+    · have hs := h.eligSync _ _ hp (by rw [hk]; exact he) (by rw [hk]; exact hi)
+      by_cases hf : (s.known m).prim = s.cfg.prim
+      · exact Nat.le_trans (hcap m hs) (h.ackedHigh _ m hp hmp hf)
+      · have := hcap m hs; rw [h.ackedPrim m hf] at this; omega
+    · exact absurd rfl hmp
+  · have hF := h.stale p hp hv
+    obtain ⟨w, ⟨hw1, _⟩, hwF⟩ := hF.attained
+    have hcw : s.commit p + 1 ≤ fence s p := hwF ▸ hcap w hw1
+    rcases hm with he | rfl
+    · rcases hF.eligHolds m he hi with ⟨_, hd⟩ | ⟨hs, hf⟩
+      · exact hcw.trans hd
+      · exact Nat.le_trans (hcap m hs) (h.ackedHigh p m hp hmp hf)
+    · exact hcw.trans (hF.primAck hi)
 
 end
 

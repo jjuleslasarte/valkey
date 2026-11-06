@@ -102,6 +102,11 @@ structure State (Node : Type) [DecidableEq Node] where
   recon  : Node → Nat
   /-- The term each node writes new entries with. -/
   term   : Node → Nat
+  /-- `ackHigh n`: the highest offset `n` has ever acknowledged, as a replica to a
+  primary (Ack) or as a primary to its clients (Commit). Node-local, and it must
+  survive a restart with data: a node that restarts from a persistence file covering
+  less than this has acknowledged writes it no longer holds (RestartPartial). -/
+  ackHigh : Node → Nat
   /-- Ghost variable: the committed history. No node stores it; it is extended the
   first time any node commits a given offset. -/
   hist   : List Nat
@@ -124,6 +129,7 @@ def init (i : Node) : State Node where
   commit := fun _ => 0
   recon  := fun _ => 0
   term   := fun n => if n = i then 1 else 0
+  ackHigh := fun _ => 0
   hist   := []
 
 /-- ThinksPrim(p): `p`'s own configuration names it primary and records its current
@@ -155,16 +161,20 @@ def appendWrite (s : State Node) (p : Node) : State Node :=
 def replicate (s : State Node) (r : Node) : State Node :=
   { s with log := upd s.log r (s.log r ++ [(s.log (primaryOf s r)).getD (s.log r).length 0]) }
 
-/-- Ack(r): `r`'s primary records that `r` holds its whole log. -/
+/-- Ack(r): `r`'s primary records that `r` holds its whole log, and `r` records that it
+has acknowledged up to there. -/
 def ack (s : State Node) (r : Node) : State Node :=
-  { s with acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r (s.log r).length) }
+  { s with acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r (s.log r).length),
+           ackHigh := upd s.ackHigh r (max (s.ackHigh r) (s.log r).length) }
 
 /-- Commit(p): `p` commits its next entry. If no node has committed this offset yet,
-the entry is appended to the ghost history. -/
+the entry is appended to the ghost history. A commit is `p`'s acknowledgement to its
+clients, so `p`'s high-water mark covers it. -/
 def commitNext (s : State Node) (p : Node) : State Node :=
   { s with commit := upd s.commit p (s.commit p + 1),
            hist := if s.commit p = s.hist.length
-                   then s.hist ++ [(s.log p).getD (s.commit p) 0] else s.hist }
+                   then s.hist ++ [(s.log p).getD (s.commit p) 0] else s.hist,
+           ackHigh := upd s.ackHigh p (max (s.ackHigh p) (s.commit p + 1)) }
 
 /-- Count(p, r): `p` adds `r` to its sync set. -/
 def count (s : State Node) (p r : Node) : State Node :=
@@ -258,6 +268,7 @@ primary forgets `n`'s ack and stops counting it. -/
 def restartEmpty (s : State Node) (n : Node) : State Node :=
   { s with log := upd s.log n [],
            inc := upd s.inc n (s.inc n + 1),
+           ackHigh := upd s.ackHigh n 0,
            commit := upd s.commit n 0,
            recon := upd s.recon n 0,
            sync := fun p => if p = n then (fun _ => false)
@@ -281,13 +292,32 @@ def restartKeep (rb : Bool) (s : State Node) (n : Node) : State Node :=
              (if rb = true ∧ (s.known n).prim = n ∧ (s.known n).inc n = s.inc n
               then rebuiltSync s n else fun _ => false) }
 
+/-- RestartPartial(n, k), keeping the incarnation: `n` restarts from a persistence
+file holding only the first `k` entries of its log. Everything else is RestartKeep on
+the truncated log: volatile state lost, catch-up point at the end of what it holds,
+sync replica set rebuilt if it is primary (F5). -/
+def restartPartialKeep (rb : Bool) (s : State Node) (n : Node) (k : Nat) : State Node :=
+  { restartKeep rb s n with log := upd s.log n ((s.log n).take k), recon := upd s.recon n k }
+
+/-- RestartPartial(n, k), taking a new incarnation: RestartEmpty, except that `n` keeps
+the first `k` entries of its log as a starting point for resynchronisation. -/
+def restartPartialFresh (s : State Node) (n : Node) (k : Nat) : State Node :=
+  { restartEmpty s n with log := upd s.log n ((s.log n).take k) }
+
 /-- The actions of CoreRestart's replication part, one per `Step` constructor. A run of
 the protocol is a list of actions, so a counterexample's trace can be read off its
-statement. -/
+statement. `restartPartial n k` labels both outcomes of a stale restore. -/
 inductive Action (Node : Type)
   | append (p : Node) | replicate (r : Node) | ack (r : Node) | commit (p : Node)
   | count (p r : Node) | makeElig (p r : Node) | makeInelig (p r : Node) | learn (n : Node)
   | takeover (n : Node) | resync (r : Node) | restartEmpty (n : Node) | restartKeep (n : Node)
+  | restartPartial (n : Node) (k : Nat)
+
+/-- The restart actions. The acknowledgement layer treats them apart from the other
+actions: a node's held replies die with its client connections when it restarts. -/
+def Action.isRestart : Action Node → Bool
+  | .restartEmpty _ | .restartKeep _ | .restartPartial _ _ => true
+  | _ => false
 
 /-- `Next` of CoreRestart (replication part). `m` = MinSync, `rf` = ReconcileFirst,
 `rb` = RebuildSync. Each constructor is one action: its arguments after the state
@@ -333,6 +363,16 @@ inductive Step (m : Nat) (rf rb : Bool) : State Node → Action Node → State N
   | restartEmpty (s n) : KnowsLatest s n → (∃ m, m ≠ n ∧ IsAuthoritative s m) → Step m rf rb s (.restartEmpty n) (restartEmpty s n)
   /-- A node that knows the latest configuration may restart and keep its data. -/
   | restartKeep (s n) : KnowsLatest s n → Step m rf rb s (.restartKeep n) (restartKeep rb s n)
+  /-- A node may restart from a persistence file holding only the first `k` entries of
+  its log. It keeps its incarnation only if the file covers every offset it has
+  acknowledged (`ackHigh n ≤ k`). -/
+  | restartPartialKeep (s n k) : KnowsLatest s n → k < (s.log n).length → s.ackHigh n ≤ k →
+      Step m rf rb s (.restartPartial n k) (restartPartialKeep rb s n k)
+  /-- Otherwise it takes a new incarnation and rejoins as after RestartEmpty, under the
+  same survival assumption, keeping the `k` entries it has. -/
+  | restartPartialFresh (s n k) : KnowsLatest s n → k < (s.log n).length → k < s.ackHigh n →
+      (∃ m, m ≠ n ∧ IsAuthoritative s m) →
+      Step m rf rb s (.restartPartial n k) (restartPartialFresh s n k)
 
 /-- The protocol as a labelled transition system (CSLib's `LTS`): `Step` is its
 transition relation, so CSLib's runs (`MTr`), reachability (`CanReach`), invariants

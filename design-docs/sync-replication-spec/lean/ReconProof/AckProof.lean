@@ -31,7 +31,7 @@ def AAction.toRestart : AAction Node → RestartProof.AAction Node
 theorem astep_emb {m : Nat} {rf nf rb : Bool} {a a' : AState Node} {μ : AAction Node}
     (h : AStep m rf nf a μ a') : RestartProof.AStep m rf nf rb (aemb a) μ.toRestart (aemb a') := by
   cases h with
-  | core _ c hc => exact .core (aemb a) _ (emb c) (step_emb hc)
+  | core μ c hc => exact .core (aemb a) _ (emb c) (step_emb hc) (by cases μ <;> rfl)
   | write p hp hw hr => exact .write (aemb a) p (thinksPrimary_emb.2 hp) (writable_emb hw) hr
   | release x hm hc hf =>
     exact .release (aemb a) x hm hc (fun e => fenced_emb.2 (hf e))

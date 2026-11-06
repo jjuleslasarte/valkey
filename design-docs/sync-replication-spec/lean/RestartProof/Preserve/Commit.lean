@@ -60,6 +60,7 @@ theorem repl_commit : ReplInv (commitNext s p) := by
   ackedPrim := h.ackedPrim
   ackedLe := h.ackedLe
   ackHolds := h.ackHolds
+  ackedHigh := fun q n hq hn hf => Nat.le_trans (h.ackedHigh q n hq hn hf) (commitNext_ackHigh_le p n)
   syncCommit := by
     intro q r hq hs
     show (commitNext s p).commit q ≤ _
@@ -117,6 +118,20 @@ theorem commit_commit : CommitInv (commitNext s p) := by
     split_ifs with hx
     · subst hx; exact hH1.symm
     · rw [h.caEq x]; exact prefix_take_eq hH2 (h.caHist x)
+  histAck := by
+    -- If the history grows, the new entry is at `p`'s commit point, which every other
+    -- authoritative node has acknowledged (`commit_ackHigh`) and `p` now has too.
+    intro n hn
+    have hn' : IsAuthoritative s n := hn
+    have hle := commitNext_ackHigh_le (s := s) p n
+    rcases Nat.lt_or_ge (commitNext s p).hist.length (s.hist.length + 1) with hl | hg
+    · exact Nat.le_trans (Nat.le_trans (Nat.le_of_lt_succ hl) (h.histAck n hn')) hle
+    · have he := hH4 (Nat.le_antisymm hH3 hg)
+      have hlen' : (commitNext s p).hist.length = s.commit p + 1 := by omega
+      rw [hlen']
+      by_cases hnp : n = p
+      · subst hnp; exact commitNext_ackHigh_self _
+      · exact Nat.le_trans (commit_ackHigh h hp hcap n hn' hnp) hle
   reconLen := h.reconLen
   histLe := by
     intro hpa
@@ -178,7 +193,7 @@ theorem failover_commit : FailoverInv (commitNext s p) := by
   exact {
   -- Commit moves only commit points and the history, which the fence does not mention.
   stale := fun q hq hv => (h.stale q hq hv).mono rfl rfl rfl rfl (fun _ => List.prefix_refl _)
-    (fun x => h.ackedLe q x hq) (fun _ x => x) (fun _ _ => rfl)
+    (commitNext_ackHigh_le p) (fun x => h.ackedLe q x hq) (fun _ x => x) (fun _ _ => rfl)
   authEx := h.authEx }
 
 /-- Every authoritative node already holds the newly committed entry (`commit_holds`). -/
@@ -249,6 +264,7 @@ theorem repl_count : ReplInv (count s p r) := by
   ackedPrim := h.ackedPrim
   ackedLe := h.ackedLe
   ackHolds := h.ackHolds
+  ackedHigh := h.ackedHigh
   syncCommit := by
     intro q x hq hs
     change (count s p r).sync q x = true at hs
@@ -277,7 +293,7 @@ theorem membership_count : MembershipInv (count s p r) := by
 
 /-- Count changes no commit point, catch-up point or history. -/
 theorem commit_count : CommitInv (count s p r) :=
-  (h.toCommitInv).frame rfl rfl rfl rfl rfl rfl
+  (h.toCommitInv).frame rfl rfl rfl rfl rfl rfl rfl
 
 /-- Adding a sync replica does not move a fence. -/
 theorem failover_count : FailoverInv (count s p r) := by
@@ -286,7 +302,7 @@ theorem failover_count : FailoverInv (count s p r) := by
   stale := by
     -- Count only adds a replica to a sync replica set.
     intro q hq hv
-    refine (h.stale q hq hv).mono rfl rfl rfl rfl (fun _ => List.prefix_refl _)
+    refine (h.stale q hq hv).mono rfl rfl rfl rfl (fun _ => List.prefix_refl _) (fun _ => Nat.le_refl _)
       (fun x => h.ackedLe q x hq) ?_ (fun _ _ => rfl)
     intro x hx; show (count s p r).sync q x = true; rw [hS]; simp [hx]
   authEx := h.authEx }

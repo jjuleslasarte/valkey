@@ -34,6 +34,7 @@ def emb (s : State Node) : RestartProof.State Node where
   commit := s.commit
   recon  := s.recon
   term   := s.term
+  ackHigh := s.ackHigh
   hist   := s.hist
 
 theorem emb_init (i : Node) : emb (init i) = RestartProof.init i := rfl

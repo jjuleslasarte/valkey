@@ -77,6 +77,17 @@ theorem repl_learn : ReplInv (learn s n) := by
       · exact h.ackHolds p m hp' hm hf0
       · rw [← hf] at hf0 ⊢; rw [h.ackedPrim m hf0]; simp
     · exact h.ackHolds p m hp' hm hf
+  ackedHigh := by
+    intro p m hp hm hf
+    obtain ⟨hpn, hp'⟩ := htp p hp
+    change (if m = n then s.cfg else s.known m).prim = p at hf
+    show s.acked p m ≤ s.ackHigh m
+    split_ifs at hf with e
+    · subst e
+      by_cases hf0 : (s.known m).prim = p
+      · exact h.ackedHigh p m hp' hm hf0
+      · rw [← hf] at hf0 ⊢; rw [h.ackedPrim m hf0]; exact Nat.zero_le _
+    · exact h.ackedHigh p m hp' hm hf
   syncCommit := by
     intro q r hq hs
     obtain ⟨hqn, hq'⟩ := htp q hq
@@ -121,7 +132,7 @@ theorem membership_learn : MembershipInv (learn s n) := by
 
 /-- Learn changes no commit point, catch-up point or history. -/
 theorem commit_learn : CommitInv (learn s n) :=
-  (h.toCommitInv).frame rfl rfl rfl rfl rfl rfl
+  (h.toCommitInv).frame rfl rfl rfl rfl rfl rfl rfl
 
 /-- A deposed primary stays fenced. If `n` leaves it with an acknowledgement below the old fence, that acknowledgement is the new fence. -/
 theorem failover_learn : FailoverInv (learn s n) := by
@@ -152,23 +163,25 @@ theorem failover_learn : FailoverInv (learn s n) := by
       -- configuration it has left p, and its acknowledgement is the new fence.
       obtain ⟨hs1, hs2, hs3⟩ := hsw
       have hnp' : n ≠ p := fun e => hpn e.symm
-      refine Fenced.of_left (w := n) ⟨by rw [hSp]; exact hs1, (hfz n).2 (Or.inl rfl)⟩ ?_ ?_ ?_
+      refine Fenced.of_left (w := n) ⟨by rw [hSp]; exact hs1, (hfz n).2 (Or.inl rfl)⟩ ?_ ?_ ?_ ?_
       · intro hpa; show s.acked p n ≤ s.recon s.cfg.prim; have := hF.reconLe hpa; omega
       · intro hpa; exact take_mono_prefix (Nat.le_of_lt hs3) (hF.primHolds hpa)
+      · intro hpa; show s.acked p n ≤ s.ackHigh s.cfg.prim; have := hF.primAck hpa; omega
       · intro m hm hi
-        rcases hF.eligHolds m hm hi with d | ⟨d1, d2⟩
-        · exact Or.inl (take_mono_prefix (Nat.le_of_lt hs3) d)
+        rcases hF.eligHolds m hm hi with ⟨d, da⟩ | ⟨d1, d2⟩
+        · exact Or.inl ⟨take_mono_prefix (Nat.le_of_lt hs3) d, (Nat.le_of_lt hs3).trans da⟩
         · by_cases e : m = n
-          · subst e; exact Or.inl (h.ackHolds p m hp' hnp' hs2)
+          · subst e; exact Or.inl ⟨h.ackHolds p m hp' hnp' hs2, h.ackedHigh p m hp' hnp' hs2⟩
           · right; rw [hSp]; refine ⟨d1, ?_⟩
             show (if m = n then s.cfg else s.known m).prim = p; rw [if_neg e]; exact d2
     · -- Otherwise the old fence still holds.
-      refine Fenced.of_left (w := w) ⟨by rw [hSp]; exact hw1, (hfz w).2 (Or.inr hw2)⟩ ?_ ?_ ?_
+      refine Fenced.of_left (w := w) ⟨by rw [hSp]; exact hw1, (hfz w).2 (Or.inr hw2)⟩ ?_ ?_ ?_ ?_
       · intro hpa; show s.acked p w ≤ s.recon s.cfg.prim; rw [hwF]; exact hF.reconLe hpa
       · intro hpa
         show (s.log p).take (s.acked p w) <+: s.log s.cfg.prim; rw [hwF]; exact hF.primHolds hpa
+      · intro hpa; show s.acked p w ≤ s.ackHigh s.cfg.prim; rw [hwF]; exact hF.primAck hpa
       · intro m hm hi
-        show (s.log p).take (s.acked p w) <+: s.log m ∨ _
+        show ((s.log p).take (s.acked p w) <+: s.log m ∧ s.acked p w ≤ s.ackHigh m) ∨ _
         rw [hwF]
         rcases hF.eligHolds m hm hi with d | ⟨d1, d2⟩
         · exact Or.inl d
@@ -176,7 +189,8 @@ theorem failover_learn : FailoverInv (learn s n) := by
           · subst e
             have hnp' : m ≠ p := fun e => hpn e.symm
             have hle : fence s p ≤ s.acked p m := Nat.le_of_not_lt (fun hl => hsw ⟨d1, d2, hl⟩)
-            exact Or.inl (take_mono_prefix hle (h.ackHolds p m hp' hnp' d2))
+            exact Or.inl ⟨take_mono_prefix hle (h.ackHolds p m hp' hnp' d2),
+              hle.trans (h.ackedHigh p m hp' hnp' d2)⟩
           · right; rw [hSp]; refine ⟨d1, ?_⟩
             show (if m = n then s.cfg else s.known m).prim = p; rw [if_neg e]; exact d2
   authEx := h.authEx }
@@ -256,6 +270,7 @@ theorem repl_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
   ackedPrim := by intro x hx; rw [hKp] at hx; exact h.ackedPrim x hx
   ackedLe := by intro x y hx; exact h.ackedLe x y ((htp x).1 hx)
   ackHolds := by intro x y hx hy hf; rw [hKp] at hf; exact h.ackHolds x y ((htp x).1 hx) hy hf
+  ackedHigh := by intro x y hx hy hf; rw [hKp] at hf; exact h.ackedHigh x y ((htp x).1 hx) hy hf
   syncCommit := by intro x y hx; exact h.syncCommit x y ((htp x).1 hx) }
 
 /-- `r` was already counted (step 2 comes before step 4), so every eligible replica is still counted. -/
@@ -320,7 +335,16 @@ theorem commit_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
   caHist := h.caHist
   caEq := h.caEq
   reconLen := h.reconLen
-  histLe := fun _ => h.histLe hpa }
+  histLe := fun _ => h.histLe hpa
+  histAck := by
+    -- `r` acknowledged past the primary's commit and reconciliation points, which
+    -- cover the history (`histLe`).
+    intro n hn
+    rcases makeElig_isAuthoritative hn with rfl | hn'
+    · have hhl : s.hist.length ≤ s.acked s.cfg.prim n := by
+        rcases h.histLe hpa with a | a <;> omega
+      exact hhl.trans (h.ackedHigh _ n (thinksPrimary_prim h hpa) hrp hrf)
+    · exact h.histAck n hn' }
 
 /-- Fences do not move. `r` holds a deposed primary's log up to its fence, because `r` acknowledged past the reconciliation point, which is past the fence. -/
 theorem failover_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
@@ -355,16 +379,18 @@ theorem failover_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
     -- caught up past the reconciliation point, which is past the fence.
     have hF := h.stale x hx' hv'
     refine hF.transfer rfl hKp (fun _ _ => rfl) rfl rfl (fun _ => hpa)
-      (fun _ => Nat.le_refl _) (fun _ => rfl) ?_
+      (fun _ => hF.reconLe hpa) (fun _ => hF.primHolds hpa) (fun _ => hF.primAck hpa) ?_
     intro m hm hi
     by_cases e : m = r
     · subst e; right
-      exact take_transfer (Nat.le_trans (hF.reconLe hpa) hrec)
-        (hF.le_len (fun y => h.ackedLe x y hx')) (hF.primHolds hpa) hra
+      refine ⟨take_transfer (Nat.le_trans (hF.reconLe hpa) hrec)
+        (hF.le_len (fun y => h.ackedLe x y hx')) (hF.primHolds hpa) hra, ?_⟩
+      exact Nat.le_trans (Nat.le_trans (hF.reconLe hpa) hrec)
+        (h.ackedHigh _ m (thinksPrimary_prim h hpa) hrp hrf)
     · left
       change (if m = r then true else s.cfg.elig m) = true at hm
       change (if m = r then s.inc r else s.cfg.inc m) = s.inc m at hi
-      rw [if_neg e] at hm hi; exact ⟨hm, hi, rfl⟩
+      rw [if_neg e] at hm hi; exact ⟨hm, hi, rfl, Nat.le_refl _⟩
   authEx := by
     refine ⟨s.cfg.prim, Or.inr rfl, ?_⟩
     show (makeElig s s.cfg.prim r).cfg.inc s.cfg.prim = s.inc s.cfg.prim
@@ -451,6 +477,7 @@ theorem repl_makeInelig (_he : s.cfg.elig r = true) :
   ackedPrim := by intro x hx; rw [hKp] at hx; exact h.ackedPrim x hx
   ackedLe := by intro x y hx; exact h.ackedLe x y ((htp x).1 hx)
   ackHolds := by intro x y hx hy hf; rw [hKp] at hf; exact h.ackHolds x y ((htp x).1 hx) hy hf
+  ackedHigh := by intro x y hx hy hf; rw [hKp] at hf; exact h.ackedHigh x y ((htp x).1 hx) hy hf
   syncCommit := by intro x y hx hxy; exact h.syncCommit x y ((htp x).1 hx) (hSle x y hxy) }
 
 /-- `r` is ineligible before any write commits without it (demotion ordering rule). -/
@@ -506,7 +533,7 @@ theorem commit_makeInelig (_he : s.cfg.elig r = true) : CommitInv (makeInelig s 
   obtain ⟨_, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
   exact { caLen := h.caLen, caHist := h.caHist, caEq := h.caEq, reconLen := h.reconLen,
-          histLe := h.histLe }
+          histLe := h.histLe, histAck := fun n hn => h.histAck n (makeInelig_isAuthoritative hn) }
 
 /-- Fences do not move, and no node becomes authoritative. -/
 theorem failover_makeInelig (_he : s.cfg.elig r = true) :
@@ -535,9 +562,10 @@ theorem failover_makeInelig (_he : s.cfg.elig r = true) :
         exact hxp (thinksPrimary_knowsLatest h hx' (by unfold KnowsLatest; rw [this])).2.symm
     have hSx : (makeInelig s s.cfg.prim r).sync x = s.sync x := by
       funext y; rw [hS, if_neg (fun c => hxp c.1)]
-    exact (h.stale x hx' hv').transfer hSx hKp (fun _ _ => rfl) rfl rfl (fun _ => hpa)
-      (fun _ => Nat.le_refl _) (fun _ => rfl)
-      (fun m hm hi => Or.inl ⟨(hEle m hm).2, hi, rfl⟩)
+    have hF := h.stale x hx' hv'
+    exact hF.transfer hSx hKp (fun _ _ => rfl) rfl rfl (fun _ => hpa)
+      (fun _ => hF.reconLe hpa) (fun _ => hF.primHolds hpa) (fun _ => hF.primAck hpa)
+      (fun m hm hi => Or.inl ⟨(hEle m hm).2, hi, rfl, Nat.le_refl _⟩)
   authEx := ⟨s.cfg.prim, Or.inr rfl, hpa⟩ }
 
 /-- No node becomes authoritative. -/

@@ -41,9 +41,9 @@ theorem ainv_init (i : Node) : AInv (ainit i) where
   held := by intro x hx; simp [ainit] at hx
   acked := by intro x hx; simp [ainit] at hx
 
-/-- What a Core step does to the parts the reply invariants read. -/
+/-- What a Core step other than a restart does to the parts the reply invariants read. -/
 theorem step_facts {s s' : State Node} (h : Inv s) (ht : TermLe s) {m : Nat} {μ : Action Node}
-    (hs : Step m true true s μ s') :
+    (hs : Step m true true s μ s') (hμ : μ.isRestart = false) :
     s.hist <+: s'.hist ∧ s.cfg.ver ≤ s'.cfg.ver ∧ TermLe s' ∧
     ∀ x t, t ≤ s.cfg.ver → ThinksPrimary s' x → s'.term x = t →
       ThinksPrimary s x ∧ s.term x = t ∧ s.log x <+: s'.log x := by
@@ -125,11 +125,13 @@ theorem step_facts {s s' : State Node} (h : Inv s) (ht : TermLe s) {m : Nat} {μ
       rw [upd_ne _ _ hxn]
   | restartKeep n _ =>
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
+  | restartPartialKeep n k _ _ _ => exact absurd hμ (by simp [Action.isRestart])
+  | restartPartialFresh n k _ _ _ _ => exact absurd hμ (by simp [Action.isRestart])
 
 theorem ainv_core {a : AState Node} {c : State Node} (h : AInv a) {m : Nat} {μ : Action Node}
-    (hs : Step m true true a.core μ c) :
+    (hs : Step m true true a.core μ c) (hμ : μ.isRestart = false) :
     AInv ⟨c, a.held, a.okd⟩ := by
-  obtain ⟨hh, hv, ht', hx⟩ := step_facts h.core h.term hs
+  obtain ⟨hh, hv, ht', hx⟩ := step_facts h.core h.term hs hμ
   refine ⟨inv_step h.core hs, ht', ?_, ?_⟩
   · intro x hm
     obtain ⟨hb, hf⟩ := h.held x hm
@@ -174,22 +176,46 @@ theorem ainv_release {a : AState Node} (h : AInv a) (x : Held Node) (hm : x ∈ 
 theorem ainv_abort {a : AState Node} (h : AInv a) (x : Held Node) : AInv (abort a x) :=
   ⟨h.core, h.term, fun y hy => h.held y (List.mem_of_mem_erase hy), h.acked⟩
 
-/-- Dropping held replies keeps the invariant. -/
-theorem ainv_drop {c : State Node} {held : List (Held Node)} {okd : List (Nat × Nat)}
-    (h : AInv ⟨c, held, okd⟩) (n : Node) : AInv ⟨c, dropHeld held n, okd⟩ :=
-  ⟨h.core, h.term, fun y hy => h.held y (List.mem_filter.mp hy).1, h.acked⟩
+/-- A restart of `n` keeps the layer invariant once `n`'s held replies are dropped: the
+surviving replies are on other nodes, whose logs, primaryship and terms it leaves alone,
+and it changes neither the history nor the configuration version. -/
+theorem ainv_restart {a : AState Node} {c : State Node} (h : AInv a) (hc : Inv c) (n : Node)
+    (hhist : c.hist = a.core.hist) (hver : c.cfg.ver = a.core.cfg.ver) (hterm : c.term = a.core.term)
+    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x)
+    (htp : ∀ x, x ≠ n → ThinksPrimary c x → ThinksPrimary a.core x) :
+    AInv ⟨c, dropHeld a.held n, a.okd⟩ := by
+  refine ⟨hc, fun x => by rw [hterm, hver]; exact h.term x, ?_, ?_⟩
+  · intro x hx
+    obtain ⟨hm, hxn⟩ := List.mem_filter.mp hx
+    have hxn' : x.1 ≠ n := by simpa using hxn
+    obtain ⟨hb, hf⟩ := h.held x hm
+    refine ⟨by rw [hver]; exact hb, fun hf' => ?_⟩
+    have : fenced a.core x := ⟨htp x.1 hxn' hf'.1, by rw [← hterm]; exact hf'.2⟩
+    obtain ⟨h1, h2, h3⟩ := hf this
+    rw [hlog x.1 hxn']; exact ⟨h1, h2, h3⟩
+  · intro x hx; show _ ∧ x.1 ≤ c.hist.length ∧ c.hist.getD _ 0 = _; rw [hhist]; exact h.acked x hx
 
 theorem ainv_step {a a' : AState Node} (h : AInv a) {m : Nat}
     {μ : AAction Node} (hs : AStep m true false true a μ a') : AInv a' := by
   cases hs with
-  | core _ c hc => exact ainv_core h hc
+  | core _ c hc hμ => exact ainv_core h hc hμ
   | write p _ _ _ => exact ainv_write h p
   | release x hm hc hf => exact ainv_release h x hm hc (hf rfl)
   | abort x _ _ => exact ainv_abort h x
   | restartE n hk hsv =>
-    exact ainv_drop (ainv_core (c := restartEmpty a.core n) (m := m) h (Step.restartEmpty _ n hk hsv)) n
+    exact ainv_restart h (inv_step h.core (Step.restartEmpty (m := m) _ n hk hsv)) n rfl rfl rfl
+      (fun _ e => restartEmpty_log_other e)
+      (fun _ _ hx => (restartEmpty_thinksPrimary (h.core.knownEq n hk) (h.core.incLe n) hx).2)
   | restartK n hk =>
-    exact ainv_drop (ainv_core (c := restartKeep true a.core n) (m := m) h (Step.restartKeep _ n hk)) n
+    exact ainv_restart h (inv_step h.core (Step.restartKeep (m := m) _ n hk)) n rfl rfl rfl
+      (fun _ _ => rfl) (fun _ _ hx => hx)
+  | restartPK n k hkl hk hkeep =>
+    exact ainv_restart h (inv_step h.core (Step.restartPartialKeep (m := m) _ n k hkl hk hkeep)) n
+      rfl rfl rfl (fun _ e => restartPartialKeep_log_other e) (fun _ _ hx => hx)
+  | restartPF n k hkl hk hfresh hsv =>
+    exact ainv_restart h (inv_step h.core (Step.restartPartialFresh (m := m) _ n k hkl hk hfresh hsv)) n
+      rfl rfl rfl (fun _ e => restartPartialFresh_log_other e)
+      (fun _ _ hx => (restartPartialFresh_thinksPrimary (h.core.knownEq n hkl) (h.core.incLe n) hx).2)
 
 theorem ainv_reachable {i : Node} {a : AState Node} {m : Nat} (h : AReachable m true false true i a) :
     AInv a :=

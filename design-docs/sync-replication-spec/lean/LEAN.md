@@ -52,7 +52,8 @@ Three parts are written so the proof can be read against the design doc:
   `Restart.lean`; `Preserve.lean` dispatches each action to its file. Every action
   with a non-trivial proof is proved one layer at a time: `config_X`, `repl_X`,
   `membership_X`, `commit_X`, `failover_X`, `ehc_X` for X in ack, resync, commit,
-  count, learn, makeElig, makeInelig, takeover, restartEmpty, restartKeep. Each has a
+  count, learn, makeElig, makeInelig, takeover, restartEmpty, restartKeep,
+  restartPartialKeep, restartPartialFresh. Each has a
   docstring saying in design terms why that layer survives the action, and `inv_X`
   assembles them. Each layer lemma takes the action's whole guard, so the files turn
   off the unused-variable linter.
@@ -901,10 +902,23 @@ CoreRecon plus:
   `sync[n] := {r ∈ known[n].elig : known[n].inc r = inc r} \ {n}`, so it commits
   nothing until fresh acks arrive. Other primaries keep their ack from `n`, whose
   log is unchanged.
+- RestartPartial(n, k) (F13): `n` restarts from a persistence file holding only
+  the first `k < Len(log[n])` entries. `ackHigh n` is `n`'s acknowledgement
+  high-water mark: raised by Ack to `n`'s log length and by Commit to `n`'s new
+  commit point, lost with a new incarnation. If `ackHigh n ≤ k`
+  (`restartPartialKeep`) the restart is RestartKeep on the truncated log, with
+  `recon = k`. Otherwise (`restartPartialFresh`) it is RestartEmpty with the `k`
+  entries kept as the log, under the same survival guard. Both outcomes carry
+  the label `.restartPartial n k`.
 - Held replies of the restarted node are dropped (`dropHeld`): they are lost with
   the client connections, so the client gets neither OK nor UNCOMMITTED. A restarted
-  primary therefore never acknowledges a write it held before the restart.
-  `AStep.core` also allows a restart that keeps them (a superset).
+  primary therefore never acknowledges a write it held before the restart. Every
+  restart goes through the layer's own actions (`restartE`, `restartK`,
+  `restartPK`, `restartPF`); `AStep.core` covers the other actions
+  (`Action.isRestart = false`), as `held' = DropHeld(n)` versus `Keep` does in
+  the TLA+. Until F13 `AStep.core` also admitted a restart that kept the replies;
+  a stale restore of a primary with its replies kept would break `HeldInv`, and
+  the behaviour was not in the TLA+.
 
 ## Invariant changes (`RestartProof/Inv.lean`)
 
@@ -919,11 +933,24 @@ ReconProof's invariant, with:
 - New: `authEx` (some node is authoritative), kept by the survival guard. Commit
   uses it where ReconProof used the current primary as the common holder of the
   history.
+- New for F13 (stale restore): `ackedHigh` (a primary's record of a follower's
+  acknowledgement is within the follower's `ackHigh`), `histAck` (every
+  authoritative node's `ackHigh` covers the committed history), and two fence
+  facts, `Fenced.primAck` (a deposed primary's fence is within the current
+  primary's `ackHigh`) and the `ackHigh` half of `Fenced.eligHolds` (within every
+  authoritative replica's). `commit_ackHigh` is the acknowledgement side of
+  `commit_holds`. These are what let a node that keeps a prefix covering its
+  `ackHigh` keep everything the invariant says it holds.
 
-Preservation for the two restarts is `RestartProof/Preserve/Restart.lean`. RestartKeep
+Preservation for the restarts is `RestartProof/Preserve/Restart.lean`. RestartKeep
 with RebuildSync = TRUE keeps `eligSync`, the conjunct F5 breaks: with an empty
 sync set a restarted primary may commit without an eligible replica, which then
-lacks the write (`CoreRestart_noRebuildMin1`).
+lacks the write (`CoreRestart_noRebuildMin1`). `restartPartialKeep` is the
+RestartKeep proof plus `prefix_take_of_length_le` wherever the truncated log
+must still hold a prefix: `ackHolds` (via `ackedHigh`), `ehc` and `histLe` (via
+`histAck`), and the fence facts (via `primAck`/`eligHolds`).
+`restartPartialFresh` is the RestartEmpty proof verbatim, which never used
+`log n = []`.
 
 ## Axioms
 
@@ -934,7 +961,8 @@ lacks the write (`CoreRestart_noRebuildMin1`).
 'RestartProof.commit_two_copies' depends on axioms: [propext, Classical.choice, Quot.sound]
 ```
 
-There is no `sorry`.
+The counterexamples `noRebuild_unsafe`, `noIncCheck_unsafe`, `noSurvivor_loses` and
+`staleRestoreKeepsInc_unsafe` (F13) use the same three axioms. There is no `sorry`.
 
 ## Size
 

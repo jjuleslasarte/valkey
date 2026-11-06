@@ -246,6 +246,28 @@ theorem count_sync (p r q x : Node) : (count s p r).sync q x = (s.sync q x || (q
     · simp [count, upd, hx]
   · simp [count, upd, hq]
 
+/-- The high-water mark only grows: Ack raises the replica's to its log length. -/
+theorem ack_ackHigh_le (r x : Node) : s.ackHigh x ≤ (ack s r).ackHigh x := by
+  show s.ackHigh x ≤ upd s.ackHigh r (max (s.ackHigh r) (s.log r).length) x
+  unfold upd; split_ifs with e
+  · subst e; exact Nat.le_max_left _ _
+  · exact Nat.le_refl _
+
+theorem ack_ackHigh_self (r : Node) : (s.log r).length ≤ (ack s r).ackHigh r := by
+  show (s.log r).length ≤ upd s.ackHigh r (max (s.ackHigh r) (s.log r).length) r
+  rw [upd_same]; exact Nat.le_max_right _ _
+
+/-- Commit raises the primary's high-water mark to the new commit point. -/
+theorem commitNext_ackHigh_le (p x : Node) : s.ackHigh x ≤ (commitNext s p).ackHigh x := by
+  show s.ackHigh x ≤ upd s.ackHigh p (max (s.ackHigh p) (s.commit p + 1)) x
+  unfold upd; split_ifs with e
+  · subst e; exact Nat.le_max_left _ _
+  · exact Nat.le_refl _
+
+theorem commitNext_ackHigh_self (p : Node) : s.commit p + 1 ≤ (commitNext s p).ackHigh p := by
+  show s.commit p + 1 ≤ upd s.ackHigh p (max (s.ackHigh p) (s.commit p + 1)) p
+  rw [upd_same]; exact Nat.le_max_right _ _
+
 /-- Commit(p): `p`'s committed offset advances by one. -/
 theorem commitNext_commit (p x : Node) :
     (commitNext s p).commit x = if x = p then s.commit p + 1 else s.commit x := by
@@ -334,6 +356,14 @@ theorem restartEmpty_inc_self : (restartEmpty s n).inc n = s.inc n + 1 := by
 
 theorem restartEmpty_log_other {x : Node} (e : x ≠ n) : (restartEmpty s n).log x = s.log x := by
   simp [restartEmpty, upd, e]
+
+/-- `n`'s high-water mark is lost with its data. -/
+theorem restartEmpty_ackHigh (x : Node) :
+    (restartEmpty s n).ackHigh x = if x = n then 0 else s.ackHigh x := by
+  show upd s.ackHigh n 0 x = _; rfl
+
+theorem restartEmpty_ackHigh_other {x : Node} (e : x ≠ n) :
+    (restartEmpty s n).ackHigh x = s.ackHigh x := by rw [restartEmpty_ackHigh, if_neg e]
 
 theorem restartEmpty_commit_other {x : Node} (e : x ≠ n) :
     (restartEmpty s n).commit x = s.commit x := by simp [restartEmpty, upd, e]
@@ -455,5 +485,122 @@ theorem restartKeep_thinksPrimary (x : Node) :
     ThinksPrimary (restartKeep true s n) x ↔ ThinksPrimary s x := Iff.rfl
 
 end restartKeep
+
+/-! ## RestartPartial(n, k) (RebuildSync = TRUE)
+
+`n` restarts from a persistence file holding only the first `k` entries of its log.
+Keeping its incarnation (`restartPartialKeep`), it is RestartKeep on the truncated log;
+taking a new one (`restartPartialFresh`), it is RestartEmpty with those `k` entries as
+its log. Every field but `log` (and, when keeping, `recon`) is the corresponding
+restart's, so these facts are the restart's facts restated. -/
+
+section restartPartialKeep
+variable {n : Node} {k : Nat}
+
+theorem restartPartialKeep_log (x : Node) :
+    (restartPartialKeep true s n k).log x = if x = n then (s.log n).take k else s.log x := by
+  show upd s.log n ((s.log n).take k) x = _; rfl
+
+theorem restartPartialKeep_log_other {x : Node} (e : x ≠ n) :
+    (restartPartialKeep true s n k).log x = s.log x := by rw [restartPartialKeep_log, if_neg e]
+
+theorem restartPartialKeep_log_self : (restartPartialKeep true s n k).log n = (s.log n).take k := by
+  rw [restartPartialKeep_log, if_pos rfl]
+
+theorem restartPartialKeep_commit_other {x : Node} (e : x ≠ n) :
+    (restartPartialKeep true s n k).commit x = s.commit x := restartKeep_commit_other e
+
+theorem restartPartialKeep_commit_self : (restartPartialKeep true s n k).commit n = 0 :=
+  restartKeep_commit_self
+
+theorem restartPartialKeep_recon_other {x : Node} (e : x ≠ n) :
+    (restartPartialKeep true s n k).recon x = s.recon x := by
+  show upd s.recon n k x = _; rw [upd_ne _ _ e]
+
+theorem restartPartialKeep_recon_self : (restartPartialKeep true s n k).recon n = k := by
+  show upd s.recon n k n = _; rw [upd_same]
+
+theorem restartPartialKeep_acked_other {x : Node} (e : x ≠ n) :
+    (restartPartialKeep true s n k).acked x = s.acked x := restartKeep_acked_other e
+
+theorem restartPartialKeep_acked_self : (restartPartialKeep true s n k).acked n = fun _ => 0 :=
+  restartKeep_acked_self
+
+theorem restartPartialKeep_sync_other {x : Node} (e : x ≠ n) :
+    (restartPartialKeep true s n k).sync x = s.sync x := restartKeep_sync_other e
+
+theorem restartPartialKeep_sync_self : (restartPartialKeep true s n k).sync n =
+    if (s.known n).prim = n ∧ (s.known n).inc n = s.inc n then rebuiltSync s n
+    else fun _ => false := restartKeep_sync_self
+
+theorem restartPartialKeep_thinksPrimary (x : Node) :
+    ThinksPrimary (restartPartialKeep true s n k) x ↔ ThinksPrimary s x := Iff.rfl
+
+end restartPartialKeep
+
+section restartPartialFresh
+variable {n : Node} {k : Nat}
+
+theorem restartPartialFresh_log (x : Node) :
+    (restartPartialFresh s n k).log x = if x = n then (s.log n).take k else s.log x := by
+  show upd s.log n ((s.log n).take k) x = _; rfl
+
+theorem restartPartialFresh_log_other {x : Node} (e : x ≠ n) :
+    (restartPartialFresh s n k).log x = s.log x := by rw [restartPartialFresh_log, if_neg e]
+
+theorem restartPartialFresh_inc (x : Node) :
+    (restartPartialFresh s n k).inc x = if x = n then s.inc n + 1 else s.inc x := restartEmpty_inc x
+
+theorem restartPartialFresh_inc_other {x : Node} (e : x ≠ n) :
+    (restartPartialFresh s n k).inc x = s.inc x := restartEmpty_inc_other e
+
+theorem restartPartialFresh_inc_self : (restartPartialFresh s n k).inc n = s.inc n + 1 :=
+  restartEmpty_inc_self
+
+theorem restartPartialFresh_commit_other {x : Node} (e : x ≠ n) :
+    (restartPartialFresh s n k).commit x = s.commit x := restartEmpty_commit_other e
+
+theorem restartPartialFresh_commit_self : (restartPartialFresh s n k).commit n = 0 :=
+  restartEmpty_commit_self
+
+theorem restartPartialFresh_recon_other {x : Node} (e : x ≠ n) :
+    (restartPartialFresh s n k).recon x = s.recon x := restartEmpty_recon_other e
+
+theorem restartPartialFresh_recon_self : (restartPartialFresh s n k).recon n = 0 :=
+  restartEmpty_recon_self
+
+theorem restartPartialFresh_sync (p r : Node) : (restartPartialFresh s n k).sync p r =
+    if p = n then false else if p = s.cfg.prim ∧ r = n then false else s.sync p r :=
+  restartEmpty_sync p r
+
+theorem restartPartialFresh_acked (p r : Node) : (restartPartialFresh s n k).acked p r =
+    if p = n then 0 else if p = s.cfg.prim ∧ r = n then 0 else s.acked p r :=
+  restartEmpty_acked p r
+
+theorem restartPartialFresh_acked_le (p r : Node) :
+    (restartPartialFresh s n k).acked p r ≤ s.acked p r := restartEmpty_acked_le p r
+
+theorem restartPartialFresh_sync_le {p r : Node} (hs : (restartPartialFresh s n k).sync p r = true) :
+    s.sync p r = true := restartEmpty_sync_le hs
+
+theorem restartPartialFresh_ackHigh (x : Node) :
+    (restartPartialFresh s n k).ackHigh x = if x = n then 0 else s.ackHigh x := restartEmpty_ackHigh x
+
+theorem restartPartialFresh_ackHigh_other {x : Node} (e : x ≠ n) :
+    (restartPartialFresh s n k).ackHigh x = s.ackHigh x := restartEmpty_ackHigh_other e
+
+theorem restartPartialFresh_thinksPrimary (hkn : s.known n = s.cfg) (hinc : s.cfg.inc n ≤ s.inc n)
+    {x : Node} (hx : ThinksPrimary (restartPartialFresh s n k) x) : x ≠ n ∧ ThinksPrimary s x :=
+  restartEmpty_thinksPrimary hkn hinc hx
+
+theorem restartPartialFresh_isAuthoritative (hinc : s.cfg.inc n ≤ s.inc n) {x : Node}
+    (hx : IsAuthoritative (restartPartialFresh s n k) x) : x ≠ n ∧ IsAuthoritative s x :=
+  restartEmpty_isAuthoritative hinc hx
+
+theorem restartPartialFresh_primaryAuthoritative (hinc : s.cfg.inc n ≤ s.inc n)
+    (hp : PrimaryAuthoritative (restartPartialFresh s n k)) : s.cfg.prim ≠ n ∧ PrimaryAuthoritative s :=
+  restartEmpty_primaryAuthoritative hinc hp
+
+end restartPartialFresh
 
 end RestartProof

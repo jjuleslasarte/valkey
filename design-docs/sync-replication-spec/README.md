@@ -19,9 +19,9 @@ Cluster V2 shard configuration, failover and node restarts. The proof holds for
 any number of nodes, any log length, any number of configuration changes and
 restarts, and every value of `min-sync-replicas`.
 
-The proof needs four things the design as written does not state. Three are
+The proof needs five things the design as written does not state. Four are
 changes to the protocol, each closing a scenario in which an acknowledged or
-committed write is lost. The fourth is a check the design implies but never
+committed write is lost. The fifth is a check the design implies but never
 specifies. Each has a Lean counterexample: a concrete run of the model, without
 it, that loses a write.
 
@@ -31,6 +31,10 @@ it, that loses a write.
   the write is still current.
 - **F5.** A primary that restarts with its data must rebuild its sync replica
   set from the shard configuration.
+- **F13.** A node that restarts from a persistence file keeps its incarnation
+  only if the file covers every offset it has acknowledged, as a replica to its
+  primary or as a primary to its clients; otherwise it rejoins as after a
+  restart without data.
 - **Incarnation check on primaryship.** Beyond the takeover compare-and-set, a
   node may act as primary only while its configuration records its current
   incarnation.
@@ -78,11 +82,14 @@ The model is `lean/RestartProof/Model.lean`. It follows the design's terms
 - **Full resync.** A replica whose log has diverged from its primary's is
   replaced by a prefix of the primary's log. This happens only after the
   replica is out of the sync replica set and ineligible.
-- **Restarts.** A node may restart with its data, or without it. A restart
-  without data gives the node a new incarnation ID. It rejoins as ineligible and
-  becomes eligible again only through the promotion flow (design §6). Volatile
-  state is lost in both cases: the committed offset, the sync replica set, the
-  acknowledgements, and the client connections with their held replies.
+- **Restarts.** A node may restart with its data, without it, or with a stale
+  persistence file holding only a prefix of its log. A restart without data
+  gives the node a new incarnation ID. It rejoins as ineligible and becomes
+  eligible again only through the promotion flow (design §6). A restart from a
+  stale file keeps the incarnation only if the file covers the node's
+  acknowledgement high-water mark (`ackHigh`, F13). Volatile state is lost in
+  every case: the committed offset, the sync replica set, the acknowledgements,
+  and the client connections with their held replies.
 - **Reply blocking.** A write's reply is held until it commits. It is then
   released as OK, or answered `UNCOMMITTED` (design §5, "Write behavior during
   faults").
@@ -138,14 +145,14 @@ set. The history may then be on the primary only, which matches the design's
 note that such writes "exist only on the primary". Property 5 is what
 `min-sync-replicas ≥ 1` adds.
 
-## 3. Four things the guarantee needs
+## 3. Five things the guarantee needs
 
 Each item has a Lean counterexample: a run of the model with the item removed,
 every guard checked by `decide`, ending in a state that violates the guarantee.
 F1 and F5 use the model's own switches. F2 uses the held-reply layer's switch.
-The incarnation check and the survival condition have no switch in the model, so
-their counterexamples add one weakened action to the model's steps, named in the
-theorem.
+F13, the incarnation check and the survival condition have no switch in the
+model, so their counterexamples add one weakened action to the model's steps,
+named in the theorem.
 
 **F1: reconcile against the inherited log.** Promotion step 1 waits until the
 replica has acknowledged up to the primary's committed offset. Right after a
@@ -194,6 +201,26 @@ an eligible replica whose recorded incarnation does not match (`Count`), and
 only matching replicas count toward `min-sync-replicas` (`Writable`). The proof
 uses both, but no counterexample shows that either is needed on its own.
 
+**F13: a stale restore must not keep the incarnation.** The design changes the
+incarnation only on a restart without data. A replica acknowledges a write once
+it is applied in memory, so without `appendfsync always` it can restart from a
+file that predates writes it acknowledged, keep its incarnation and its
+eligibility, and be counted on acknowledgements it no longer backs. Scenario: a
+write commits on n0 and n1; n1 restarts from a file holding none of its log and
+keeps its incarnation. n1 is authoritative without the committed write. With
+one more step, n0 restarting empty, the write is gone from every node although
+its client had OK (TLC `CoreRestart_staleKeepMin1Loss`).
+Fix: a node keeps its incarnation across a restart only if the restored data
+covers its acknowledgement high-water mark, the highest offset it has
+acknowledged as a replica (Ack) or as a primary (Commit); otherwise it takes a
+new incarnation and rejoins as after a restart without data. The mark must be
+persisted with the data, or acknowledgements must follow fsync. Two weaker rules
+were checked by TLC and fail: the node's own committed offset (a replica's is 0)
+and the acknowledgements it sent as a replica (a primary's commits are not among
+them; the initial primary has sent none).
+Counterexample: `RestartProof.staleRestoreKeepsInc_unsafe` (8 steps): the model's
+steps plus a stale restore that keeps the incarnation whatever the file covers.
+
 **Survival condition.** Without it, both copies of a committed write can restart
 empty. Scenario: a write commits on n0 and n1, n1 restarts empty, then n0
 restarts empty. No node holds the write, and no node is authoritative.
@@ -209,7 +236,7 @@ case correlated data loss.
 
 The proof is by induction over executions. We define a predicate `Inv` on
 states and show that it holds initially, that every step preserves it, and that
-it implies properties 1 and 2. `Inv` has 21 parts, grouped in five layers that
+it implies properties 1 and 2. `Inv` has 23 parts, grouped in five layers that
 follow the design: configuration, replication, membership, commit and failover.
 The ones that carry the argument are:
 
@@ -235,6 +262,11 @@ The ones that carry the argument are:
   newer than the node's own. So a node that restarted without data never matches
   its old record.
 - **Some node is authoritative.** The survival condition keeps this true.
+- **Acknowledgements are remembered.** Each node's high-water mark `ackHigh`
+  covers every acknowledgement a primary has recorded from it, the whole
+  committed history if the node is authoritative, and every deposed primary's
+  fence. This is what makes a restart from a stale file safe when the file covers
+  the mark (F13), and is why the mark must be persisted.
 
 The acknowledged-write properties (3 and 4) extend `Inv` with three more
 conjuncts. Terms never exceed the configuration version. A held reply whose
@@ -303,6 +335,7 @@ rate at most `ρ`). The main results:
 | F1 needed | `CoreProof.noReconcile_unsafe`, `ReconProof.noReconcile_unsafe` |
 | F2 needed | `AckProof.noReplyFence_unsafe` |
 | F5 needed | `RestartProof.noRebuild_unsafe` |
+| F13 needed | `RestartProof.staleRestoreKeepsInc_unsafe` |
 | Incarnation check on primaryship needed | `RestartProof.noIncCheck_unsafe` |
 | Survival condition needed | `RestartProof.noSurvivor_loses` |
 | Lease margin (F11) and durations (F12) | `Lease/` |
@@ -310,9 +343,9 @@ rate at most `ρ`). The main results:
 Every row has a Lean theorem. The TLA+ model checking that found these results
 is in Appendix B.
 
-Size: the `RestartProof` model is 475 lines (with the held-reply layer and the
-action labels), the invariant and its lemmas 383, the per-action contracts 460,
-and the preservation proofs 1,899, so the proof is about five lines per line of
+Size: the `RestartProof` model is 525 lines (with the held-reply layer and the
+action labels), the invariant and its lemmas 435, the per-action contracts 606,
+and the preservation proofs 2,468, so the proof is about six lines per line of
 model. Lean checks the
 whole of `RestartProof` in about 13 seconds on a laptop-class machine.
 
@@ -355,7 +388,7 @@ details.
 
 - **The survival condition** is required at every restart without data
   (section 2).
-- **Restarts carry three assumptions the design only implies.** (a) A node
+- **Restarts carry four assumptions the design only implies.** (a) A node
   restarts only when it knows the latest configuration (`KnowsLatest`),
   justified by design §6's "syncs to the latest log before it re-enters the
   cluster"; a restart with a stale configuration is excluded, not proved
@@ -364,8 +397,12 @@ details.
   reaches that state only through the demotion flow (read-lease wait plus a
   committed demotion), so the model omits the window in which the primary is
   still waiting for the dead replica. (c) A restart with data forces the node to
-  re-commit its whole log before serving (`recon = Len(log)`); the design does
-  not specify this.
+  re-commit what it holds before serving (`recon = Len(log)`); the design does
+  not specify this. (d) The acknowledgement high-water mark `ackHigh` survives a
+  restart with data and is lost with a new incarnation (F13); the model assumes
+  the implementation persists it with the data it covers. A stale file is
+  modelled as a prefix of the log; a file that is not a prefix (a diverged tail)
+  is not modelled.
 - **The incarnation checks** in `ThinksPrimary`, `Count` and `Writable` are in
   the model as guards. The design states only the takeover compare-and-set.
   Section 3 shows the first is needed; the other two are assumed.
@@ -396,13 +433,13 @@ Determine whether the `Count` and `Writable` incarnation checks are each needed.
 
 | Path | Contents | Lines |
 |---|---|---|
-| `lean/RestartProof/Model.lean`, `AckModel.lean` | The model: state, actions, steps, properties; the held-reply layer | 475 |
-| `lean/RestartProof/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 460 |
-| `lean/RestartProof/Inv.lean` | The invariant in five layers; the fence; frame lemmas | 383 |
-| `lean/RestartProof/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 1,899 |
-| `lean/RestartProof/Safety.lean`, `AckProof.lean`, `Lists.lean` | The main theorems; the held-reply invariant; list lemmas | 320 |
-| `lean/RestartProof/Counterexample.lean` | F5, incarnation-check and survival counterexamples | 182 |
-| `lean/ReconProof/`, `lean/CoreProof/`, `lean/AckProof/` | The smaller models, their embeddings into the next model, corollaries, F1 and F2 counterexamples | 1,168 |
+| `lean/RestartProof/Model.lean`, `AckModel.lean` | The model: state, actions, steps, properties; the held-reply layer | 525 |
+| `lean/RestartProof/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 606 |
+| `lean/RestartProof/Inv.lean` | The invariant in five layers; the fence; frame lemmas | 435 |
+| `lean/RestartProof/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,468 |
+| `lean/RestartProof/Safety.lean`, `AckProof.lean`, `Lists.lean` | The main theorems; the held-reply invariant; list lemmas | 356 |
+| `lean/RestartProof/Counterexample.lean` | F5, F13, incarnation-check and survival counterexamples | 230 |
+| `lean/ReconProof/`, `lean/CoreProof/`, `lean/AckProof/` | The smaller models, their embeddings into the next model, corollaries, F1 and F2 counterexamples | 1,184 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
 | `lean/Check.lean` | Prints the axioms of every main theorem and counterexample | |
 
@@ -551,9 +588,9 @@ From most to least trusted:
   with a guard (precondition) and an effect.
 - **Invariant.** A property true of every reachable state. **Inductive**
   invariant: one that is also preserved by every single step, from any state
-  where it holds. Finding one is the hard, creative part of the proof. `Inv` (21
+  where it holds. Finding one is the hard, creative part of the proof. `Inv` (23
   conjuncts) is the inductive strengthening of `Safety` (2 conjuncts). The extra
-  19 are the facts you must carry along for the induction to go through. Each
+  21 are the facts you must carry along for the induction to go through. Each
   one is there because some step broke the proof without it.
 - **Preservation lemma.** "If `Inv` holds before action X, it holds after." One
   per action, in `Preserve/`. This is where the bulk of the proof lives.
@@ -736,5 +773,6 @@ history at commit `bb987c679` (`lean/XCheck/`, `xcheck/dot2lean.py`).
 | F5 | `CoreRestart_noRebuildMin1` (10 states), `_noRebuildMin1Loss` (22) | `RestartProof.noRebuild_unsafe` |
 | Incarnation checks | `CoreRestart_noIncMin1` (all three off) | `RestartProof.noIncCheck_unsafe` (`ThinksPrimary` check only) |
 | Survival | `CoreRestart_noSurvivorMin0`/`Min1` | `RestartProof.noSurvivor_loses` |
+| F13 | `CoreRestart_staleKeepMin0` (5 states), `_staleKeepMin1` (9), `_staleKeepMin1Loss` (11); weaker rules `_staleCommitMin1`, `_staleAckOnlyMin0`/`Min1` | `RestartProof.staleRestoreKeepsInc_unsafe` |
 | Safe runs | `CoreRestart_safeMin0`/`_safeMin1` (120.6 M and 78.8 M states), `CoreRestart_twoCopiesMin1` | subsumed by `RestartProof.safety`, `ackSafety`, `commit_two_copies` |
 | Stale reads | `Leases.tla` (`NoStaleLinRead`) | none |

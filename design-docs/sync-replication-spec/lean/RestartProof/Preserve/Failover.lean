@@ -78,6 +78,13 @@ theorem repl_takeover : ReplInv (takeover s n) := by
     · by_cases ey : y = n
       · subst ey; rw [hK, if_pos rfl] at hf; exact absurd hf.symm e
       · rw [hKo y ey] at hf; rw [hAo x e]; exact h.ackHolds x y hx' hy hf
+  ackedHigh := by
+    intro x y hx hy hf
+    rcases (htp x).1 hx with rfl | ⟨e, hx'⟩
+    · rw [hAn]; exact Nat.zero_le _
+    · by_cases ey : y = n
+      · subst ey; rw [hK, if_pos rfl] at hf; exact absurd hf.symm e
+      · rw [hKo y ey] at hf; rw [hAo x e]; exact h.ackedHigh x y hx' hy hf
   syncCommit := by
     intro x y hx hs
     rcases (htp x).1 hx with rfl | ⟨e, hx'⟩
@@ -128,6 +135,7 @@ theorem commit_takeover : CommitInv (takeover s n) := by
   have hCo : ∀ x, x ≠ n → (takeover s n).commit x = s.commit x := fun _ => takeover_commit_other
   have hRn : (takeover s n).recon n = (s.log n).length := takeover_recon_self
   have hehn : s.hist <+: s.log n := h.ehc n ⟨Or.inl hel, hin⟩
+  have hNE := takeoverElig_iff (s := s) (n := n)
   exact {
   caLen := by
     intro x; by_cases e : x = n
@@ -142,7 +150,14 @@ theorem commit_takeover : CommitInv (takeover s n) := by
     · subst e; rw [hCn]; rfl
     · rw [hCo x e]; exact h.caEq x
   reconLen := by show (takeover s n).recon n ≤ (s.log n).length; rw [hRn]
-  histLe := by intro _; right; show s.hist.length ≤ (takeover s n).recon n; rw [hRn]; exact hehn.length_le }
+  histLe := by intro _; right; show s.hist.length ≤ (takeover s n).recon n; rw [hRn]; exact hehn.length_le
+  histAck := by
+    intro m ⟨hm, hi⟩
+    change takeoverElig s n m = true ∨ m = n at hm
+    change s.cfg.inc m = s.inc m at hi
+    rcases hm with hm | rfl
+    · exact h.histAck m ⟨Or.inl ((hNE m).1 hm).1, hi⟩
+    · exact h.histAck m ⟨Or.inl hel, hin⟩ }
 
 /-- Failover: every deposed primary is fenced, including the one `n` replaced, and `n`
 itself is authoritative. -/
@@ -180,7 +195,7 @@ theorem failover_takeover : FailoverInv (takeover s n) := by
         -- acknowledgement from such a replica, so the fence is 0.
         obtain ⟨r, hr1, hr2, hr3⟩ := hex
         have h0 : (takeover s n).acked s.cfg.prim r = 0 := by rw [hAx]; exact h.ackedPrim r hr2
-        refine Fenced.of_left (hleft r hr1 (by rw [hKo r hr3]; exact hr2)) ?_ ?_ ?_ <;> simp [h0]
+        refine Fenced.of_left (hleft r hr1 (by rw [hKo r hr3]; exact hr2)) ?_ ?_ ?_ ?_ <;> simp [h0]
       · -- n is the only replica that left x: the fence is n's acknowledgement, and n
         -- holds x's log up to it.
         have hsn : s.sync s.cfg.prim n = true :=
@@ -189,7 +204,7 @@ theorem failover_takeover : FailoverInv (takeover s n) := by
         have hlen := h.ackedLe s.cfg.prim n hxp
         have hnx : ((takeover s n).known n).prim ≠ s.cfg.prim := by
           rw [hK, if_pos rfl]; exact hnp
-        refine Fenced.of_left (hleft n hsn hnx) ?_ ?_ ?_
+        refine Fenced.of_left (hleft n hsn hnx) ?_ ?_ ?_ ?_
         · intro _
           change (takeover s n).acked s.cfg.prim n ≤ (takeover s n).recon n
           rw [hAx, hRn]
@@ -198,6 +213,9 @@ theorem failover_takeover : FailoverInv (takeover s n) := by
           change ((takeover s n).log s.cfg.prim).take ((takeover s n).acked s.cfg.prim n) <+:
             (takeover s n).log n
           rw [hAx, hL]; exact hhold
+        · intro _
+          change (takeover s n).acked s.cfg.prim n ≤ s.ackHigh n
+          rw [hAx]; exact h.ackedHigh _ _ hxp hnp hfn
         · -- Every other eligible replica is counted by x and still follows it.
           intro m hm hi
           change takeoverElig s n m = true at hm
@@ -220,7 +238,7 @@ theorem failover_takeover : FailoverInv (takeover s n) := by
           exact hxq (thinksPrimary_knowsLatest h hx' (by unfold KnowsLatest; rw [this])).2.symm
       have hF := h.stale x hx' hv'
       obtain ⟨w, ⟨hw1, hw2⟩, hwF⟩ := hF.attained
-      have hn6 : (s.log x).take (fence s x) <+: s.log n := by
+      have hn6 : (s.log x).take (fence s x) <+: s.log n ∧ fence s x ≤ s.ackHigh n := by
         rcases hF.eligHolds n hel hin with d | ⟨_, d2⟩
         · exact d
         · rw [hfn] at d2; exact absurd d2.symm hxq
@@ -228,19 +246,25 @@ theorem failover_takeover : FailoverInv (takeover s n) := by
         rw [hK]; split
         · show n ≠ x; exact fun c => e c.symm
         · exact hw2)
-      refine Fenced.of_left hw' ?_ ?_ ?_
+      refine Fenced.of_left hw' ?_ ?_ ?_ ?_
       · intro _
         change (takeover s n).acked x w ≤ (takeover s n).recon n
         rw [hAx, hwF, hRn]
-        have := hn6.length_le
+        have := hn6.1.length_le
         rw [List.length_take_of_le (hwF ▸ h.ackedLe x w hx')] at this; exact this
       · intro _
         change ((takeover s n).log x).take ((takeover s n).acked x w) <+: (takeover s n).log n
-        rw [hAx, hwF, hL]; exact hn6
+        rw [hAx, hwF, hL]; exact hn6.1
+      · intro _
+        change (takeover s n).acked x w ≤ s.ackHigh n
+        rw [hAx, hwF]; exact hn6.2
       · intro m hm hi
         change takeoverElig s n m = true at hm
         change s.cfg.inc m = s.inc m at hi
         obtain ⟨hm1, _, hm3⟩ := (hNE m).1 hm
+        show ((s.log x).take ((takeover s n).acked x w) <+: s.log m ∧
+            (takeover s n).acked x w ≤ s.ackHigh m) ∨
+          ((takeover s n).sync x m = true ∧ ((takeover s n).known m).prim = x)
         rw [hAx, hwF, hSx, hKo m hm3]
         exact hF.eligHolds m hm1 hi
   authEx := ⟨n, Or.inr rfl, hin⟩ }

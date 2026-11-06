@@ -15,7 +15,7 @@ One line per action, each pointing at the subsystem file that proves it:
 | Commit, Count | `Preserve/Commit.lean` |
 | Learn, MakeEligible, MakeIneligible | `Preserve/Config.lean` |
 | Takeover | `Preserve/Failover.lean` |
-| RestartEmpty, RestartKeep | `Preserve/Restart.lean` |
+| RestartEmpty, RestartKeep, RestartPartial | `Preserve/Restart.lean` |
 -/
 
 open Cslib
@@ -39,6 +39,8 @@ theorem inv_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv s) (h
   | resync r hne _ hsy hke => exact inv_resync h r hne hsy hke
   | restartEmpty n hk hsv => exact inv_restartEmpty h n hk hsv
   | restartKeep n hk => exact inv_restartKeep h n hk
+  | restartPartialKeep n k hkl hk hkeep => exact inv_restartPartialKeep h n k hkl hk hkeep
+  | restartPartialFresh n k hkl hk hfresh hsv => exact inv_restartPartialFresh h n k hkl hsv hk hfresh
 
 /-- `Inv` is a one-step invariant of the protocol, in CSLib's sense. -/
 theorem inv_trInv {m : Nat} : (lts m true true (Node := Node)).TrInv Inv :=

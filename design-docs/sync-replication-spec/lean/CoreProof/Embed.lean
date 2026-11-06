@@ -35,6 +35,7 @@ def toRecon (s : State Node) : ReconProof.State Node where
   commit := s.commit
   recon  := s.recon
   term   := s.term
+  ackHigh := s.ackHigh
   hist   := s.hist
 
 theorem toRecon_init (i : Node) : toRecon (init i) = ReconProof.init i := rfl

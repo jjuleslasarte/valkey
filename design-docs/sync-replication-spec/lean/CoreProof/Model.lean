@@ -33,6 +33,10 @@ structure State (Node : Type) [DecidableEq Node] where
   commit : Node → Nat
   recon  : Node → Nat
   term   : Node → Nat
+  /-- Ghost, read by no action or property of this model: the highest offset each node
+  has acknowledged, kept in step with `RestartProof.State.ackHigh` so that this model
+  embeds into CoreRestart field for field. -/
+  ackHigh : Node → Nat
   hist   : List Nat
 
 variable {Node : Type} [DecidableEq Node]
@@ -48,6 +52,7 @@ def init (i : Node) : State Node where
   commit := fun _ => 0
   recon  := fun _ => 0
   term   := fun n => if n = i then 1 else 0
+  ackHigh := fun _ => 0
   hist   := []
 
 /-- ThinksPrim(p) -/
@@ -68,12 +73,14 @@ def replicate (s : State Node) (r : Node) : State Node :=
   { s with log := upd s.log r (s.log r ++ [(s.log (primaryOf s r)).getD (s.log r).length 0]) }
 
 def ack (s : State Node) (r : Node) : State Node :=
-  { s with acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r (s.log r).length) }
+  { s with acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r (s.log r).length),
+           ackHigh := upd s.ackHigh r (max (s.ackHigh r) (s.log r).length) }
 
 def commitNext (s : State Node) (p : Node) : State Node :=
   { s with commit := upd s.commit p (s.commit p + 1),
            hist := if s.commit p = s.hist.length
-                   then s.hist ++ [(s.log p).getD (s.commit p) 0] else s.hist }
+                   then s.hist ++ [(s.log p).getD (s.commit p) 0] else s.hist,
+           ackHigh := upd s.ackHigh p (max (s.ackHigh p) (s.commit p + 1)) }
 
 def count (s : State Node) (p r : Node) : State Node :=
   { s with sync := upd s.sync p (upd (s.sync p) r true) }

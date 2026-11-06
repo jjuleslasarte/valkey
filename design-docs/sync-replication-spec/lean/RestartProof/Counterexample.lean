@@ -3,7 +3,7 @@ import RestartProof.Model
 /-!
 # Counterexamples for CoreRestart: what breaks without each restart-related check
 
-Three concrete runs on 3 nodes (`Fin 3`, node 0 the initial primary). Each run is a
+Four concrete runs on 3 nodes (`Fin 3`, node 0 the initial primary). Each run is a
 CSLib multi-step transition (`LTS.MTr`) whose label list is the trace, so the sequence of
 actions can be read off the theorem statement. Every guard is evaluated by `decide`, so
 each run is a genuine execution of the model.
@@ -20,9 +20,15 @@ each run is a genuine execution of the model.
   a committed write restart empty and no node holds it. No node is authoritative
   either, so EligibleHoldsCommitted holds vacuously; the theorem states the loss
   directly. `StepNoSurv` is `Step` plus RestartEmpty without its guard.
+- `staleRestoreKeepsInc_unsafe`: the design as written changes a node's incarnation
+  only on a restart *without* data. A replica that acknowledged a write, then restarted
+  from a persistence file that predates it, keeps its incarnation and its eligibility
+  while lacking a committed write. `StepStaleKeep` is `Step` plus RestartPartial that
+  keeps the incarnation whatever the file covers.
 
-These mirror TLC's `CoreRestart_noRebuildMin1`, `CoreRestart_noIncMin1` and
-`CoreRestart_noSurvivorMin1`, with all runs at min-sync-replicas = 1.
+These mirror TLC's `CoreRestart_noRebuildMin1`, `CoreRestart_noIncMin1`,
+`CoreRestart_noSurvivorMin1` and `CoreRestart_staleKeepMin1`, with all runs at
+min-sync-replicas = 1.
 -/
 
 open Cslib
@@ -178,5 +184,47 @@ EligibleHoldsCommitted holds only vacuously; this statement names the loss itsel
 theorem noSurvivor_loses : ∃ s, (ltsNoSurv 1 true true).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ (∀ n, ¬ s.hist <+: s.log n) ∧ (∀ n, ¬ IsAuthoritative s n) :=
   ⟨f9, ⟨_, noSurvivor_run⟩, by decide, by decide, by decide⟩
+
+/-! ## Stale restore with the incarnation kept (the design as written) -/
+
+/-- `Step`, plus RestartPartial keeping the incarnation for any `k`: the file need not
+cover what the node acknowledged. -/
+inductive StepStaleKeep (m : Nat) (rf rb : Bool) : State N → Action N → State N → Prop
+  | step {s μ s'} : Step m rf rb s μ s' → StepStaleKeep m rf rb s μ s'
+  | restartPartial (s : State N) (n : N) (k : Nat) : KnowsLatest s n → k < (s.log n).length →
+      StepStaleKeep m rf rb s (.restartPartial n k) (restartPartialKeep rb s n k)
+
+/-- The design as written, as a transition system. -/
+def ltsStaleKeep (m : Nat) (rf rb : Bool) : LTS (State N) (Action N) where
+  Tr := StepStaleKeep m rf rb
+
+def g8 := restartPartialKeep true f7 1 0   -- n1 restarts from a file without the write
+
+/-- The run: a write commits on n0 and n1, n1 learns the latest configuration, then
+restarts from a stale file. Only the last action is the weakened one. -/
+theorem staleRestoreKeepsInc_run : (ltsStaleKeep 1 true true).MTr e0
+    [.count 0 1, .makeElig 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+     .learn 1, .restartPartial 1 0] g8 :=
+  .stepL (.step (Step.count e0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)
+    (by decide))) <|
+  .stepL (.step (Step.makeElig e1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.append e2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
+    (by decide)) (by decide))) <|
+  .stepL (.step (Step.replicate e3 1 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.ack e4 1 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.commit e5 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
+    (by decide)) (by decide) (by decide))) <|
+  .stepL (.step (Step.learn e6 1 (by decide))) <|
+  .stepL (StepStaleKeep.restartPartial f7 1 0 (by decide) (by decide)) <|
+  .refl
+
+/-- The incarnation rule for a stale restore is needed: if a node keeps its incarnation
+after restarting from a file that does not cover what it acknowledged, a reachable
+state has an authoritative eligible replica (n1) that lacks the committed history. -/
+theorem staleRestoreKeepsInc_unsafe :
+    ∃ s, (ltsStaleKeep 1 true true).CanReach (init 0) s ∧ ¬ Safety s := by
+  refine ⟨g8, ⟨_, staleRestoreKeepsInc_run⟩, ?_⟩
+  intro ⟨hehc, _⟩
+  exact absurd (hehc 1 (by decide)) (by decide)
 
 end RestartProof

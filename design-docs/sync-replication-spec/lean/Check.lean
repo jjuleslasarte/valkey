@@ -18,3 +18,4 @@ import RestartProof
 #print axioms RestartProof.noRebuild_unsafe
 #print axioms RestartProof.noIncCheck_unsafe
 #print axioms RestartProof.noSurvivor_loses
+#print axioms RestartProof.staleRestoreKeepsInc_unsafe
