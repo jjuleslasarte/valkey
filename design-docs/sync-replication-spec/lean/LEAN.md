@@ -118,8 +118,8 @@ See "Lease timing" below.
 | Field | Type | Meaning |
 |---|---|---|
 | `log` | `Node → List Nat` | Each node's replication log. An entry is the term of the primary that wrote it, so a write is identified by its offset and term. 0-indexed; the design's offset `o` is index `o - 1`. |
-| `inc` | `Node → Nat` | Each node's incarnation. A restart without data increments it. |
-| `cfg` | `Cfg Node` | The latest Cluster V2 configuration: `ver`, `prim`, `eligible : Node → Bool`, `incarnation : Node → Nat` (the incarnation recorded for each node). |
+| `incarnation` | `Node → Nat` | Each node's incarnation. A restart without data increments it. |
+| `cfg` | `Cfg Node` | The latest Cluster V2 configuration: `version`, `primary`, `eligible : Node → Bool`, `incarnation : Node → Nat` (the incarnation recorded for each node). |
 | `known` | `Node → Cfg Node` | The configuration each node last learned; possibly stale. |
 | `sync` | `Node → Node → Bool` | `sync p r`: `r` is in `p`'s sync replica set. |
 | `acked` | `Node → Node → Nat` | `acked p r`: how far `p` believes `r` has acknowledged. |
@@ -165,7 +165,7 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 | `learn n` | `n` does not know the latest configuration | `known n := cfg`; `sync n` emptied unless `n` is primary there |
 | `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.incarnation n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the matching eligible replicas; `acked n`, `commit n` reset; `recon n := (log n).length`; `term n := cfg.version + 1` |
 | `resync r` | `r` does not consider itself primary; its log is not a prefix of its primary's; `r` is neither counted nor eligible in its primary's configuration | `log r := (log p).take (catchUpPoint s p)`; `acked p r := 0`; `commit r` capped |
-| `restartEmpty n` | `n` knows the latest configuration; some other node is authoritative | `log n := []`, `inc n + 1`, volatile state and `ackHigh n` reset; the current primary drops `n` from its sync set and acks |
+| `restartEmpty n` | `n` knows the latest configuration; some other node is authoritative | `log n := []`, `incarnation n + 1`, volatile state and `ackHigh n` reset; the current primary drops `n` from its sync set and acks |
 | `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `recon n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `known n`), else emptied |
 | `restartPartial n k`, keeping the incarnation | as `restartKeep`, with `k < (log n).length` and `ackHigh n ≤ k` | `restartKeep` on `(log n).take k`, with `recon n := k` |
 | `restartPartial n k`, new incarnation | `n` knows the latest configuration, `k < (log n).length`, `k < ackHigh n`, some other node authoritative | `restartEmpty`, except `log n := (log n).take k` |
