@@ -216,11 +216,18 @@ incarnation checks below removed at once.
 eligibility, commits, releases replies) only while its own configuration
 records its current incarnation.
 
-**Scope:** the model also checks incarnations in two other places: a primary
-does not count an eligible replica whose recorded incarnation does not match
-(`Count`), and only matching replicas count toward min-sync-replicas
-(`Writable`). The proofs use both, but no counterexample shows that either is
-needed on its own.
+**Scope:** the model also checked incarnations in two other places, and
+each has now been settled on its own. Counting a replica into the sync set
+(`Count`) needs no incarnation check: the proofs never used it, and the guard
+has been removed from the Lean model. Counting toward min-sync-replicas
+(`Writable`) does need it, for the two-copies property rather than for safety:
+`SyncReplication.noIncWritable_oneCopy` (14 steps, min-sync = 1) has a replica
+restart empty, stay listed as eligible, catch up and be counted again; the
+primary then commits with it as its only sync member, and after the commit
+the primary is the only authoritative node. The data is on the replica, but
+the replica cannot take over. **Proposed doc change:** a sync replica counts
+toward min-sync-replicas only while it is eligible with the incarnation the
+configuration records for it.
 
 ## Survival condition (an assumption, not a defect)
 
