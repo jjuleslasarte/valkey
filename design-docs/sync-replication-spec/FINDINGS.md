@@ -17,11 +17,12 @@ F5, the incarnation check and the survival condition there is also a Lean
 counterexample: a run of the model with that item removed, every step checked
 by Lean. Bounds are stated with each result.
 
-The Lean counterexamples `RestartProof.noRebuild_unsafe`, `noIncCheck_unsafe`
-and `noSurvivor_loses` are on the Lean proof branch (`sync-repl-lean`,
-`design-docs/sync-replication-spec/lean/RestartProof/Counterexample.lean`);
-this branch's `lean/` predates them. Every other theorem named here is in
-this branch's `lean/`.
+Lean theorem names (`SyncReplication.safety`, `noRebuild_unsafe`, ...) refer to
+the Lean proof branch (`sync-repl-lean`,
+`design-docs/sync-replication-spec/lean/SyncReplication/`). This branch's
+`lean/` is an older snapshot of the same proofs under the `RestartProof`,
+`ReconProof`, `CoreProof` and `AckProof` namespaces, without the restart
+counterexamples.
 
 ## F1. Promotion after takeover can lose an acknowledged write
 
@@ -76,29 +77,26 @@ counts are as reported at the time; reproduce them with `spec/regress.sh`
 
 **Proof status (CoreRecon):** the fix as proposed, with promotion catch-up
 and full resync measured against the inherited log while unreconciled, is
-proven safe in Lean for every min-sync value (`ReconProof.safety`,
+proven safe in Lean for every min-sync value (`SyncReplication.safety`,
 `ackSafety`, `ackedHeld`; `spec/CoreRecon.tla`). Core's stricter rule (no
 promotion or resync until reconciled) is safe but deadlocks at min-sync ≥ 1
 after a takeover that leaves no sync replica: `CoreRecon_strictReachLoneReconMin1`
 explores the full state space without ever reconciling such a primary,
 while `CoreRecon_ReachLoneReconMin1` (the fix) reconciles it in 12 states.
-With restarts as well, the same fix is part of `RestartProof.safety` (see F5).
-Lean counterexample without the fix: `CoreProof.noReconcile_unsafe` (11 steps)
-and `ReconProof.noReconcile_unsafe`.
+Lean counterexample without the fix: `SyncReplication.noReconcile_unsafe`
+(11 steps).
 
 ## F2. Held replies must be fenced by primaryship, not only by offset
 
 **Status:** confirmed by TLC, and all 3 reviewers agree.
 
 **Proof status:** with the F1 and F2 fixes, no acknowledged write is lost,
-for any number of nodes and any log length. `AckProof.ackSafety`
-(`lean/AckProof/`, `spec/CoreAck.tla`) proves it in Core's model: min-sync = 0,
-no restarts, Core's stricter reconciliation rule. `RestartProof.ackSafety` and
+for any number of nodes and any log length. `SyncReplication.ackSafety` and
 `ackedHeld` prove it for every min-sync value, with restarts with and without
 data, given the F5 fix and the survival condition (see below). Neither covers
 forced failover. Writes are identified by offset and primaryship term, and the
 fence uses the node's local, possibly stale view of its primaryship. Without
-the reply fence, `CoreAck_noReplyFence` (TLC) and `AckProof.noReplyFence_unsafe`
+the reply fence, `CoreAck_noReplyFence` (TLC) and `SyncReplication.noReplyFence_unsafe`
 (Lean, 14 steps) acknowledge a write that is not in the history. Reviewed in
 round 4: sound within that scope.
 
@@ -156,7 +154,7 @@ records eligibility in Cluster V2. Section 5, "Restarts", says only that
 lease state is in memory. A primary that restarts with its data comes back
 with an empty sync set and can commit without an eligible replica.
 
-**Counterexample** (Lean `RestartProof.noRebuild_unsafe`, 9 steps,
+**Counterexample** (Lean `SyncReplication.noRebuild_unsafe`, 9 steps,
 min-sync = 1; TLC `CoreRestart_noRebuildMin1`, 10 states, breaks the same
 invariant):
 1. n0 is primary. It counts n1, makes it eligible, and writes.
@@ -178,7 +176,7 @@ sync set from the eligible replicas in the current configuration (whose
 incarnations match), discards cached acks, and commits nothing until fresh
 acks arrive.
 
-**Proof status:** with the fix, `RestartProof.safety`, `ackSafety` and
+**Proof status:** with the fix, `SyncReplication.safety`, `ackSafety` and
 `ackedHeld` (Lean, every min-sync, any number of nodes, unbounded restarts)
 prove that every authoritative node holds the committed history and no
 acknowledged write is lost, given the survival condition at every restart
@@ -203,7 +201,7 @@ Section 6 says the takeover compare-and-set checks the incarnation, so a node
 that came back empty cannot be promoted. That is not enough: the node may
 already be the primary.
 
-**Counterexample** (Lean `RestartProof.noIncCheck_unsafe`, 9 steps,
+**Counterexample** (Lean `SyncReplication.noIncCheck_unsafe`, 9 steps,
 min-sync = 1, every other fix on):
 1. A write commits on n0 (primary) and n1 (eligible).
 2. n0 restarts empty, with a new incarnation. n1 keeps the write.
@@ -232,7 +230,7 @@ detected"). The proofs therefore assume that at every restart without data,
 some other authoritative node keeps its data. This entry records that the
 guarantee depends on it.
 
-**Counterexample** (Lean `RestartProof.noSurvivor_loses`, 9 steps; TLC
+**Counterexample** (Lean `SyncReplication.noSurvivor_loses`, 9 steps; TLC
 `CoreRestart_noSurvivorMin0`, `CoreRestart_noSurvivorMin1`): a write commits
 on n0 and n1, n1 restarts empty, then n0 restarts empty. No node holds the
 write, and no node is authoritative. Because no node is authoritative,
@@ -310,7 +308,7 @@ fence is unneeded in the full protocol: with forced failover it matters
 In `spec/CoreAck.tla` there is no lease and no "currently primary" guard. A
 deposed primary can still commit and release OK
 (`CoreAck_ReachDeposedCommit`, `CoreAck_ReachDeposedAck`), yet
-`AckProof.ackSafety` proves that no acknowledged write is lost. The F8 loss
+`SyncReplication.ackSafety` proves that no acknowledged write is lost. The F8 loss
 depends on forced failover (`Shard_f_noFence`). Without forced failover,
 the fix still matters for stale reads and for clients being told OK by a
 node that is no longer primary.
