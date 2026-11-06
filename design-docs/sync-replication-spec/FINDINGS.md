@@ -229,6 +229,22 @@ the replica cannot take over. **Proposed doc change:** a sync replica counts
 toward min-sync-replicas only while it is eligible with the incarnation the
 configuration records for it.
 
+## Early removal of a counted replica (a qualifier, not a defect)
+
+Section 4: "If the replica falls behind or fails before step 4, the primary
+simply removes it from the commit calculation." The Lean model has this as
+`Uncount`, and the proofs cover it with two conditions. "Before step 4" is
+load-bearing: dropping a replica that is already eligible lets the primary
+commit without it (`SyncReplication.uncountElig_unsafe`, 9 steps, min-sync = 1;
+TLC `Core_earlyDrop`, `CoreRecon_earlyDropMin1`, `CoreRestart_earlyDropMin1`).
+The model also allows early removal only to a primary that knows the latest
+configuration: a deposed primary that drops the member whose frozen
+acknowledgement fences it could commit past what the new configuration holds.
+No counterexample shows the second condition is needed; the proof uses it.
+**Proposed doc change:** state that early removal applies to replicas not yet
+committed as eligible, and that a primary performs it only while it holds the
+latest shard configuration.
+
 ## Survival condition (an assumption, not a defect)
 
 The design accepts that committed writes are lost if every member of the sync
