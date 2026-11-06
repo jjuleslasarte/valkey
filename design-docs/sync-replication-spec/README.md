@@ -212,12 +212,12 @@ ordered configuration; each node's copy may be behind it but never ahead.
 
 **Membership** (`MembershipInvariant`, design §4). The ordering rules of promotion
 and demotion.
-- `eligSync`: every eligible replica with a matching incarnation is counted ("must
+- `eligibleCounted`: every eligible replica with a matching incarnation is counted ("must
   count toward commits before it becomes eligible"). A restarted primary rebuilds its
   sync replica set so that this survives the restart.
 - `syncNew`: a replica the current primary counts but has not made eligible follows
   it and has acknowledged at least the catch-up point.
-- `eligFol`: an eligible replica that follows an old primary is still eligible in that
+- `eligibleInOldConfig`: an eligible replica that follows an old primary is still eligible in that
   primary's configuration. This is why a full resync never truncates an eligible
   replica, and why early removal never drops one.
 

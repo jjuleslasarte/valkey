@@ -33,7 +33,7 @@ instance (s : State N) (p : N) : Decidable (Reconciled s p) := by
 
 /-- `Writable 1` from one counted replica. -/
 theorem writable_one {s : State N} {p r : N} (hs : s.sync p r = true)
-    (he : (s.known p).elig r = true) (hi : (s.known p).inc r = s.inc r) : Writable 1 s p :=
+    (he : (s.known p).eligible r = true) (hi : (s.known p).incarnation r = s.incarnation r) : Writable 1 s p :=
   (writable_iff_list 1 s p).2 ⟨[r], List.nodup_singleton r, by simp, by simp [hs, he, hi]⟩
 
 /-- `Writable 0` always holds. -/
@@ -55,7 +55,7 @@ write is on n0 and n1, both authoritative, and the committed history is `[1]`. -
 
 def c0 : State N := init 0
 def c1 := count c0 0 1             -- n0 counts n1
-def c2 := makeElig c1 0 1          -- n1 eligible
+def c2 := makeEligible c1 0 1          -- n1 eligible
 def c3 := appendWrite c2 0         -- n0 writes at offset 1
 def c4 := replicate c3 1           -- n1 copies it
 def c5 := ack c4 1                 -- n1 acknowledges
@@ -63,9 +63,9 @@ def c6 := commitNext c5 0          -- committed on n0 and n1
 
 /-- The shared prefix, at min-sync-replicas = 1. -/
 theorem committed_run : (lts 1).MTr c0
-    [.count 0 1, .makeElig 0 1, .append 0, .replicate 1, .ack 1, .commit 0] c6 :=
+    [.count 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0] c6 :=
   .stepL (Step.count c0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (Step.makeElig c1 0 1 (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (Step.makeEligible c1 0 1 (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.append c2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide)) <|
   .stepL (Step.replicate c3 1 (by decide) (by decide) (by decide)) <|

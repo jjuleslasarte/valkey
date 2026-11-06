@@ -33,7 +33,7 @@ def ltsNoReconcile (m : Nat) : LTS (State N) (Action N) where
 
 def r0 : State N := init 0
 def r1 := count r0 0 1             -- n0 counts n1
-def r2 := makeElig r1 0 1          -- n1 eligible (version 2)
+def r2 := makeEligible r1 0 1          -- n1 eligible (version 2)
 def r3 := appendWrite r2 0         -- n0 writes at offset 1
 def r4 := learn r3 1               -- n1 learns version 2
 def r5 := replicate r4 1           -- n1 copies the write
@@ -42,14 +42,14 @@ def r7 := commitNext r6 0          -- n0 commits: the history is [1]
 def r8 := takeover r7 1            -- n1 takes over (version 3) with commit point 0
 def r9 := learn r8 2               -- n2 learns version 3 and follows n1
 def r10 := count r9 1 2            -- n1 counts the empty n2: ack 0 ≥ commit 0
-def r11 := makeElig r10 1 2        -- n2 eligible with an empty log
+def r11 := makeEligible r10 1 2        -- n2 eligible with an empty log
 
 /-- The run; the label list is its trace. Only `count 1 2` is the weakened action. -/
 theorem noReconcile_run : (ltsNoReconcile 1).MTr r0
-    [.count 0 1, .makeElig 0 1, .append 0, .learn 1, .replicate 1, .ack 1, .commit 0,
-     .takeover 1, .learn 2, .count 1 2, .makeElig 1 2] r11 :=
+    [.count 0 1, .makeEligible 0 1, .append 0, .learn 1, .replicate 1, .ack 1, .commit 0,
+     .takeover 1, .learn 2, .count 1 2, .makeEligible 1 2] r11 :=
   .stepL (.step (Step.count r0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.makeElig r1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.makeEligible r1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append r2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide))) <|
   .stepL (.step (Step.learn r3 1 (by decide))) <|
@@ -60,7 +60,7 @@ theorem noReconcile_run : (ltsNoReconcile 1).MTr r0
   .stepL (.step (Step.takeover r7 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.learn r8 2 (by decide))) <|
   .stepL (StepNoReconcile.count r9 1 2 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (.step (Step.makeElig r10 1 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.makeEligible r10 1 2 (by decide) (by decide) (by decide) (by decide))) <|
   .refl
 
 /-- Reconciliation is needed: without it a reachable state has an authoritative

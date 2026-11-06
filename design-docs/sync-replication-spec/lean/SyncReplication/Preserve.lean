@@ -33,8 +33,8 @@ theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv
   | commit p hp _ hlen hcap => exact invariant_commit h p hp hlen hcap
   | count p r hp hrp hf _ hle => exact invariant_count h p r hp hrp hf hle
   | uncount p r hp hk hs he => exact invariant_uncount h p r hp hk hs he
-  | makeElig p r hp hk hsy he => exact invariant_makeElig h hp hk hsy he
-  | makeInelig p r hp hk he => exact invariant_makeInelig h hp hk he
+  | makeEligible p r hp hk hsy he => exact invariant_makeElig h hp hk hsy he
+  | makeIneligible p r hp hk he => exact invariant_makeInelig h hp hk he
   | learn n hk => exact invariant_learn h n hk
   | takeover n hk he hnp hin => exact invariant_takeover h n hk he hnp hin
   | resync r hne _ hsy hke => exact invariant_resync h r hne hsy hke

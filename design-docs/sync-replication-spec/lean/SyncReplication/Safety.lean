@@ -22,7 +22,7 @@ theorem safety {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) : Saf
 matching incarnation counts toward the commit, so after the commit the history is on
 at least two distinct authoritative nodes, the primary and that replica. -/
 theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
-    (h : Reachable m i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.prim)
+    (h : Reachable m i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.primary)
     (hw : Writable m s p) (hlen : s.commit p < (s.log p).length)
     (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
     ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
@@ -33,9 +33,9 @@ theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
     Set.one_le_encard_iff_nonempty.mp (le_trans (by exact_mod_cast hm) hw)
   subst hpp
   rw [hi.primKnows] at h2 h3
-  have hrp : r ≠ s.cfg.prim := by intro e; rw [e, hi.noSelfSync] at h1; exact absurd h1 (by decide)
-  have har : IsAuthoritative (commitNext s s.cfg.prim) r := ⟨Or.inl h2, h3⟩
-  have hap : IsAuthoritative (commitNext s s.cfg.prim) s.cfg.prim := by
+  have hrp : r ≠ s.cfg.primary := by intro e; rw [e, hi.noSelfSync] at h1; exact absurd h1 (by decide)
+  have har : IsAuthoritative (commitNext s s.cfg.primary) r := ⟨Or.inl h2, h3⟩
+  have hap : IsAuthoritative (commitNext s s.cfg.primary) s.cfg.primary := by
     refine ⟨Or.inr rfl, ?_⟩
     have := hp.2; rw [hi.primKnows] at this; exact this
   exact ⟨r, hrp, har, hap, hs' r har, hs' _ hap⟩

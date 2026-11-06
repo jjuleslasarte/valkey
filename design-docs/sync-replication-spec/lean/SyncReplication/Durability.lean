@@ -27,10 +27,10 @@ theorem getD_take {l : List Nat} {i k : Nat} (hi : i < k) :
 /-- Held-reply invariant: a reply whose primaryship is current points at its own
 entry in that primary's log. -/
 def HeldInvariant (s : State Node) (held : List (Held Node)) : Prop :=
-  ∀ x ∈ held, x.2.2 ≤ s.cfg.ver ∧
+  ∀ x ∈ held, x.2.2 ≤ s.cfg.version ∧
     (fenced s x → 1 ≤ x.2.1 ∧ x.2.1 ≤ (s.log x.1).length ∧ (s.log x.1).getD (x.2.1 - 1) 0 = x.2.2)
 
-def TermLe (s : State Node) : Prop := ∀ n, s.term n ≤ s.cfg.ver
+def TermLe (s : State Node) : Prop := ∀ n, s.term n ≤ s.cfg.version
 
 structure ReplyInvariant (a : AState Node) : Prop where
   core  : Invariant a.core
@@ -48,8 +48,8 @@ theorem replyInvariant_init (i : Node) : ReplyInvariant (ainit i) where
 invariants read. -/
 theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermLe s) {m : Nat} {μ : Action Node}
     (hs : Step m s μ s') (hμ : μ.isRestart = false) :
-    s.hist <+: s'.hist ∧ s.cfg.ver ≤ s'.cfg.ver ∧ TermLe s' ∧
-    ∀ x t, t ≤ s.cfg.ver → ThinksPrimary s' x → s'.term x = t →
+    s.hist <+: s'.hist ∧ s.cfg.version ≤ s'.cfg.version ∧ TermLe s' ∧
+    ∀ x t, t ≤ s.cfg.version → ThinksPrimary s' x → s'.term x = t →
       ThinksPrimary s x ∧ s.term x = t ∧ s.log x <+: s'.log x := by
   cases hs with
   | append p _ _ _ =>
@@ -70,65 +70,65 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermLe s) {m : Na
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
   | count p r _ _ _ _ _ =>
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
-  | makeElig p r hp hk _ _ =>
+  | makeEligible p r hp hk _ _ =>
     refine ⟨List.prefix_refl _, Nat.le_succ _, fun n => Nat.le_succ_of_le (ht n), ?_⟩
     intro x _ _ hx e
     refine ⟨?_, e, List.prefix_refl _⟩
     by_cases hxp : x = p
     · subst hxp; exact hp
-    · unfold ThinksPrimary at hx ⊢; simpa [makeElig, upd_ne _ _ hxp] using hx
-  | makeInelig p r hp hk _ =>
+    · unfold ThinksPrimary at hx ⊢; simpa [makeEligible, update_of_ne _ _ hxp] using hx
+  | makeIneligible p r hp hk _ =>
     refine ⟨List.prefix_refl _, Nat.le_succ _, fun n => Nat.le_succ_of_le (ht n), ?_⟩
     intro x _ _ hx e
     refine ⟨?_, e, List.prefix_refl _⟩
     by_cases hxp : x = p
     · subst hxp; exact hp
-    · unfold ThinksPrimary at hx ⊢; simpa [makeInelig, upd_ne _ _ hxp] using hx
+    · unfold ThinksPrimary at hx ⊢; simpa [makeIneligible, update_of_ne _ _ hxp] using hx
   | learn n hk =>
     refine ⟨List.prefix_refl _, Nat.le_refl _, ht, ?_⟩
     intro x _ _ hx e
     refine ⟨?_, e, List.prefix_refl _⟩
     by_cases hxn : x = n
     · exfalso; apply hk
-      have hx' : s.cfg.prim = x := by have := hx.1; simpa [learn, hxn] using this
+      have hx' : s.cfg.primary = x := by have := hx.1; simpa [learn, hxn] using this
       unfold KnowsLatest; rw [← hxn, ← hx', h.primKnows]
-    · unfold ThinksPrimary at hx ⊢; simpa [learn, upd_ne _ _ hxn] using hx
+    · unfold ThinksPrimary at hx ⊢; simpa [learn, update_of_ne _ _ hxn] using hx
   | takeover n _ _ _ _ =>
     refine ⟨List.prefix_refl _, Nat.le_succ _, ?_, ?_⟩
     · intro x
-      show upd s.term n (s.cfg.ver + 1) x ≤ s.cfg.ver + 1
+      show update s.term n (s.cfg.version + 1) x ≤ s.cfg.version + 1
       by_cases hxn : x = n
       · subst hxn; simp
-      · rw [upd_ne _ _ hxn]; exact Nat.le_succ_of_le (ht x)
+      · rw [update_of_ne _ _ hxn]; exact Nat.le_succ_of_le (ht x)
     · intro x t htv hx e
       by_cases hxn : x = n
       · subst hxn
-        have : s.cfg.ver + 1 = t := by simpa [takeover] using e
+        have : s.cfg.version + 1 = t := by simpa [takeover] using e
         omega
       · refine ⟨?_, ?_, List.prefix_refl _⟩
-        · unfold ThinksPrimary at hx ⊢; simpa [takeover, upd_ne _ _ hxn] using hx
-        · simpa [takeover, upd_ne _ _ hxn] using e
+        · unfold ThinksPrimary at hx ⊢; simpa [takeover, update_of_ne _ _ hxn] using hx
+        · simpa [takeover, update_of_ne _ _ hxn] using e
   | resync r hne _ _ _ =>
     refine ⟨List.prefix_refl _, Nat.le_refl _, ht, ?_⟩
     intro x _ _ hx e
     have hxr : x ≠ r := by
       intro hxr; subst hxr; exact hne hx.1
     refine ⟨hx, e, ?_⟩
-    show s.log x <+: upd s.log r _ x
-    rw [upd_ne _ _ hxr]
+    show s.log x <+: update s.log r _ x
+    rw [update_of_ne _ _ hxr]
   | restartEmpty n hk _ =>
     refine ⟨List.prefix_refl _, Nat.le_refl _, ht, ?_⟩
     intro x _ _ hx e
     have hxn : x ≠ n := by
       intro c; subst c
       have h2 := hx.2
-      change (s.known x).inc x = upd s.inc x (s.inc x + 1) x at h2
-      rw [h.knownEq x hk, upd_same] at h2; have := h.incLe x; omega
-    have hI : (restartEmpty s n).inc x = s.inc x := upd_ne _ _ hxn
+      change (s.known x).incarnation x = update s.incarnation x (s.incarnation x + 1) x at h2
+      rw [h.knownEq x hk, update_self] at h2; have := h.incLe x; omega
+    have hI : (restartEmpty s n).incarnation x = s.incarnation x := update_of_ne _ _ hxn
     refine ⟨⟨hx.1, ?_⟩, e, ?_⟩
     · have h2 := hx.2; rw [hI] at h2; exact h2
-    · show s.log x <+: upd s.log n [] x
-      rw [upd_ne _ _ hxn]
+    · show s.log x <+: update s.log n [] x
+      rw [update_of_ne _ _ hxn]
   | restartKeep n _ =>
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
   | restartPartialKeep n k _ _ _ => exact absurd hμ (by simp [Action.isRestart])
@@ -186,7 +186,7 @@ theorem replyInvariant_abort {a : AState Node} (h : ReplyInvariant a) (x : Held 
 surviving replies are on other nodes, whose logs, primaryship and terms it leaves alone,
 and it changes neither the history nor the configuration version. -/
 theorem replyInvariant_restart {a : AState Node} {c : State Node} (h : ReplyInvariant a) (hc : Invariant c) (n : Node)
-    (hhist : c.hist = a.core.hist) (hver : c.cfg.ver = a.core.cfg.ver) (hterm : c.term = a.core.term)
+    (hhist : c.hist = a.core.hist) (hver : c.cfg.version = a.core.cfg.version) (hterm : c.term = a.core.term)
     (hlog : ∀ x, x ≠ n → c.log x = a.core.log x)
     (htp : ∀ x, x ≠ n → ThinksPrimary c x → ThinksPrimary a.core x) :
     ReplyInvariant ⟨c, dropHeld a.held n, a.okd⟩ := by

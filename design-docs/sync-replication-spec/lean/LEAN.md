@@ -38,7 +38,7 @@ Dependency order: `Lists` → `Model` → `Replies`, `Invariant` → `Contracts`
 theorem safety {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) : Safety s
 
 theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
-    (h : Reachable m i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.prim)
+    (h : Reachable m i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.primary)
     (hw : Writable m s p) (hlen : s.commit p < (s.log p).length)
     (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
     ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
@@ -50,7 +50,7 @@ equality, so any number of nodes; logs, configuration versions, incarnations and
 restarts are unbounded. `Safety` is `EligibleHoldsCommitted ∧ CommittedAgree`:
 
 ```lean
-IsAuthoritative s n       :=  (s.cfg.elig n = true ∨ n = s.cfg.prim) ∧ s.cfg.inc n = s.inc n
+IsAuthoritative s n       :=  (s.cfg.eligible n = true ∨ n = s.cfg.primary) ∧ s.cfg.incarnation n = s.incarnation n
 EligibleHoldsCommitted s  :=  ∀ n, IsAuthoritative s n → s.hist <+: s.log n
 CommittedAgree s          :=  ∀ p, s.commit p ≤ (s.log p).length ∧
                                    (s.log p).take (s.commit p) = s.hist.take (s.commit p)
@@ -99,7 +99,7 @@ theorem noSurvivor_loses          : ∃ s, (ltsNoSurv 1).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ (∀ n, ¬ s.hist <+: s.log n) ∧ (∀ n, ¬ IsAuthoritative s n)
 theorem uncountElig_unsafe        : ∃ s, (ltsUncountElig 1).CanReach (init 0) s ∧ ¬ Safety s
 theorem noIncWritable_oneCopy     : ∃ s, (ltsNoIncWritable 1).CanReach (init 0) s ∧
-    ThinksPrimary s 0 ∧ 0 = s.cfg.prim ∧ WritableNoInc 1 s 0 ∧ s.commit 0 < (s.log 0).length ∧
+    ThinksPrimary s 0 ∧ 0 = s.cfg.primary ∧ WritableNoInc 1 s 0 ∧ s.commit 0 < (s.log 0).length ∧
     (∀ r, s.sync 0 r = true → s.commit 0 < s.acked 0 r) ∧
     ∀ e, e ≠ 0 → ¬ IsAuthoritative (commitNext s 0) e
 ```
@@ -119,7 +119,7 @@ See "Lease timing" below.
 |---|---|---|
 | `log` | `Node → List Nat` | Each node's replication log. An entry is the term of the primary that wrote it, so a write is identified by its offset and term. 0-indexed; the design's offset `o` is index `o - 1`. |
 | `inc` | `Node → Nat` | Each node's incarnation. A restart without data increments it. |
-| `cfg` | `Cfg Node` | The latest Cluster V2 configuration: `ver`, `prim`, `elig : Node → Bool`, `inc : Node → Nat` (the incarnation recorded for each node). |
+| `cfg` | `Cfg Node` | The latest Cluster V2 configuration: `ver`, `prim`, `eligible : Node → Bool`, `incarnation : Node → Nat` (the incarnation recorded for each node). |
 | `known` | `Node → Cfg Node` | The configuration each node last learned; possibly stale. |
 | `sync` | `Node → Node → Bool` | `sync p r`: `r` is in `p`'s sync replica set. |
 | `acked` | `Node → Node → Nat` | `acked p r`: how far `p` believes `r` has acknowledged. |
@@ -129,7 +129,7 @@ See "Lease timing" below.
 | `ackHigh` | `Node → Nat` | Each node's acknowledgement high-water mark: the highest offset it has acknowledged as a replica (Ack) or as a primary (Commit). Survives a restart with data. |
 | `hist` | `List Nat` | Ghost: the committed history, extended the first time any node commits an offset. |
 
-Sets of nodes are `Node → Bool`. `upd f a b` is `f` with the value at `a` replaced by
+Sets of nodes are `Node → Bool`. `update f a b` is `f` with the value at `a` replaced by
 `b`. Messages are not modelled: a delayed message is the same step taken later and a
 lost one is the step never taken, so acknowledgements carry the replica's offset at
 delivery (README §1 and §5). Restarts with data, without data and from a stale
@@ -138,8 +138,8 @@ survival guard on the restarts that take a new incarnation (README §2). `init i
 empty logs.
 
 Derived predicates: `ThinksPrimary s p` (`known[p]` names `p` primary with its current
-incarnation), `KnowsLatest s n` (`known[n].ver = cfg.ver`), `primaryOf s n`
-(`known[n].prim`), `Reconciled s p` (`recon p ≤ commit p`), `IsAuthoritative`,
+incarnation), `KnowsLatest s n` (`known[n].version = cfg.version`), `primaryOf s n`
+(`known[n].primary`), `Reconciled s p` (`recon p ≤ commit p`), `IsAuthoritative`,
 `PrimaryAuthoritative s` (the current primary's incarnation matches),
 `catchUpPoint s p` (`commit p` once reconciled, else `min (recon p) (log p).length`),
 `Writable m s p` (`m ≤` the number of sync members of `p` that are eligible with a
@@ -160,10 +160,10 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 | `commit p` | `p` thinks it is primary, is writable, has an uncommitted entry, and every sync member has acknowledged past `commit p` | `commit p + 1`; `hist` extended if this offset is new; `ackHigh p` raised to the new commit point |
 | `count p r` | `p` thinks it is primary; `r ≠ p` follows `p`, is not counted, and has acknowledged `catchUpPoint s p` | `sync p r := true` |
 | `uncount p r` | `p` thinks it is primary and knows the latest configuration; `r` is counted and not eligible in `cfg` | `sync p r := false` |
-| `makeElig p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new version with `r` eligible and `inc r` recorded; `known p` updated |
-| `makeInelig p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `known p` updated; `sync p r := false` |
+| `makeEligible p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new version with `r` eligible and `inc r` recorded; `known p` updated |
+| `makeIneligible p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `known p` updated; `sync p r := false` |
 | `learn n` | `n` does not know the latest configuration | `known n := cfg`; `sync n` emptied unless `n` is primary there |
-| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.inc n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the matching eligible replicas; `acked n`, `commit n` reset; `recon n := (log n).length`; `term n := cfg.ver + 1` |
+| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.incarnation n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the matching eligible replicas; `acked n`, `commit n` reset; `recon n := (log n).length`; `term n := cfg.version + 1` |
 | `resync r` | `r` does not consider itself primary; its log is not a prefix of its primary's; `r` is neither counted nor eligible in its primary's configuration | `log r := (log p).take (catchUpPoint s p)`; `acked p r := 0`; `commit r` capped |
 | `restartEmpty n` | `n` knows the latest configuration; some other node is authoritative | `log n := []`, `inc n + 1`, volatile state and `ackHigh n` reset; the current primary drops `n` from its sync set and acks |
 | `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `recon n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `known n`), else emptied |
@@ -242,11 +242,11 @@ one-step invariant, and `invariant_reachable` gets the run invariant from CSLib'
 ### Durability (`Durability.lean`)
 
 `ReplyInvariant a` is `Invariant a.core` plus `TermLe` (every term is at most
-`cfg.ver`), `HeldInvariant` (a held reply's tag is at most `cfg.ver`, and a fenced
+`cfg.version`), `HeldInvariant` (a held reply's tag is at most `cfg.version`, and a fenced
 reply points at its own entry in its primary's log) and `AckedDurable`. `step_facts`
 shows that every non-restart replication step extends `hist`, does not lower
-`cfg.ver`, keeps `TermLe`, and keeps fenced replies fenced with their log only grown;
-the cases that matter are Takeover (the new term `cfg.ver + 1` exceeds every tag),
+`cfg.version`, keeps `TermLe`, and keeps fenced replies fenced with their log only grown;
+the cases that matter are Takeover (the new term `cfg.version + 1` exceeds every tag),
 Learn (can never make a node primary) and Resync (changes only a node that does not
 think it is primary). `release` reads its entry from `HeldInvariant`, and
 `CommittedAgree` turns that into `hist[o] = t`.
@@ -433,12 +433,12 @@ history is `[1]`, on n0 and n1).
 
 | File | Weakened relation | Rule removed | Trace | Violates |
 |---|---|---|---|---|
-| `Reconcile.lean` | `StepNoReconcile` | Count measures catch-up against the primary's own commit point | count 0 1, makeElig 0 1, append 0, learn 1, replicate 1, ack 1, commit 0, takeover 1, learn 2, **count 1 2**, makeElig 1 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
-| `ReplyFence.lean` | `AStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | count 0 1, makeElig 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, count 1 0, makeElig 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[5]` |
-| `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeElig 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeElig 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
-| `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].prim = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeElig 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `Reconcile.lean` | `StepNoReconcile` | Count measures catch-up against the primary's own commit point | count 0 1, makeEligible 0 1, append 0, learn 1, replicate 1, ack 1, commit 0, takeover 1, learn 2, **count 1 2**, makeEligible 1 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `ReplyFence.lean` | `AStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | count 0 1, makeEligible 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, count 1 0, makeEligible 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[5]` |
+| `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
+| `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
-| `Uncount.lean` | `StepUncountElig` | Uncount of an eligible counted replica | count 0 1, makeElig 0 1, count 0 2, makeElig 0 2, append 0, replicate 2, ack 2, **uncount 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
+| `Uncount.lean` | `StepUncountElig` | Uncount of an eligible counted replica | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **uncount 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, count 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
 | `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |
 

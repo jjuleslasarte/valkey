@@ -24,9 +24,9 @@ open Cslib
 
 namespace SyncReplication
 
-/-- `Writable` without the incarnation check: `m ≤ |sync[p] ∩ known[p].elig|`. -/
+/-- `Writable` without the incarnation check: `m ≤ |sync[p] ∩ known[p].eligible|`. -/
 def WritableNoInc (m : Nat) (s : State N) (p : N) : Prop :=
-  (m : ℕ∞) ≤ {r | s.sync p r = true ∧ (s.known p).elig r = true}.encard
+  (m : ℕ∞) ≤ {r | s.sync p r = true ∧ (s.known p).eligible r = true}.encard
 
 /-- `Step`, with AppendWrite and Commit guarded by `WritableNoInc`. -/
 inductive StepNoIncWritable (m : Nat) : State N → Action N → State N → Prop
@@ -43,8 +43,8 @@ def ltsNoIncWritable (m : Nat) : LTS (State N) (Action N) where
 
 /-- `WritableNoInc 1` from one counted eligible replica. -/
 theorem writableNoInc_one {s : State N} {p r : N} (hs : s.sync p r = true)
-    (he : (s.known p).elig r = true) : WritableNoInc 1 s p :=
-  (le_encard_iff_list 1 {r | s.sync p r = true ∧ (s.known p).elig r = true}).2
+    (he : (s.known p).eligible r = true) : WritableNoInc 1 s p :=
+  (le_encard_iff_list 1 {r | s.sync p r = true ∧ (s.known p).eligible r = true}).2
     ⟨[r], List.nodup_singleton r, by simp, by simp [hs, he]⟩
 
 def w7 := learn c6 1               -- n1 learns the latest configuration
@@ -59,7 +59,7 @@ def w14 := ack w13 1               -- n1 acknowledges it
 /-- The run up to the commit. The append is the weakened action; so is the commit
 whose guard the theorem states. -/
 theorem noIncWritable_run : (ltsNoIncWritable 1).MTr c0
-    [.count 0 1, .makeElig 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+    [.count 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
      .learn 1, .restartEmpty 1, .replicate 1, .ack 1, .count 0 1, .append 0, .replicate 1,
      .ack 1] w14 :=
   LTS.MTr.comp (ltsNoIncWritable 1) (mtr_of_step StepNoIncWritable.step committed_run) <|
@@ -79,7 +79,7 @@ theorem noIncWritable_run : (ltsNoIncWritable 1).MTr c0
 `commit_two_copies` except that `Writable` is replaced by `WritableNoInc`, and after
 the commit the primary is the only authoritative node. -/
 theorem noIncWritable_oneCopy : ∃ s : State N, (ltsNoIncWritable 1).CanReach (init 0) s ∧
-    ThinksPrimary s 0 ∧ (0 : N) = s.cfg.prim ∧ WritableNoInc 1 s 0 ∧
+    ThinksPrimary s 0 ∧ (0 : N) = s.cfg.primary ∧ WritableNoInc 1 s 0 ∧
     s.commit 0 < (s.log 0).length ∧ (∀ r, s.sync 0 r = true → s.commit 0 < s.acked 0 r) ∧
     ∀ e, e ≠ (0 : N) → ¬ IsAuthoritative (commitNext s 0) e :=
   ⟨w14, ⟨_, noIncWritable_run⟩, by decide, by decide,

@@ -31,7 +31,7 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
   knownLe := h.knownLe
   knownEq := h.knownEq
   primKnows := h.primKnows
-  eligSync := h.eligSync
+  eligibleCounted := h.eligibleCounted
   noSelfSync := h.noSelfSync
   ackedPrim := h.ackedPrim
   ackedLe := fun p r hp => Nat.le_trans (h.ackedLe p r hp) (hL p).length_le
@@ -45,7 +45,7 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
   syncNew := h.syncNew
   reconLen := Nat.le_trans h.reconLen (hL _).length_le
   syncCommit := h.syncCommit
-  eligFol := h.eligFol
+  eligibleInOldConfig := h.eligibleInOldConfig
   incLe := h.incLe
   knownIncLe := h.knownIncLe
   authEx := h.authEx
@@ -54,10 +54,10 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
     (fun r => h.ackedLe p r hp) (fun _ x => x) (fun _ _ => rfl)
 
 theorem grow_upd (L : Node → List Nat) (p : Node) (m : List Nat) :
-    ∀ x, L x <+: upd L p (L p ++ m) x := by
+    ∀ x, L x <+: update L p (L p ++ m) x := by
   intro x; by_cases hx : x = p
   · subst hx; simp [List.prefix_append]
-  · rw [upd_ne _ _ hx]
+  · rw [update_of_ne _ _ hx]
 
 theorem invariant_append {s : State Node} (h : Invariant s) (p : Node) : Invariant (appendWrite s p) :=
   invariant_grow h _ (grow_upd s.log p _)
@@ -78,12 +78,12 @@ theorem config_ack : ConfigInvariant (ack s r) :=
 /-- The recorded acknowledgement becomes the replica's log length, and the replica's log is a prefix of its primary's, so the record is real. -/
 theorem repl_ack : ReplInvariant (ack s r) := by
   have hA := ack_acked (s := s) r
-  have hfol : (s.known r).prim = primaryOf s r := rfl
+  have hfol : (s.known r).primary = primaryOf s r := rfl
   exact {
   noSelfSync := h.noSelfSync
   ackedPrim := by
     intro x hx
-    show (ack s r).acked s.cfg.prim x = 0
+    show (ack s r).acked s.cfg.primary x = 0
     rw [hA]; split_ifs with hc
     · obtain ⟨h1, rfl⟩ := hc; exact absurd (h1 ▸ hfol) hx
     · exact h.ackedPrim x hx
@@ -117,17 +117,17 @@ theorem repl_ack : ReplInvariant (ack s r) := by
 theorem membership_ack : MembershipInvariant (ack s r) := by
   have hA := ack_acked (s := s) r
   exact {
-  eligSync := h.eligSync
+  eligibleCounted := h.eligibleCounted
   syncNew := by
     intro x hs he
     obtain ⟨a, b⟩ := h.syncNew x hs he
     refine ⟨a, ?_⟩
-    show _ ≤ (ack s r).acked s.cfg.prim x
+    show _ ≤ (ack s r).acked s.cfg.primary x
     rw [hA]; split_ifs with hc
     · obtain ⟨h1, rfl⟩ := hc
-      show s.recon s.cfg.prim ≤ _; have := hlt; rw [← h1] at this; omega
+      show s.recon s.cfg.primary ≤ _; have := hlt; rw [← h1] at this; omega
     · exact b
-  eligFol := h.eligFol }
+  eligibleInOldConfig := h.eligibleInOldConfig }
 
 /-- Ack changes no commit point, catch-up point or history, and only raises a high-water mark. -/
 theorem commit_ack : CommitInvariant (ack s r) where
@@ -141,7 +141,7 @@ theorem commit_ack : CommitInvariant (ack s r) where
 /-- Only the acknowledgement of a replica that still follows its primary moves, so no fence moves. -/
 theorem failover_ack : FailoverInvariant (ack s r) := by
   have hA := ack_acked (s := s) r
-  have hfol : (s.known r).prim = primaryOf s r := rfl
+  have hfol : (s.known r).primary = primaryOf s r := rfl
   exact {
   stale := by
     -- Ack moves only the acknowledgement of a replica that follows its primary.
@@ -171,27 +171,27 @@ end ack
 
 section resync
 
-variable {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ r) (hsy : s.sync (primaryOf s r) r = false) (hke : (s.known (primaryOf s r)).elig r = false)
+variable {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ r) (hsy : s.sync (primaryOf s r) r = false) (hke : (s.known (primaryOf s r)).eligible r = false)
 
 include h hne hsy hke
 
 /-- What the Resync guard says about `r` in the latest configuration. The guard only
 says `r` is uncounted and ineligible *in its primary's copy* of the configuration;
-`eligFol` lifts that to the latest one, so `r` is neither the current primary nor
+`eligibleInOldConfig` lifts that to the latest one, so `r` is neither the current primary nor
 eligible, and no node that thinks it is primary is `r`. -/
 theorem resync_facts :
-    r ≠ s.cfg.prim ∧ s.cfg.elig r = false ∧ (∀ x, ThinksPrimary s x → x ≠ r) := by
-  have hrprim : r ≠ s.cfg.prim := by
-    intro e; apply hne; show (s.known r).prim = r; rw [e, h.primKnows]
+    r ≠ s.cfg.primary ∧ s.cfg.eligible r = false ∧ (∀ x, ThinksPrimary s x → x ≠ r) := by
+  have hrprim : r ≠ s.cfg.primary := by
+    intro e; apply hne; show (s.known r).primary = r; rw [e, h.primKnows]
   refine ⟨hrprim, ?_, fun x hx e => by subst e; exact hne hx.1⟩
-  cases hc : s.cfg.elig r
+  cases hc : s.cfg.eligible r
   · rfl
   · exfalso
-    by_cases hf : (s.known r).prim = s.cfg.prim
-    · have : primaryOf s r = s.cfg.prim := hf
+    by_cases hf : (s.known r).primary = s.cfg.primary
+    · have : primaryOf s r = s.cfg.primary := hf
       rw [this, h.primKnows, hc] at hke; exact absurd hke (by decide)
-    · have := h.eligFol r hc hf
-      change (s.known (primaryOf s r)).elig r = true at this
+    · have := h.eligibleInOldConfig r hc hf
+      change (s.known (primaryOf s r)).eligible r = true at this
       rw [hke] at this; exact absurd this (by decide)
 
 /-- Resync changes no configuration. -/
@@ -210,7 +210,7 @@ theorem repl_resync : ReplInvariant (resync s r) := by
     fun _ _ => resync_acked_sync hsy
   exact {
   noSelfSync := h.noSelfSync
-  ackedPrim := by intro x hx; show (resync s r).acked s.cfg.prim x = 0; have := hAle s.cfg.prim x; rw [h.ackedPrim x hx] at this; omega
+  ackedPrim := by intro x hx; show (resync s r).acked s.cfg.primary x = 0; have := hAle s.cfg.primary x; rw [h.ackedPrim x hx] at this; omega
   ackedLe := by
     intro p x hp
     show (resync s r).acked p x ≤ ((resync s r).log p).length
@@ -241,14 +241,14 @@ theorem membership_resync : MembershipInvariant (resync s r) := by
   have hAs : ∀ q x, s.sync q x = true → (resync s r).acked q x = s.acked q x :=
     fun _ _ => resync_acked_sync hsy
   exact {
-  eligSync := h.eligSync
+  eligibleCounted := h.eligibleCounted
   syncNew := by
     intro x hs he
     obtain ⟨a, b⟩ := h.syncNew x hs he
     refine ⟨a, ?_⟩
-    show s.recon s.cfg.prim ≤ (resync s r).acked s.cfg.prim x
-    rw [hAs _ _ (show s.sync s.cfg.prim x = true from hs)]; exact b
-  eligFol := h.eligFol }
+    show s.recon s.cfg.primary ≤ (resync s r).acked s.cfg.primary x
+    rw [hAs _ _ (show s.sync s.cfg.primary x = true from hs)]; exact b
+  eligibleInOldConfig := h.eligibleInOldConfig }
 
 /-- `r`'s commit point is capped at its primary's, so its committed prefix is still a prefix of the history. -/
 theorem commit_resync : CommitInvariant (resync s r) := by
@@ -284,11 +284,11 @@ theorem commit_resync : CommitInvariant (resync s r) := by
       rw [h.caEq (primaryOf s x), List.take_take, hk]
     · rw [hCo x e, hLo x e]; exact h.caEq x
   reconLen := by
-    show _ ≤ ((resync s r).log s.cfg.prim).length
+    show _ ≤ ((resync s r).log s.cfg.primary).length
     rw [hLo _ (Ne.symm hrprim)]; exact h.reconLen
   histLe := by
     intro hpa
-    show s.hist.length ≤ (resync s r).commit s.cfg.prim ∨ _
+    show s.hist.length ≤ (resync s r).commit s.cfg.primary ∨ _
     rw [hCo _ (Ne.symm hrprim)]; exact h.histLe hpa
   histAck := h.histAck }
 
@@ -300,7 +300,7 @@ theorem failover_resync : FailoverInvariant (resync s r) := by
   have hLo : ∀ x, x ≠ r → (resync s r).log x = s.log x := fun _ => resync_log_other
   have hAs : ∀ q x, s.sync q x = true → (resync s r).acked q x = s.acked q x :=
     fun _ _ => resync_acked_sync hsy
-  have hnotr : ∀ x, (s.cfg.elig x = true ∨ x = s.cfg.prim) → x ≠ r := by
+  have hnotr : ∀ x, (s.cfg.eligible x = true ∨ x = s.cfg.primary) → x ≠ r := by
     intro x hx e; subst e
     rcases hx with hx | hx
     · rw [hrel] at hx; exact absurd hx (by decide)
@@ -321,7 +321,7 @@ theorem ehc_resync : EligibleHoldsCommitted (resync s r) := by
   obtain ⟨hrprim, hrel, htpne⟩ := resync_facts h r hne hsy hke
   have hcl := commit_le_catchUpPoint h (primaryOf s r)
   have hLo : ∀ x, x ≠ r → (resync s r).log x = s.log x := fun _ => resync_log_other
-  have hnotr : ∀ x, (s.cfg.elig x = true ∨ x = s.cfg.prim) → x ≠ r := by
+  have hnotr : ∀ x, (s.cfg.eligible x = true ∨ x = s.cfg.primary) → x ≠ r := by
     intro x hx e; subst e
     rcases hx with hx | hx
     · rw [hrel] at hx; exact absurd hx (by decide)

@@ -19,7 +19,7 @@ namespace SyncReplication
 
 /-- RestartKeep with the sync replica set emptied instead of rebuilt. -/
 def restartKeepNoRebuild (s : State N) (n : N) : State N :=
-  { restartKeep s n with sync := upd s.sync n (fun _ => false) }
+  { restartKeep s n with sync := update s.sync n (fun _ => false) }
 
 /-- `Step`, plus RestartKeep without the rebuilt sync replica set. -/
 inductive StepNoRebuild (m : Nat) : State N → Action N → State N → Prop
@@ -33,28 +33,28 @@ def ltsNoRebuild (m : Nat) : LTS (State N) (Action N) where
 
 def d0 : State N := init 0
 def d1 := count d0 0 1             -- n0 counts n1
-def d2 := makeElig d1 0 1          -- n1 eligible
+def d2 := makeEligible d1 0 1          -- n1 eligible
 def d3 := appendWrite d2 0         -- n0 writes at offset 1
 def d4 := restartKeepNoRebuild d3 0   -- n0 restarts with its data; sync set empty
 def d5 := replicate d4 2           -- n2 copies the write
 def d6 := ack d5 2                 -- n2 acknowledges it
 def d7 := count d6 0 2             -- n0 counts n2
-def d8 := makeElig d7 0 2          -- n2 eligible
+def d8 := makeEligible d7 0 2          -- n2 eligible
 def d9 := commitNext d8 0          -- n0 commits with n2's ack only; n1 lacks the write
 
 /-- The run; the label list is its trace. Only the restart is the weakened action. -/
 theorem noRebuild_run : (ltsNoRebuild 1).MTr d0
-    [.count 0 1, .makeElig 0 1, .append 0, .restartKeep 0, .replicate 2, .ack 2,
-     .count 0 2, .makeElig 0 2, .commit 0] d9 :=
+    [.count 0 1, .makeEligible 0 1, .append 0, .restartKeep 0, .replicate 2, .ack 2,
+     .count 0 2, .makeEligible 0 2, .commit 0] d9 :=
   .stepL (.step (Step.count d0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.makeElig d1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.makeEligible d1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append d2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide))) <|
   .stepL (StepNoRebuild.restartKeep d3 0 (by decide)) <|
   .stepL (.step (Step.replicate d4 2 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.ack d5 2 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.count d6 0 2 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.makeElig d7 0 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.makeEligible d7 0 2 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.commit d8 0 (by decide) (writable_one (r := 2) (by decide) (by decide)
     (by decide)) (by decide) (by decide))) <|
   .refl

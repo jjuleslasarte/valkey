@@ -32,7 +32,7 @@ def f9 := restartEmpty f8 0        -- n0 restarts empty: no other authoritative 
 
 /-- The run; the label list is its trace. Only the last action is unguarded. -/
 theorem noSurvivor_run : (ltsNoSurv 1).MTr c0
-    [.count 0 1, .makeElig 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+    [.count 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
      .learn 1, .restartEmpty 1, .restartEmpty 0] f9 :=
   LTS.MTr.comp (ltsNoSurv 1) (mtr_of_step StepNoSurv.step committed_run) <|
   .stepL (.step (Step.learn c6 1 (by decide))) <|

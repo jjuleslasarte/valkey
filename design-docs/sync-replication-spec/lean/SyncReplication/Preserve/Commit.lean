@@ -136,8 +136,8 @@ theorem commit_commit : CommitInvariant (commitNext s p) := by
   histLe := by
     intro hpa
     have hpa' : PrimaryAuthoritative s := hpa
-    show (commitNext s p).hist.length ≤ (commitNext s p).commit s.cfg.prim ∨
-      (commitNext s p).hist.length ≤ s.recon s.cfg.prim
+    show (commitNext s p).hist.length ≤ (commitNext s p).commit s.cfg.primary ∨
+      (commitNext s p).hist.length ≤ s.recon s.cfg.primary
     rw [hC]
     rcases thinksPrimary_cases h hp with ⟨hpe, _⟩ | hv
     · rw [if_pos hpe.symm]
@@ -278,10 +278,10 @@ theorem membership_count : MembershipInvariant (count s p r) := by
   have h0 := h
   have hS := count_sync (s := s) p r
   exact {
-  eligSync := by intro q x hq he hi; show (count s p r).sync q x = true; rw [hS]; simp [h.eligSync q x hq he hi]
+  eligibleCounted := by intro q x hq he hi; show (count s p r).sync q x = true; rw [hS]; simp [h.eligibleCounted q x hq he hi]
   syncNew := by
     intro x hs he
-    change (count s p r).sync s.cfg.prim x = true at hs
+    change (count s p r).sync s.cfg.primary x = true at hs
     rw [hS] at hs
     simp at hs
     rcases hs with hs | ⟨hq, rfl⟩
@@ -289,7 +289,7 @@ theorem membership_count : MembershipInvariant (count s p r) := by
     · subst hq
       have := Nat.le_trans (recon_le_catchUpPoint (s := s) h0) hcup
       exact ⟨hf, this⟩
-  eligFol := h.eligFol }
+  eligibleInOldConfig := h.eligibleInOldConfig }
 
 /-- Count changes no commit point, catch-up point or history. -/
 theorem commit_count : CommitInvariant (count s p r) :=
@@ -324,12 +324,12 @@ end count
 section uncount
 
 variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p) (hkl : KnowsLatest s p)
-  (hs : s.sync p r = true) (he : s.cfg.elig r = false)
+  (hs : s.sync p r = true) (he : s.cfg.eligible r = false)
 
 include h hp hkl hs he
 
 /-- `p` knows the latest configuration, so it is the current primary. -/
-theorem uncount_prim : p = s.cfg.prim := by
+theorem uncount_prim : p = s.cfg.primary := by
   have hkn : s.known p = s.cfg := h.knownEq p hkl
   have := hp.1; rw [hkn] at this; exact this.symm
 
@@ -357,20 +357,20 @@ counted. -/
 theorem membership_uncount : MembershipInvariant (uncount s p r) := by
   have hS := uncount_sync (s := s) p r
   exact {
-  eligSync := by
+  eligibleCounted := by
     intro q x hq hex hi
-    change (s.known q).elig x = true at hex
-    change (s.known q).inc x = s.inc x at hi
+    change (s.known q).eligible x = true at hex
+    change (s.known q).incarnation x = s.incarnation x at hi
     show (uncount s p r).sync q x = true
-    rw [hS]; simp only [Bool.and_eq_true, h.eligSync q x hq hex hi, Bool.not_eq_true', decide_eq_false_iff_not, true_and]
+    rw [hS]; simp only [Bool.and_eq_true, h.eligibleCounted q x hq hex hi, Bool.not_eq_true', decide_eq_false_iff_not, true_and]
     rintro ⟨e1, e2⟩; subst e1; subst e2
     rw [h.knownEq _ hkl] at hex; rw [hex] at he; exact absurd he (by decide)
   syncNew := by
     intro x hx hex
-    change (uncount s p r).sync s.cfg.prim x = true at hx
+    change (uncount s p r).sync s.cfg.primary x = true at hx
     rw [hS] at hx; simp at hx
     exact h.syncNew x hx.1 hex
-  eligFol := h.eligFol }
+  eligibleInOldConfig := h.eligibleInOldConfig }
 
 /-- Uncount changes no commit point, catch-up point or history. -/
 theorem commit_uncount : CommitInvariant (uncount s p r) :=
@@ -383,19 +383,19 @@ theorem failover_uncount : FailoverInvariant (uncount s p r) := by
   exact {
   stale := by
     intro q hq hv
-    have hv' : (s.known q).ver < s.cfg.ver := hv
+    have hv' : (s.known q).version < s.cfg.version := hv
     have hF := h.stale q hq hv'
     obtain ⟨w, ⟨hw1, hw2⟩, hwF⟩ := hF.attained
     have hwr : ¬ (q = p ∧ w = r) := by
       rintro ⟨e1, _⟩; subst e1
       exact absurd hv' (by unfold KnowsLatest at hkl; omega)
     refine Fenced.of_left (w := w) ⟨by rw [hS, hw1]; simp only [Bool.true_and, Bool.not_eq_true', decide_eq_false_iff_not]; exact hwr, hw2⟩ ?_ ?_ ?_ ?_
-    · intro hpa; show s.acked q w ≤ s.recon s.cfg.prim; rw [hwF]; exact hF.reconLe hpa
-    · intro hpa; show (s.log q).take (s.acked q w) <+: s.log s.cfg.prim; rw [hwF]; exact hF.primHolds hpa
-    · intro hpa; show s.acked q w ≤ s.ackHigh s.cfg.prim; rw [hwF]; exact hF.primAck hpa
+    · intro hpa; show s.acked q w ≤ s.recon s.cfg.primary; rw [hwF]; exact hF.reconLe hpa
+    · intro hpa; show (s.log q).take (s.acked q w) <+: s.log s.cfg.primary; rw [hwF]; exact hF.primHolds hpa
+    · intro hpa; show s.acked q w ≤ s.ackHigh s.cfg.primary; rw [hwF]; exact hF.primAck hpa
     · intro m hm hi
       show ((s.log q).take (s.acked q w) <+: s.log m ∧ s.acked q w ≤ s.ackHigh m) ∨
-        ((uncount s p r).sync q m = true ∧ (s.known m).prim = q)
+        ((uncount s p r).sync q m = true ∧ (s.known m).primary = q)
       rw [hwF]
       rcases hF.eligHolds m hm hi with d | ⟨d1, d2⟩
       · exact Or.inl d

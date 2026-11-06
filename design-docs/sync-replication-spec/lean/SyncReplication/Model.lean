@@ -27,23 +27,29 @@ The theorem proved about this model (`SyncReplication.safety` in `Safety.lean`):
 > records for it) holds the whole committed history, and no node has committed an
 > entry that differs from that history.
 
+"Holds" means the entries are in the node's log, `log n`. The model has one log per
+node and does not distinguish memory from disk: a restart with data keeps the log, a
+restart without data empties it, and a restart from a stale persistence file keeps a
+prefix of it. So "holds" is what survives whichever restart the node takes.
+
 The model is the design with its reconciliation and restart rules in place: a new
 primary commits its inherited log before it writes (`Reconciled`), a primary that
-restarts with its data rebuilds its sync set from its configuration (`rebuiltSync`),
-a node keeps its incarnation across a restart only if the data it restores covers
+restarts with its data recomputes its sync replica set, the in-memory set of replicas
+whose acknowledgements it waits for, from the eligible set in its configuration rather
+than starting from an empty set (`rebuiltSync`; no data moves), a node keeps its incarnation across a restart only if the data it restores covers
 what it has acknowledged (`ackHigh`), and a node restarts empty only while some other
 authoritative node keeps its data (the survival assumption). `Counterexamples/`
 shows what each of these rules prevents.
 
 ## Incarnations
 
-- `inc n` is the node's incarnation; `cfg.inc r` is the incarnation the configuration
+- `inc n` is the node's incarnation; `cfg.incarnation r` is the incarnation the configuration
   records for it. A node that restarts without its data takes a new incarnation.
 - A node thinks it is primary only if its configuration names it primary with its
-  current incarnation: `ThinksPrimary s p` is `known[p].prim = p ∧ known[p].inc p = inc p`.
+  current incarnation: `ThinksPrimary s p` is `known[p].primary = p ∧ known[p].incarnation p = inc p`.
 - A node is authoritative if the latest configuration lists it as primary or eligible
   with its current incarnation: `IsAuthoritative s n` is
-  `(cfg.elig n ∨ n = cfg.prim) ∧ cfg.inc n = inc n`.
+  `(cfg.eligible n ∨ n = cfg.primary) ∧ cfg.incarnation n = inc n`.
 - Writable counts eligible sync members with a matching incarnation; Takeover checks the new
   primary's incarnation and counts only the matching eligible replicas; MakeEligible
   records the replica's incarnation.
@@ -65,34 +71,42 @@ shows what each of these rules prevents.
 
 namespace SyncReplication
 
-/-- Functional update: `f` with the value at `a` replaced by `b`
--/
-def upd {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) : α → β :=
+/-- Functional update: the function `f` with its value at `a` replaced by `b`, and
+unchanged everywhere else. Per-node state is a function from `Node`, so "node `a`'s
+log becomes `l`" is `update s.log a l`. -/
+def update {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) : α → β :=
   fun x => if x = a then b else f x
 
-@[simp] theorem upd_same {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) :
-    upd f a b a = b := by simp [upd]
+/-- Reading the updated function at the updated point gives the new value.
 
-theorem upd_ne {α β : Type} [DecidableEq α] (f : α → β) {a x : α} (b : β) (h : x ≠ a) :
-    upd f a b x = f x := by simp [upd, h]
+`@[simp]` registers this as a rewrite rule for the `simp` tactic, so a proof can
+write `simp` and have `update f a b a` replaced by `b` automatically wherever it
+appears. -/
+@[simp] theorem update_self {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) :
+    update f a b a = b := by simp [update]
+
+/-- Reading the updated function at any other point gives the old value. Not a `simp`
+rule, because it needs the side condition `x ≠ a`, which a proof supplies by hand. -/
+theorem update_of_ne {α β : Type} [DecidableEq α] (f : α → β) {a x : α} (b : β) (h : x ≠ a) :
+    update f a b x = f x := by simp [update, h]
 
 /-- A Cluster V2 configuration. -/
 structure Cfg (Node : Type) where
   /-- Version; every configuration change increments it. -/
-  ver  : Nat
+  version  : Nat
   /-- The primary. -/
-  prim : Node
+  primary : Node
   /-- The replicas eligible to take over. -/
-  elig : Node → Bool
+  eligible : Node → Bool
   /-- The incarnation the configuration records for each node. -/
-  inc  : Node → Nat
+  incarnation  : Node → Nat
 
 /-- The state of the whole shard, plus the ghost history. -/
 structure State (Node : Type) [DecidableEq Node] where
   /-- Each node's replication log; an entry is the term it was written in. -/
   log    : Node → List Nat
   /-- Each node's actual incarnation; restarting empty increments it. -/
-  inc    : Node → Nat
+  incarnation    : Node → Nat
   /-- The latest configuration in Cluster V2. -/
   cfg    : Cfg Node
   /-- The configuration each node has seen, possibly stale. -/
@@ -126,7 +140,7 @@ def initCfg (i : Node) : Cfg Node := ⟨1, i, fun _ => false, fun _ => 1⟩
 writes with term 1. -/
 def init (i : Node) : State Node where
   log    := fun _ => []
-  inc    := fun _ => 1
+  incarnation    := fun _ => 1
   cfg    := initCfg i
   known  := fun _ => initCfg i
   sync   := fun _ _ => false
@@ -137,125 +151,128 @@ def init (i : Node) : State Node where
   ackHigh := fun _ => 0
   hist   := []
 
-/-- ThinksPrim(p): `p`'s own configuration names it primary and records its current
-incarnation. A primary that restarted empty fails the second half. -/
+/-- `p` thinks it is primary: the configuration `p` knows (which may be stale) names
+`p` as primary, and the incarnation it records for `p` is `p`'s current one. A
+primary that restarted empty has a new incarnation and so fails the second half:
+it no longer acts as primary. -/
 def ThinksPrimary (s : State Node) (p : Node) : Prop :=
-  (s.known p).prim = p ∧ (s.known p).inc p = s.inc p
-/-- KnowsLatest(n): `n` has seen the latest configuration. -/
-def KnowsLatest (s : State Node) (n : Node) : Prop := (s.known n).ver = s.cfg.ver
-/-- PrimOf(n): the node `n` believes is primary, the one it replicates from. -/
-def primaryOf (s : State Node) (n : Node) : Node := (s.known n).prim
-/-- Reconciled(p): `p` has committed up to its catch-up point, so it holds and has
-committed everything it inherited. -/
+  (s.known p).primary = p ∧ (s.known p).incarnation p = s.incarnation p
+/-- `n` knows the latest configuration: its copy has the current version. -/
+def KnowsLatest (s : State Node) (n : Node) : Prop := (s.known n).version = s.cfg.version
+/-- The node `n` believes is primary, according to the configuration `n` knows; the
+one it replicates from. -/
+def primaryOf (s : State Node) (n : Node) : Node := (s.known n).primary
+/-- `p` is reconciled: it has committed up to its catch-up point, so it has committed
+everything it inherited. -/
 def Reconciled (s : State Node) (p : Node) : Prop := s.recon p ≤ s.commit p
-/-- `n \in Auth`: in the latest configuration, `n` is the primary or an eligible
+/-- `n` is authoritative: in the latest configuration, `n` is the primary or an eligible
 replica, and the incarnation recorded for it is its actual one. These are the nodes
 that must hold the committed history. -/
 def IsAuthoritative (s : State Node) (n : Node) : Prop :=
-  (s.cfg.elig n = true ∨ n = s.cfg.prim) ∧ s.cfg.inc n = s.inc n
+  (s.cfg.eligible n = true ∨ n = s.cfg.primary) ∧ s.cfg.incarnation n = s.incarnation n
 /-- The current primary is authoritative (it has not come back empty). -/
-def PrimaryAuthoritative (s : State Node) : Prop := s.cfg.inc s.cfg.prim = s.inc s.cfg.prim
+def PrimaryAuthoritative (s : State Node) : Prop := s.cfg.incarnation s.cfg.primary = s.incarnation s.cfg.primary
 
-/-! ### Post-states of the actions (the UNCHANGED parts are implicit). -/
+/-! ### Post-states of the actions. Fields an action does not mention keep their value. -/
 
 /-- AppendWrite(p): `p` appends one client write to its own log, tagged with its
 current term. Nothing else changes. -/
 def appendWrite (s : State Node) (p : Node) : State Node :=
-  { s with log := upd s.log p (s.log p ++ [s.term p]) }
+  { s with log := update s.log p (s.log p ++ [s.term p]) }
 
 /-- Replicate(r): `r` copies the next entry of its primary's log onto its own. -/
 def replicate (s : State Node) (r : Node) : State Node :=
-  { s with log := upd s.log r (s.log r ++ [(s.log (primaryOf s r)).getD (s.log r).length 0]) }
+  { s with log := update s.log r (s.log r ++ [(s.log (primaryOf s r)).getD (s.log r).length 0]) }
 
 /-- Ack(r): `r`'s primary records that `r` holds its whole log, and `r` records that it
 has acknowledged up to there. -/
 def ack (s : State Node) (r : Node) : State Node :=
-  { s with acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r (s.log r).length),
-           ackHigh := upd s.ackHigh r (max (s.ackHigh r) (s.log r).length) }
+  { s with acked := update s.acked (primaryOf s r) (update (s.acked (primaryOf s r)) r (s.log r).length),
+           ackHigh := update s.ackHigh r (max (s.ackHigh r) (s.log r).length) }
 
 /-- Commit(p): `p` commits its next entry. If no node has committed this offset yet,
 the entry is appended to the ghost history. A commit is `p`'s acknowledgement to its
 clients, so `p`'s high-water mark covers it. -/
 def commitNext (s : State Node) (p : Node) : State Node :=
-  { s with commit := upd s.commit p (s.commit p + 1),
+  { s with commit := update s.commit p (s.commit p + 1),
            hist := if s.commit p = s.hist.length
                    then s.hist ++ [(s.log p).getD (s.commit p) 0] else s.hist,
-           ackHigh := upd s.ackHigh p (max (s.ackHigh p) (s.commit p + 1)) }
+           ackHigh := update s.ackHigh p (max (s.ackHigh p) (s.commit p + 1)) }
 
 /-- Count(p, r): `p` adds `r` to its sync set. -/
 def count (s : State Node) (p r : Node) : State Node :=
-  { s with sync := upd s.sync p (upd (s.sync p) r true) }
+  { s with sync := update s.sync p (update (s.sync p) r true) }
 
 /-- Uncount(p, r): `p` removes `r` from its sync set again, before `r` has become
 eligible ("if the replica falls behind or fails before step 4, the primary simply
 removes it from the commit calculation", design §4). -/
 def uncount (s : State Node) (p r : Node) : State Node :=
-  { s with sync := upd s.sync p (upd (s.sync p) r false) }
+  { s with sync := update s.sync p (update (s.sync p) r false) }
 
 /-- MakeEligible's configuration: next version, `r` eligible, `r`'s current
 incarnation recorded. -/
-def makeEligCfg (s : State Node) (r : Node) : Cfg Node :=
-  { s.cfg with ver := s.cfg.ver + 1, elig := upd s.cfg.elig r true,
-               inc := upd s.cfg.inc r (s.inc r) }
+def makeEligibleCfg (s : State Node) (r : Node) : Cfg Node :=
+  { s.cfg with version := s.cfg.version + 1, eligible := update s.cfg.eligible r true,
+               incarnation := update s.cfg.incarnation r (s.incarnation r) }
 
 /-- MakeIneligible's configuration: next version, `r` no longer eligible. -/
-def makeIneligCfg (s : State Node) (r : Node) : Cfg Node :=
-  { s.cfg with ver := s.cfg.ver + 1, elig := upd s.cfg.elig r false }
+def makeIneligibleCfg (s : State Node) (r : Node) : Cfg Node :=
+  { s.cfg with version := s.cfg.version + 1, eligible := update s.cfg.eligible r false }
 
 /-- MakeEligible(p, r): primary `p` publishes a configuration in which `r` is eligible. -/
-def makeElig (s : State Node) (p r : Node) : State Node :=
-  { s with cfg := makeEligCfg s r, known := upd s.known p (makeEligCfg s r) }
+def makeEligible (s : State Node) (p r : Node) : State Node :=
+  { s with cfg := makeEligibleCfg s r, known := update s.known p (makeEligibleCfg s r) }
 
 /-- MakeIneligible(p, r): primary `p` publishes a configuration in which `r` is not
 eligible, and drops `r` from its sync set. -/
-def makeInelig (s : State Node) (p r : Node) : State Node :=
-  { s with cfg := makeIneligCfg s r, known := upd s.known p (makeIneligCfg s r),
-           sync := upd s.sync p (upd (s.sync p) r false) }
+def makeIneligible (s : State Node) (p r : Node) : State Node :=
+  { s with cfg := makeIneligibleCfg s r, known := update s.known p (makeIneligibleCfg s r),
+           sync := update s.sync p (update (s.sync p) r false) }
 
 /-- Learn(n): `n` adopts the latest configuration; unless it is the primary there,
 it empties its sync set. -/
 def learn (s : State Node) (n : Node) : State Node :=
-  { s with known := upd s.known n s.cfg,
-           sync := upd s.sync n (if s.cfg.prim = n then s.sync n else fun _ => false) }
+  { s with known := update s.known n s.cfg,
+           sync := update s.sync n (if s.cfg.primary = n then s.sync n else fun _ => false) }
 
-/-- `cfg.elig \ {cfg.prim, n}`: the eligible set after `n` takes over from the
+/-- `cfg.eligible \ {cfg.primary, n}`: the eligible set after `n` takes over from the
 current primary. -/
-def takeoverElig (s : State Node) (n : Node) : Node → Bool :=
-  fun x => s.cfg.elig x && decide (x ≠ s.cfg.prim) && decide (x ≠ n)
+def takeoverEligible (s : State Node) (n : Node) : Node → Bool :=
+  fun x => s.cfg.eligible x && decide (x ≠ s.cfg.primary) && decide (x ≠ n)
 
-/-- Takeover's configuration: next version, `n` primary, `takeoverElig` eligible, the
+/-- Takeover's configuration: next version, `n` primary, `takeoverEligible` eligible, the
 recorded incarnations unchanged. -/
-def takeoverCfg (s : State Node) (n : Node) : Cfg Node := ⟨s.cfg.ver + 1, n, takeoverElig s n, s.cfg.inc⟩
+def takeoverCfg (s : State Node) (n : Node) : Cfg Node := ⟨s.cfg.version + 1, n, takeoverEligible s n, s.cfg.incarnation⟩
 
-/-- MatchElig of the new config: the matching eligible replicas. -/
+/-- The new primary's sync replica set: the eligible replicas of the new configuration
+whose recorded incarnation matches. -/
 def takeoverSync (s : State Node) (n : Node) : Node → Bool :=
-  fun x => takeoverElig s n x && decide (s.cfg.inc x = s.inc x)
+  fun x => takeoverEligible s n x && decide (s.cfg.incarnation x = s.incarnation x)
 
 /-- Takeover(n): eligible replica `n` becomes primary in a new configuration. Its
 sync set is the matching eligible replicas, its acks and commit point are reset, its
 catch-up point is the end of its log (so it commits what it inherited before it
 writes), and it writes with a new term. -/
 def takeover (s : State Node) (n : Node) : State Node :=
-  { s with cfg := takeoverCfg s n, known := upd s.known n (takeoverCfg s n),
-           sync := upd s.sync n (takeoverSync s n),
-           acked := upd s.acked n (fun _ => 0),
-           commit := upd s.commit n 0,
-           recon := upd s.recon n (s.log n).length,
-           term := upd s.term n (s.cfg.ver + 1) }
+  { s with cfg := takeoverCfg s n, known := update s.known n (takeoverCfg s n),
+           sync := update s.sync n (takeoverSync s n),
+           acked := update s.acked n (fun _ => 0),
+           commit := update s.commit n 0,
+           recon := update s.recon n (s.log n).length,
+           term := update s.term n (s.cfg.version + 1) }
 
 /-- The point a replica must have acknowledged before `p` counts it: `p`'s catch-up
 point while it is still reconciling, otherwise its commit point. -/
 def catchUpPoint (s : State Node) (p : Node) : Nat :=
   if s.commit p < s.recon p then min (s.recon p) (s.log p).length else s.commit p
 
-/-- `sync[p] \cap MatchElig(known[p])`: the sync members of `p` that are eligible in
-`p`'s configuration with the incarnation it records for them. These are the replicas
+/-- The sync members of `p` that are eligible in `p`'s configuration with the
+incarnation it records for them. These are the replicas
 that count toward `min-sync-replicas`. -/
 def syncEligible (s : State Node) (p : Node) : Set Node :=
-  {r | s.sync p r = true ∧ (s.known p).elig r = true ∧ (s.known p).inc r = s.inc r}
+  {r | s.sync p r = true ∧ (s.known p).eligible r = true ∧ (s.known p).incarnation r = s.incarnation r}
 
-/-- Writable(p): `Cardinality(sync[p] \cap MatchElig(known[p])) >= m`, that is, at
-least `m` distinct sync members of `p` are eligible in `p`'s configuration with the
+/-- `p` is writable: at least `m` distinct sync members of `p` are eligible in `p`'s configuration with the
 incarnation it records for them. `Set.encard` is the cardinality in `ℕ∞`, so this
 needs no finiteness assumption on `Node`. -/
 def Writable (m : Nat) (s : State Node) (p : Node) : Prop :=
@@ -265,43 +282,44 @@ def Writable (m : Nat) (s : State Node) (p : Node) : Prop :=
 nodes, all counted. -/
 theorem writable_iff_list (m : Nat) (s : State Node) (p : Node) :
     Writable m s p ↔ ∃ l : List Node, l.Nodup ∧ m ≤ l.length ∧
-      ∀ r ∈ l, s.sync p r = true ∧ (s.known p).elig r = true ∧ (s.known p).inc r = s.inc r :=
+      ∀ r ∈ l, s.sync p r = true ∧ (s.known p).eligible r = true ∧ (s.known p).incarnation r = s.incarnation r :=
   le_encard_iff_list m _
 
 /-- Resync(r): a replica whose log has diverged from its primary's replaces it with
 the primary's log up to the primary's catch-up point, and starts acking from 0. -/
 def resync (s : State Node) (r : Node) : State Node :=
-  { s with log := upd s.log r ((s.log (primaryOf s r)).take (catchUpPoint s (primaryOf s r))),
-           acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r 0),
-           commit := upd s.commit r (min (s.commit r) (s.commit (primaryOf s r))) }
+  { s with log := update s.log r ((s.log (primaryOf s r)).take (catchUpPoint s (primaryOf s r))),
+           acked := update s.acked (primaryOf s r) (update (s.acked (primaryOf s r)) r 0),
+           commit := update s.commit r (min (s.commit r) (s.commit (primaryOf s r))) }
 
 /-- RestartEmpty(n): empty log, new incarnation, no volatile state; the current
 primary forgets `n`'s ack and stops counting it. -/
 def restartEmpty (s : State Node) (n : Node) : State Node :=
-  { s with log := upd s.log n [],
-           inc := upd s.inc n (s.inc n + 1),
-           ackHigh := upd s.ackHigh n 0,
-           commit := upd s.commit n 0,
-           recon := upd s.recon n 0,
+  { s with log := update s.log n [],
+           incarnation := update s.incarnation n (s.incarnation n + 1),
+           ackHigh := update s.ackHigh n 0,
+           commit := update s.commit n 0,
+           recon := update s.recon n 0,
            sync := fun p => if p = n then (fun _ => false)
-                            else if p = s.cfg.prim then upd (s.sync p) n false else s.sync p,
+                            else if p = s.cfg.primary then update (s.sync p) n false else s.sync p,
            acked := fun p => if p = n then (fun _ => 0)
-                             else if p = s.cfg.prim then upd (s.acked p) n 0 else s.acked p }
+                             else if p = s.cfg.primary then update (s.acked p) n 0 else s.acked p }
 
-/-- The rebuilt sync set of a restarted primary: `MatchElig(known[n]) \ {n}`, the
-eligible replicas whose recorded incarnation matches. -/
+/-- The sync replica set a restarted primary starts from: the replicas that are
+eligible, with a matching recorded incarnation, in the configuration it knows, minus
+itself. Recomputed from the configuration, not from any data transfer. -/
 def rebuiltSync (s : State Node) (n : Node) : Node → Bool :=
-  fun r => (s.known n).elig r && decide ((s.known n).inc r = s.inc r) && decide (r ≠ n)
+  fun r => (s.known n).eligible r && decide ((s.known n).incarnation r = s.incarnation r) && decide (r ≠ n)
 
 /-- RestartKeep(n): data and incarnation kept, volatile state lost. `n` must commit
 its whole log again before it serves. If `n` is primary, its sync set is rebuilt from
 the configuration it knows (`rebuiltSync`); otherwise it is empty. -/
 def restartKeep (s : State Node) (n : Node) : State Node :=
-  { s with commit := upd s.commit n 0,
-           recon := upd s.recon n (s.log n).length,
-           acked := upd s.acked n (fun _ => 0),
-           sync := upd s.sync n
-             (if (s.known n).prim = n ∧ (s.known n).inc n = s.inc n
+  { s with commit := update s.commit n 0,
+           recon := update s.recon n (s.log n).length,
+           acked := update s.acked n (fun _ => 0),
+           sync := update s.sync n
+             (if (s.known n).primary = n ∧ (s.known n).incarnation n = s.incarnation n
               then rebuiltSync s n else fun _ => false) }
 
 /-- RestartPartial(n, k), keeping the incarnation: `n` restarts from a persistence
@@ -309,19 +327,19 @@ file holding only the first `k` entries of its log. Everything else is RestartKe
 the truncated log: volatile state lost, catch-up point at the end of what it holds,
 sync replica set rebuilt if it is primary. -/
 def restartPartialKeep (s : State Node) (n : Node) (k : Nat) : State Node :=
-  { restartKeep s n with log := upd s.log n ((s.log n).take k), recon := upd s.recon n k }
+  { restartKeep s n with log := update s.log n ((s.log n).take k), recon := update s.recon n k }
 
 /-- RestartPartial(n, k), taking a new incarnation: RestartEmpty, except that `n` keeps
 the first `k` entries of its log as a starting point for resynchronisation. -/
 def restartPartialFresh (s : State Node) (n : Node) (k : Nat) : State Node :=
-  { restartEmpty s n with log := upd s.log n ((s.log n).take k) }
+  { restartEmpty s n with log := update s.log n ((s.log n).take k) }
 
 /-- The actions of the protocol, one per `Step` constructor. A run of
 the protocol is a list of actions, so a counterexample's trace can be read off its
 statement. `restartPartial n k` labels both outcomes of a stale restore. -/
 inductive Action (Node : Type)
   | append (p : Node) | replicate (r : Node) | ack (r : Node) | commit (p : Node)
-  | count (p r : Node) | uncount (p r : Node) | makeElig (p r : Node) | makeInelig (p r : Node)
+  | count (p r : Node) | uncount (p r : Node) | makeEligible (p r : Node) | makeIneligible (p r : Node)
   | learn (n : Node)
   | takeover (n : Node) | resync (r : Node) | restartEmpty (n : Node) | restartKeep (n : Node)
   | restartPartial (n : Node) (k : Nat)
@@ -358,23 +376,23 @@ inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
   primary simply removes it from the commit calculation"). A deposed primary may not:
   the member it would drop may be the one whose frozen acknowledgement fences it. -/
   | uncount (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true →
-      s.cfg.elig r = false → Step m s (.uncount p r) (uncount s p r)
+      s.cfg.eligible r = false → Step m s (.uncount p r) (uncount s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
-  | makeElig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.elig r = false →
-      Step m s (.makeElig p r) (makeElig s p r)
+  | makeEligible (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.eligible r = false →
+      Step m s (.makeEligible p r) (makeEligible s p r)
   /-- A primary that knows the latest configuration may make a replica ineligible. -/
-  | makeInelig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.cfg.elig r = true →
-      Step m s (.makeInelig p r) (makeInelig s p r)
+  | makeIneligible (s p r) : ThinksPrimary s p → KnowsLatest s p → s.cfg.eligible r = true →
+      Step m s (.makeIneligible p r) (makeIneligible s p r)
   /-- A node with a stale configuration may learn the latest one. -/
   | learn (s n) : ¬ KnowsLatest s n → Step m s (.learn n) (learn s n)
   /-- An eligible replica that knows the latest configuration, with a matching
   recorded incarnation, may take over from the current primary. -/
-  | takeover (s n) : KnowsLatest s n → s.cfg.elig n = true → n ≠ s.cfg.prim →
-      s.cfg.inc n = s.inc n → Step m s (.takeover n) (takeover s n)
+  | takeover (s n) : KnowsLatest s n → s.cfg.eligible n = true → n ≠ s.cfg.primary →
+      s.cfg.incarnation n = s.incarnation n → Step m s (.takeover n) (takeover s n)
   /-- A diverged replica may resync once its primary has neither counted it nor made
   it eligible. -/
   | resync (s r) : primaryOf s r ≠ r → ¬ (s.log r <+: s.log (primaryOf s r)) →
-      s.sync (primaryOf s r) r = false → (s.known (primaryOf s r)).elig r = false →
+      s.sync (primaryOf s r) r = false → (s.known (primaryOf s r)).eligible r = false →
       Step m s (.resync r) (resync s r)
   /-- A node that knows the latest configuration may restart empty while some other
   authoritative node keeps its data (the survival assumption). -/

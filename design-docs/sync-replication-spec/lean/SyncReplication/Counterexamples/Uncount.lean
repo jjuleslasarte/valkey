@@ -31,9 +31,9 @@ def ltsUncountElig (m : Nat) : LTS (State N) (Action N) where
 
 def u0 : State N := init 0
 def u1 := count u0 0 1             -- n0 counts n1
-def u2 := makeElig u1 0 1          -- n1 eligible
+def u2 := makeEligible u1 0 1          -- n1 eligible
 def u3 := count u2 0 2             -- n0 counts n2
-def u4 := makeElig u3 0 2          -- n2 eligible
+def u4 := makeEligible u3 0 2          -- n2 eligible
 def u5 := appendWrite u4 0         -- n0 writes at offset 1
 def u6 := replicate u5 2           -- n2 copies it
 def u7 := ack u6 2                 -- n2 acknowledges
@@ -43,12 +43,12 @@ def u9 := commitNext u8 0          -- n0 commits with n2's acknowledgement only
 /-- The run; the label list is its trace. Only `uncount 0 1` is the weakened action:
 n1 is already eligible. -/
 theorem uncountElig_run : (ltsUncountElig 1).MTr u0
-    [.count 0 1, .makeElig 0 1, .count 0 2, .makeElig 0 2, .append 0, .replicate 2, .ack 2,
+    [.count 0 1, .makeEligible 0 1, .count 0 2, .makeEligible 0 2, .append 0, .replicate 2, .ack 2,
      .uncount 0 1, .commit 0] u9 :=
   .stepL (.step (Step.count u0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.makeElig u1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.makeEligible u1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.count u2 0 2 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.makeElig u3 0 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.makeEligible u3 0 2 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append u4 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide))) <|
   .stepL (.step (Step.replicate u5 2 (by decide) (by decide) (by decide))) <|
