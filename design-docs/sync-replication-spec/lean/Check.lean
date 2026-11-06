@@ -9,3 +9,4 @@ import SyncReplication
 #print axioms SyncReplication.noIncCheck_unsafe
 #print axioms SyncReplication.noSurvivor_loses
 #print axioms SyncReplication.staleRestoreKeepsInc_unsafe
+#print axioms SyncReplication.staleRestoreKeepsInc_loses

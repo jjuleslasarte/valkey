@@ -49,11 +49,11 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   fully caught up and may be promoted) and **ineligible** replicas (async replicas and
   replicas still catching up).
 - **Incarnation ID.** One lifetime of a node's data. A node takes a new incarnation
-  when it restarts without its data. The shard configuration records the incarnation
-  of each eligible replica, so a node that lost its data can be told apart from the
-  node that earned eligibility.
+  when it restarts without its data. The shard configuration records an incarnation
+  for every node, so a node that lost its data can be told apart from the node that
+  earned eligibility or primaryship.
 - **Shard configuration.** Cluster V2 stores the primary, the eligible set and the
-  incarnation recorded for each eligible replica. Every change increments the
+  incarnation recorded for each node. Every change increments the
   configuration version. We assume the Cluster V2 implementation is correct and treat
   the configuration as a compare-and-set register: one totally ordered sequence of
   versions, each change a compare-and-set on the previous one (design §6). Each node
@@ -62,43 +62,66 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   entries in log order, and sends `REPLCONF ACK` with its replication offset.
 - **Commit rule.** The primary's **committed offset** advances only past entries every
   member of its **sync replica set** has acknowledged, and only while at least
-  `min-sync-replicas` of those members are eligible with a matching incarnation.
+  `min-sync-replicas` of those members are eligible with a matching incarnation. Only a
+  primary advances its committed offset; `REPLCONF COMMIT` and replicas' committed
+  offsets are not modelled (they matter for reads, which are out of scope).
 - **Promotion flow.** The primary first counts a caught-up replica's acknowledgements
-  (step 2), then commits the replica as eligible to the cluster bus (step 4). A
-  replica is caught up when it has acknowledged up to the primary's catch-up point:
-  the committed offset, or, for a new primary that has not yet committed the log it
-  inherited, the end of that log.
+  (design §4, step 2), then commits the replica as eligible to the cluster bus (step
+  4). A
+  replica is caught up when it follows the primary and has acknowledged up to the
+  primary's catch-up point: the committed offset, or, for a primary that has not yet
+  committed the log it holds (a new primary, or one that restarted with its data),
+  the end of that log. A primary does not count an eligible replica whose recorded
+  incarnation does not match.
 - **Demotion flow.** The primary commits the replica as ineligible and stops counting
   it, in one step.
 - **Failover.** An eligible replica that knows the latest configuration takes over
   through the takeover compare-and-set, which checks that its incarnation matches the
-  one recorded for it. The new primary first commits the log it inherited; until
-  then it serves no writes and measures promotion catch-up and full resync against
-  the end of that log. The old primary is not stopped: it may keep acting on its
-  stale configuration. A node acts as primary only while its configuration records
-  its current incarnation.
+  one recorded for it, and becomes the **current primary**: the one named in the
+  latest configuration. The new configuration drops the old primary from the eligible
+  set. The new primary starts with the eligible replicas
+  with matching incarnations as its sync replica set, with no acknowledgements and
+  committed offset 0, and writes with a new term. It first commits the log it
+  inherited; until then it serves no writes and measures promotion catch-up and full
+  resync (below) against the end of that log. The old primary is not stopped: it may keep
+  acting on its stale configuration until it learns the new one, at which point it
+  drops its sync replica set. A node acts as primary only while its configuration
+  records its current incarnation.
 - **Full resync.** A replica whose log has diverged from its primary's is replaced by
   the primary's log up to the catch-up point. This happens only after the replica is
-  out of the sync replica set and ineligible.
+  out of the sync replica set and ineligible. While a new primary is still committing
+  its inherited log, the catch-up point is the end of that log, so a resync then
+  copies inherited entries that are not yet committed.
+- **Reply blocking.** A write's reply is held until it commits. Each held reply
+  carries the term of the primaryship that accepted the write. The reply is released
+  as OK only while the node that accepted it still considers itself primary, in that
+  term; otherwise it is answered `UNCOMMITTED` (design §5, "Write behavior during
+  faults"). We call this check the **reply fence**. It is the node's own view, which
+  may be stale; a deposed primary that has not learned of the takeover passes it, and
+  is kept safe by the commit rule instead.
 - **Restarts.** A node may restart with its data, without it, or from a stale
   persistence file holding only a prefix of its log. A restart without data gives the
-  node a new incarnation; it rejoins as ineligible and becomes eligible again only
-  through the promotion flow (design §6). A restart from a stale file keeps the
-  incarnation only if the file covers the node's acknowledgement high-water mark
-  (`ackHigh`): the highest offset it has acknowledged, as a replica to its primary or
-  as a primary to its clients. A primary that restarts with its data rebuilds its
+  node a new incarnation. It stays in the eligible set with a stale recorded
+  incarnation, so it is neither counted nor promotable; once the primary demotes it,
+  it can become eligible again only through the promotion flow (design §6). A restart
+  from a stale file keeps the incarnation only if the file covers the node's
+  acknowledgement high-water mark (`ackHigh`): the highest offset it has
+  acknowledged, as a replica to its primary or as a primary to its clients.
+  Otherwise it takes a new incarnation as after a restart without data, keeping the
+  entries it has as a starting point for resynchronisation. A primary that restarts
+  with its data rebuilds its
   sync replica set from the configuration it knows. Volatile state is lost in every
   case: the committed offset, the sync replica set, the acknowledgements, and the
   client connections with their held replies.
-- **Reply blocking.** A write's reply is held until it commits. It is then released as
-  OK, but only while the primaryship that accepted the write is still current;
-  otherwise it is answered `UNCOMMITTED` (design §5, "Write behavior during faults").
 
 Messages are not modelled as separate objects. A replica reads its primary's log
-directly, and an acknowledgement updates the primary's view directly. A delayed
-message corresponds to the same step taken later, and a lost connection corresponds
-to the step never being taken. Steps interleave arbitrarily, so any order of events
-across nodes is covered.
+directly, and an acknowledgement updates the primary's view directly, with the
+replica's offset at that moment. A delayed message corresponds to the same step
+taken later, and a lost connection corresponds to the step never being taken. This
+assumes that a message is never delivered after the connection that carried it has
+been closed by a full resync or a restart: an acknowledgement sent before a resync
+cannot arrive after it. Steps interleave arbitrarily, so any order of events across
+nodes is covered.
 
 Each log entry records the **term** of the primary that wrote it: the version of the
 shard configuration that made it primary. A write is identified by its offset and
@@ -125,8 +148,8 @@ The statement uses two definitions.
   no action reads it, so it changes no behaviour: a *ghost variable*, added for the
   proof only.
 
-**Survival condition.** Whenever a node restarts without its data, some other
-authoritative node keeps its data. This is the design's "as long as the primary or at
+**Survival condition.** Whenever a node takes a new incarnation (a restart without
+data, or from a stale file), some other authoritative node keeps its data. This is the design's "as long as the primary or at
 least one eligible sync replica survives", required at each restart.
 
 Under the survival condition, every reachable state satisfies:
@@ -149,7 +172,9 @@ With `min-sync-replicas = 0` the primary may commit with an empty sync replica s
 The history may then be on the primary only, which matches the design's note that
 such writes "exist only on the primary"; their durability is the primary's own, and
 the survival condition then forbids the primary restarting empty, because no other
-node is authoritative. Property 5 is what `min-sync-replicas ≥ 1` adds.
+node is authoritative. So the design's accepted loss in that case, a primary with no
+sync replicas coming back empty, is outside the model, and the theorems say nothing
+about it. Property 5 is what `min-sync-replicas ≥ 1` adds.
 
 ## 3. Method
 
@@ -207,8 +232,10 @@ committed history.
 
 **Failover** (`FailoverInvariant`, design §5, "Writes can't split-brain").
 - `stale`: a node that still thinks it is primary under an old configuration is
-  **fenced**. Some members of its sync replica set have left it for a newer primary,
-  so their acknowledgements are frozen; the smallest of them is its *fence*, and by
+  **fenced** (this is the log fence of a deposed primary, a different thing from the
+  reply fence of section 1). Some members of its sync replica set have left it for a
+  newer primary, so their acknowledgements are frozen; the smallest of them is its
+  *fence*, and by
   the commit rule it can never commit past it. The current primary holds, and has
   acknowledged, the deposed primary's log up to the fence; every eligible replica
   either does the same or still follows the deposed primary. So a deposed primary may
@@ -224,9 +251,9 @@ nothing new is committed until an authoritative eligible replica takes over.
 
 The acknowledged-write properties (3 and 4) extend `Invariant` with three more parts
 (`ReplyInvariant`, `Durability.lean`): terms never exceed the configuration version;
-a held reply whose primaryship is still current points at the write it was issued
-for; and AckedDurable itself. A takeover gives the new primary a term larger than
-every existing tag, so an old reply can never become releasable again.
+a held reply that passes the reply fence points at the write it was issued for; and
+AckedDurable itself. A takeover gives the new primary a term larger than the term of
+any held reply, so an old reply can never become releasable again.
 
 ### 3.2 Lease timing
 
@@ -259,7 +286,7 @@ What these say about the design's own wording is in Appendix B.
 | Properties 3 and 4 (no acknowledged write lost) | `SyncReplication.ackSafety`, `ackedHeld` |
 | Property 5 (two copies with `min-sync-replicas ≥ 1`) | `SyncReplication.commit_two_copies` |
 | Lease margin and durations | `Lease/` |
-| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `staleRestoreKeepsInc_unsafe`, `noSurvivor_loses` |
+| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses` |
 
 Size: the model is 535 lines (422 for the protocol, 113 for the held-reply layer),
 the invariant and its lemmas 444, the per-action contracts 607, and the preservation
@@ -295,14 +322,24 @@ encoding.
   which replica to promote (the model allows any promotion); replication lag
   thresholds; manual failover; slot migration and anything beyond a single shard;
   modules; dirty key tracking.
+- **Replica committed offsets.** Only a primary advances its committed offset;
+  `REPLCONF COMMIT` is not modelled. Property 2 therefore constrains committed
+  offsets a node reached while it was primary.
+- **Removing a counted replica before it is eligible.** Design §4 lets the primary
+  drop a replica that falls behind between steps 2 and 4 from the commit calculation.
+  The model has no such action: a counted replica leaves the sync replica set only by
+  demotion, by the primary learning a new configuration or restarting, or by its own
+  restart. The model has fewer behaviours here than the design.
 - **The Cluster V2 bus is assumed correct** and modelled as a compare-and-set register
   (section 1).
-- **Messages are abstracted** (section 1): there is no reordering within a
-  connection.
+- **Messages are abstracted** (section 1). An acknowledgement carries the replica's
+  offset at delivery, so the model assumes no message is delivered after a full
+  resync or restart has closed its connection.
 
 ### Assumptions stronger than the design
 
-- **The survival condition** is required at every restart without data (section 2).
+- **The survival condition** is required at every restart that takes a new
+  incarnation (section 2).
 - **Restarts carry four assumptions the design only implies.** (a) A node restarts
   only when it knows the latest configuration (`KnowsLatest`), justified by design
   §6's "syncs to the latest log before it re-enters the cluster"; a restart with a
@@ -311,8 +348,10 @@ encoding.
   acknowledgement table; the design reaches that state only through the demotion flow
   (read-lease wait plus a committed demotion), so the model omits the window in which
   the primary is still waiting for the dead replica. (c) A restart with data forces
-  the node to re-commit what it holds before serving (`recon = Len(log)`); the design
-  does not specify this. (d) The acknowledgement high-water mark `ackHigh` survives a
+  the node to re-commit what it holds before serving (its catch-up point is set to
+  the end of its log), and so does a takeover; the design does not specify this. A takeover also starts the new
+  primary's sync replica set as the eligible replicas with matching incarnations,
+  which the design implies through its ordering rules but does not state. (d) The acknowledgement high-water mark `ackHigh` survives a
   restart with data and is lost with a new incarnation; the model assumes the
   implementation persists it with the data it covers. A stale file is modelled as a
   prefix of the log; a file that is not a prefix (a diverged tail) is not modelled.
@@ -351,7 +390,7 @@ Determine whether the `Count` and `Writable` incarnation checks are each needed.
 | `lean/SyncReplication/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,468 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 246 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation | 472 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation | 489 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
 | `lean/Check.lean` | Prints the axioms of every theorem | |
@@ -444,11 +483,14 @@ sequence of steps the model allows. For the main theorem:
 
 Lean's version of that sentence is `SyncReplication.safety`, and the words map one to
 one onto its symbols (`∀ {Node} [DecidableEq Node] {m} {i} {s}, Reachable m i s →
-Safety s`). Section 2 translates each of the five theorems the same way.
+Safety s`). Section 2 translates the five properties, proved by four named theorems,
+the same way.
 
 A counterexample theorem has the opposite form: *there is* a reachable state, in the
-model with one rule removed, that violates the property. It proves the rule is
-needed, the way a failing test proves a bug exists.
+model with one rule removed, that violates the property (`Safety` or `AckedDurable`).
+It proves the rule is needed, the way a failing test proves a bug exists. One of them,
+`noSurvivor_loses`, states the loss directly instead, because with no authoritative
+node left the property is vacuously true (Appendix B).
 
 ### A.3 What "proven" does not mean
 
@@ -600,7 +642,8 @@ branch, which also records the findings that are explored in TLA+ only.
 
 Each item has a Lean counterexample (`lean/SyncReplication/Counterexamples/`): a run
 of the model with the rule removed, every guard checked by `decide`, ending in a
-state that violates the guarantee. The weakened step relation is named in the
+state that violates the guarantee, or, for the survival condition and the F13 loss
+run, a state where no node's log holds the committed history. The weakened step relation is named in the
 theorem (`StepNoReconcile`, `AStepNoFence`, ...), so the statement says exactly which
 rule the run does without.
 
@@ -612,7 +655,9 @@ write with n1 as its only sync replica. n1 takes over with committed offset 0. n
 promotes n2, whose log is empty. n2 is now eligible without the committed write.
 Rule: until the new primary has committed its inherited log, promotion catch-up and
 full resync are measured against the end of that log, and the primary serves no
-writes. Counterexample: `noReconcile_unsafe` (11 steps).
+writes. Counterexample: `noReconcile_unsafe` (11 steps, `min-sync-replicas = 1`). The
+run removes only the catch-up part of the rule, in Count; that the write block and
+the resync bound are each needed on their own is not shown.
 
 **F2: fence held replies by primaryship** (`Counterexamples/ReplyFence.lean`).
 Releasing a held reply once the committed offset passes its offset is not enough,
@@ -620,9 +665,10 @@ because the offset can be reused by a later primaryship. Scenario: n0 writes at
 offset 1 and holds the reply. n1 takes over with an empty log and n0 is fully
 resynced. n0 is promoted, takes over again, writes different data at offset 1 and
 commits it. The old reply is then released as OK for a write that was replaced.
-Rule: release OK only while the node is still primary with the term the write was
-tagged with; otherwise answer `UNCOMMITTED`. Counterexample: `noReplyFence_unsafe`
-(14 steps).
+Rule: release OK only while the node still considers itself primary, in the term the
+write was tagged with; otherwise answer `UNCOMMITTED`. Counterexample:
+`noReplyFence_unsafe` (14 steps, `min-sync-replicas = 0`). No run shows the fence is
+needed at `min-sync-replicas ≥ 1`; the proof uses it there too.
 
 **F5: a restarted primary rebuilds its sync replica set**
 (`Counterexamples/Rebuild.lean`). A primary that restarts with its data loses its
@@ -637,12 +683,13 @@ matches, so it commits nothing until they acknowledge. Counterexample:
 **Incarnation check on primaryship** (`Counterexamples/Incarnation.lean`). Design §6
 says the takeover compare-and-set checks the incarnation, so a node that came back
 empty cannot be promoted. That is not enough: the node may already be the primary.
-Scenario: a write commits on n0 and n1, n0 restarts empty with a new incarnation, and
-n0 keeps acting as primary on its stale configuration. It counts n2, whose log is
-empty, and makes it eligible. n2 is now authoritative without the committed write.
-Rule: a node acts as primary only if its configuration records its current
-incarnation (`ThinksPrimary` in the model). Counterexample: `noIncCheck_unsafe` (9
-steps). The model also checks incarnations in two other places: a primary does not
+Scenario: a write commits on n0 and n1, and n0 restarts empty with a new incarnation.
+Its configuration is current, and still names it primary under its old incarnation,
+so n0 keeps acting as primary. It counts n2, whose log is empty, and makes it
+eligible. n2 is now authoritative without the committed write. Rule: a node acts as
+primary only if its configuration records its current incarnation (`ThinksPrimary`
+in the model). Counterexample: `noIncCheck_unsafe` (9 steps); the run drops the check
+from Count and MakeEligible only. The model also checks incarnations in two other places: a primary does not
 count an eligible replica whose recorded incarnation does not match (`Count`), and
 only matching replicas count toward `min-sync-replicas` (`Writable`). The proof uses
 both, but no counterexample shows that either is needed on its own.
@@ -654,8 +701,9 @@ without `appendfsync always` it can restart from a file that predates writes it
 acknowledged, keep its incarnation and its eligibility, and be counted on
 acknowledgements it no longer backs. Scenario: a write commits on n0 and n1; n1
 restarts from a file holding none of its log and keeps its incarnation. n1 is
-authoritative without the committed write. With one more step, n0 restarting empty,
-the write is gone from every node although its client had OK. Rule: a node keeps its
+authoritative without the committed write. With one more step, n0 restarting empty
+(allowed, since n1 is authoritative), the write is gone from every node
+(`staleRestoreKeepsInc_loses`, 9 steps); its client had OK. Rule: a node keeps its
 incarnation across a restart only if the restored data covers its acknowledgement
 high-water mark, the highest offset it has acknowledged as a replica (Ack) or as a
 primary (Commit); otherwise it takes a new incarnation and rejoins as after a restart
@@ -663,7 +711,7 @@ without data. The mark must be persisted with the data, or acknowledgements must
 follow fsync. Two weaker rules were checked by TLC and fail: the node's own committed
 offset (a replica's is 0) and the acknowledgements it sent as a replica (a primary's
 commits are not among them; the initial primary has sent none). Counterexample:
-`staleRestoreKeepsInc_unsafe` (8 steps).
+`staleRestoreKeepsInc_unsafe` (8 steps) and `staleRestoreKeepsInc_loses` (9).
 
 **Survival condition** (`Counterexamples/Survival.lean`). This is an assumption the
 design already makes, recorded here because the guarantee depends on it. Without it,

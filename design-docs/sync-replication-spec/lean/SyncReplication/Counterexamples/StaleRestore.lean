@@ -50,4 +50,21 @@ theorem staleRestoreKeepsInc_unsafe :
   intro ⟨hehc, _⟩
   exact absurd (hehc 1 (by decide)) (by decide)
 
+def g9 := restartEmpty g8 0   -- n0 restarts empty; allowed, since n1 is still authoritative
+
+/-- One more step: n0 restarts empty. The survival guard is satisfied by n1, which is
+authoritative but holds nothing. -/
+theorem staleRestoreKeepsInc_loss_run : (ltsStaleKeep 1).MTr c0
+    [.count 0 1, .makeElig 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+     .learn 1, .restartPartial 1 0, .restartEmpty 0] g9 :=
+  LTS.MTr.comp (ltsStaleKeep 1) staleRestoreKeepsInc_run <|
+  .stepL (.step (Step.restartEmpty g8 0 (by decide) ⟨1, by decide, by decide⟩)) <|
+  .refl
+
+/-- The committed write is then gone from every node: the committed history is
+non-empty and no node's log holds it. -/
+theorem staleRestoreKeepsInc_loses : ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧
+    s.hist ≠ [] ∧ ∀ n, ¬ s.hist <+: s.log n :=
+  ⟨g9, ⟨_, staleRestoreKeepsInc_loss_run⟩, by decide, by decide⟩
+
 end SyncReplication

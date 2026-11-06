@@ -59,7 +59,10 @@ CommittedAgree s          :=  ∀ p, s.commit p ≤ (s.log p).length ∧
 `commit_two_copies` says what `min-sync-replicas ≥ 1` adds: a commit by the current
 primary needs an eligible sync member whose recorded incarnation matches (`Writable`
 counts only those), so right after the commit the history is on at least two distinct
-authoritative nodes, the primary and that replica.
+authoritative nodes, the primary and that replica. With `m = 0` the primary may
+commit on an empty sync replica set and the history may rest on the primary alone;
+the survival guard then forbids the primary restarting empty, since no other node is
+authoritative (README §2).
 
 ### No acknowledged write is lost (`Durability.lean`)
 
@@ -90,6 +93,8 @@ theorem noReplyFence_unsafe       : ∃ a, (altsNoFence 0).CanReach (ainit 0) a 
 theorem noRebuild_unsafe          : ∃ s, (ltsNoRebuild 1).CanReach (init 0) s ∧ ¬ Safety s
 theorem noIncCheck_unsafe         : ∃ s, (ltsNoInc 1).CanReach (init 0) s ∧ ¬ Safety s
 theorem staleRestoreKeepsInc_unsafe : ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem staleRestoreKeepsInc_loses  : ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧
+    s.hist ≠ [] ∧ ∀ n, ¬ s.hist <+: s.log n
 theorem noSurvivor_loses          : ∃ s, (ltsNoSurv 1).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ (∀ n, ¬ s.hist <+: s.log n) ∧ (∀ n, ¬ IsAuthoritative s n)
 ```
@@ -117,7 +122,11 @@ See "Lease timing" below.
 | `hist` | `List Nat` | Ghost: the committed history, extended the first time any node commits an offset. |
 
 Sets of nodes are `Node → Bool`. `upd f a b` is `f` with the value at `a` replaced by
-`b`. `init i` has `i` primary at version 1, no eligible replica, every incarnation 1,
+`b`. Messages are not modelled: a delayed message is the same step taken later and a
+lost one is the step never taken, so acknowledgements carry the replica's offset at
+delivery (README §1 and §5). Restarts with data, without data and from a stale
+persistence file are actions; correlated loss of every copy is excluded by the
+survival guard on the restarts that take a new incarnation (README §2). `init i` has `i` primary at version 1, no eligible replica, every incarnation 1,
 empty logs.
 
 Derived predicates: `ThinksPrimary s p` (`known[p]` names `p` primary with its current
@@ -138,19 +147,19 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 | Action | Guard | Effect |
 |---|---|---|
 | `append p` | `p` thinks it is primary, is writable and reconciled | appends `term p` to `log p` |
-| `replicate r` | `r`'s log is a strict prefix of its primary's | copies the next entry |
-| `ack r` | `r`'s log is a prefix of its primary's and longer than its recorded ack | primary records `acked p r := (log r).length`; `ackHigh r` raised to it |
+| `replicate r` | `r` does not consider itself primary; its log is a strict prefix of its primary's | copies the next entry |
+| `ack r` | `r` does not consider itself primary; its log is a prefix of its primary's and longer than its recorded ack | primary records `acked p r := (log r).length`; `ackHigh r` raised to it |
 | `commit p` | `p` thinks it is primary, is writable, has an uncommitted entry, and every sync member has acknowledged past `commit p` | `commit p + 1`; `hist` extended if this offset is new; `ackHigh p` raised to the new commit point |
-| `count p r` | `p` thinks it is primary; `r` follows `p`, is not counted, is not an eligible replica with a stale recorded incarnation, and has acknowledged `catchUpPoint s p` | `sync p r := true` |
+| `count p r` | `p` thinks it is primary; `r ≠ p` follows `p`, is not counted, is not an eligible replica with a stale recorded incarnation, and has acknowledged `catchUpPoint s p` | `sync p r := true` |
 | `makeElig p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new version with `r` eligible and `inc r` recorded; `known p` updated |
-| `makeInelig p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `sync p r := false` |
+| `makeInelig p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `known p` updated; `sync p r := false` |
 | `learn n` | `n` does not know the latest configuration | `known n := cfg`; `sync n` emptied unless `n` is primary there |
 | `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.inc n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the matching eligible replicas; `acked n`, `commit n` reset; `recon n := (log n).length`; `term n := cfg.ver + 1` |
-| `resync r` | `r`'s log is not a prefix of its primary's; `r` is neither counted nor eligible in its primary's configuration | `log r := (log p).take (catchUpPoint s p)`; `acked p r := 0`; `commit r` capped |
+| `resync r` | `r` does not consider itself primary; its log is not a prefix of its primary's; `r` is neither counted nor eligible in its primary's configuration | `log r := (log p).take (catchUpPoint s p)`; `acked p r := 0`; `commit r` capped |
 | `restartEmpty n` | `n` knows the latest configuration; some other node is authoritative | `log n := []`, `inc n + 1`, volatile state and `ackHigh n` reset; the current primary drops `n` from its sync set and acks |
 | `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `recon n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `known n`), else emptied |
 | `restartPartial n k`, keeping the incarnation | as `restartKeep`, with `k < (log n).length` and `ackHigh n ≤ k` | `restartKeep` on `(log n).take k`, with `recon n := k` |
-| `restartPartial n k`, new incarnation | `k < (log n).length`, `k < ackHigh n`, some other node authoritative | `restartEmpty`, except `log n := (log n).take k` |
+| `restartPartial n k`, new incarnation | `n` knows the latest configuration, `k < (log n).length`, `k < ackHigh n`, some other node authoritative | `restartEmpty`, except `log n := (log n).take k` |
 
 The protocol is a CSLib labelled transition system, `lts m : LTS (State Node)
 (Action Node)` with `Tr := Step m`, and `Reachable m i s := (lts m).CanReach (init i) s`.
@@ -279,6 +288,7 @@ and the robustness notes there:
 'SyncReplication.noIncCheck_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.noSurvivor_loses' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.staleRestoreKeepsInc_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.staleRestoreKeepsInc_loses' depends on axioms: [propext, Classical.choice, Quot.sound]
 ```
 
 These are Lean's standard axioms. There is no `sorryAx`. `Classical.choice` enters
@@ -301,10 +311,10 @@ type; `Quot.sound` through function extensionality.
 | `SyncReplication/Preserve.lean` | 55 |
 | `SyncReplication/Safety.lean` | 43 |
 | `SyncReplication/Durability.lean` | 246 |
-| `SyncReplication/Counterexamples/` (7 files) | 472 |
+| `SyncReplication/Counterexamples/` (7 files) | 489 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 5,260 |
+| total | 5,277 |
 
 `lake build` of the whole tree takes about 15 seconds warm on a laptop-class
 machine (1,030 jobs including Mathlib's and CSLib's prebuilt modules).
@@ -417,7 +427,7 @@ history is `[1]`, on n0 and n1).
 | `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeElig 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeElig 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].prim = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeElig 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
-| `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** | EligibleHoldsCommitted: n1 authoritative without the write |
+| `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |
 
 The weakened action in each trace is in bold; *prefix* is `committed_run`. In
 `Survival.lean` no node is authoritative in the final state, so EligibleHoldsCommitted
