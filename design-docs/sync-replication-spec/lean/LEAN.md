@@ -14,13 +14,16 @@ lean/
   SyncReplication/
     Model.lean                  state, actions, Step, lts, Reachable, the safety properties
     Replies.lean                held client replies: AState, AStep, AckedDurable, AckedHeld
+    Leases.lean                 the lease layer: LState, LStep, the read rule, NoStaleRead
     Invariant.lean              the inductive invariant in five layers; the fence; frame lemmas
     Contracts.lean              each action's effect in design terms, proved without the invariant
     Preserve.lean               dispatch: every Step preserves Invariant
     Preserve/                   Replication, Commit, Config, Failover, Restart
     Safety.lean                 safety, commit_two_copies
     Durability.lean             ReplyInvariant; ackSafety, ackedHeld
-    Counterexamples/            Basic, Reconcile, ReplyFence, Rebuild, Incarnation, Survival, StaleRestore
+    LeaseInvariant.lean         LeaseInvariant and its preservation; noStaleRead, lease_safety
+    Counterexamples/            Basic, Reconcile, ReplyFence, Rebuild, Uncount, Incarnation,
+                                MinSyncIncarnation, Survival, StaleRestore, Leases
     Lists.lean                  list-prefix lemmas
   Lease/                        Additive, Rate, Durations
   Check.lean                    #print axioms for every theorem
@@ -28,7 +31,8 @@ lean/
 ```
 
 Dependency order: `Lists` → `Model` → `Replies`, `Invariant` → `Contracts` →
-`Preserve/*` → `Preserve` → `Safety` → `Durability` → `Counterexamples/*`.
+`Preserve/*` → `Preserve` → `Safety` → `Durability`, `Leases` → `LeaseInvariant` →
+`Counterexamples/*`.
 
 ## Theorems
 
@@ -82,6 +86,32 @@ AckedHeld a     :=  ∀ x ∈ a.okd, ∀ n, IsAuthoritative a.core n →
 `okd` is the list of `(offset, value)` pairs released to clients as OK. `hist` only
 grows, so an acknowledged write stays in the committed history.
 
+### No stale linearizable read (`LeaseInvariant.lean`)
+
+```lean
+theorem noStaleRead {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
+    {a : LState Node} (h : LReachable m P i a) : NoStaleRead P a
+
+theorem lease_safety {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
+    {a : LState Node} (h : LReachable m P i a) : Safety a.core
+```
+
+```lean
+HolderValid P now start dur  :=  start = some t0 ∧ now + P.margin < t0 + dur + P.drift   (false for none)
+GrantorOver P now recv dur   :=  recv = some t0 → t0 + dur ≤ now + P.drift
+PrimLeaseValid P a p  :=  ∀ r, (a.core.known p).eligible r = true → r ≠ p →
+                            HolderValid P a.now (a.pl p r) P.primDur
+ReadLeaseValid P a r  :=  HolderValid P a.now (a.rl r) P.readDur
+PrimCanRead P a p     :=  ThinksPrimary a.core p ∧ PrimLeaseValid P a p ∧ a.core.commit p = (a.core.log p).length
+ReplCanRead P a r     :=  ¬ ThinksPrimary a.core r ∧ ReadLeaseValid P a r ∧ a.rview r = (a.core.log r).length
+NoStaleRead P a       :=  (∀ p, PrimCanRead P a p → a.core.log p = a.core.hist) ∧
+                          (∀ r, ReplCanRead P a r → a.core.log r = a.core.hist)
+```
+
+`P` holds the two durations, the drift bound and the margin. The hypothesis
+`2 * drift ≤ margin` is the design's "the doc's argument needs Margin ≥ 2 · Drift";
+`smallMargin_stale` shows it cannot be dropped.
+
 ### Counterexamples (`Counterexamples/`)
 
 Each states a reachable state of a *weakened* protocol (the model's `Step` plus one
@@ -98,6 +128,10 @@ theorem staleRestoreKeepsInc_loses  : ∃ s, (ltsStaleKeep 1).CanReach (init 0) 
 theorem noSurvivor_loses          : ∃ s, (ltsNoSurv 1).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ (∀ n, ¬ s.hist <+: s.log n) ∧ (∀ n, ¬ IsAuthoritative s n)
 theorem uncountElig_unsafe        : ∃ s, (ltsUncountElig 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noWaitPrim_stale  : ∃ a, (lltsNoWaitPrim 0 P0).CanReach (linit 0) a ∧ PrimCanRead P0 a 0 ∧ a.core.log 0 ≠ a.core.hist
+theorem noWaitRead_stale  : ∃ a, (lltsNoWaitRead 0 P0).CanReach (linit 0) a ∧ ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
+theorem grantAny_stale    : ∃ a, (lltsGrantAny 0 P0).CanReach (linit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
+theorem smallMargin_stale : ∃ a, LReachable 0 P1 0 a ∧ PrimCanRead P1 a 0 ∧ a.core.log 0 ≠ a.core.hist
 theorem noIncWritable_oneCopy     : ∃ s, (ltsNoIncWritable 1).CanReach (init 0) s ∧
     ThinksPrimary s 0 ∧ 0 = s.cfg.primary ∧ WritableNoInc 1 s 0 ∧ s.commit 0 < (s.log 0).length ∧
     (∀ r, s.sync 0 r = true → s.commit 0 < s.acked 0 r) ∧
@@ -173,6 +207,34 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 The protocol is a CSLib labelled transition system, `lts m : LTS (State Node)
 (Action Node)` with `Tr := Step m`, and `Reachable m i s := (lts m).CanReach (init i) s`.
 
+### Leases (`Leases.lean`)
+
+`LState` is a `State` plus real time `now`, each replica's committed view `rview`, and
+the lease timestamps (`Option Nat`; `none` is no lease): `pl p r` (start of the primary
+lease `p` holds from `r`: send time of the data `r` last acknowledged), `ackRecv p r`
+(when `p` last received an acknowledgement from `r`), `ackEcho p r` (send time of the
+acknowledgement `p` will echo), `rl r` (start of `r`'s read lease), `primRecv r` (when
+`r` last received traffic from its primary, learned a configuration, or restarted),
+`dataT r` (send time of the latest data `r` received), `tko p` (when `p`'s primaryship
+began on this node, by takeover or restart). `LStep m P` has:
+
+| Action | Guard | Effect |
+|---|---|---|
+| `tick` | | `now + 1` |
+| `core μ` | `Step m` for AppendWrite, Commit, Count, Uncount, MakeEligible | the replication step; no lease state moves |
+| `replicate r` | as `Step.replicate` | the replication step; `rview r := max (rview r) (min (commit p) \|log r\|)`, `primRecv r := now`, `dataT r := now` |
+| `heartbeat r` | `r` does not consider itself primary; its log is a prefix of its primary's | the `rview`, `primRecv`, `dataT` updates; log unchanged |
+| `heartbeat r` with echo | as above; the primary thinks it is primary; `MayGrant`: it holds its lease from every eligible replica it knows, and `r` is a sync member eligible with a matching incarnation | as above, and `rl r := max (rl r) (ackEcho p r)` |
+| `ack r` | as `Step.ack` | the replication step; `pl p r := max (pl p r) (dataT r)`, `ackRecv p r := now`, `ackEcho p r := now` |
+| `ack r` renewal | `r` does not consider itself primary; its log is a prefix of its primary's | the three lease updates; replication state unchanged |
+| `learn n` | as `Step.learn` | the replication step; `primRecv n := now` |
+| `demote p r` | as `Step.makeIneligible`; `GrantorOver (ackRecv p r) readDur`; `tko p = some T → T + readDur + margin ≤ now + drift` | the replication step |
+| `takeover n` | as `Step.takeover`; `primRecv n + primDur ≤ now + drift` | the replication step; `tko n := now`; `pl n`, `ackRecv n`, `ackEcho n` cleared; `rl n := none` |
+| `resync r` | as `Step.resync` | the replication step; `rview r := 0` |
+| the restarts | as the replication restarts | the replication step; `rview n := 0`; `n`'s leases cleared; `primRecv n := now`, `dataT n := now`, `tko n := now` |
+
+`llts m P` and `LReachable m P i a` as for the replication model.
+
 ### Held client replies (`Replies.lean`)
 
 `AState` is a `State` plus `held : List (Held Node)` and `okd : List (Nat × Nat)`. A
@@ -239,6 +301,26 @@ the `invariant_X` for each constructor; `invariant_trInv` states this as a CSLib
 one-step invariant, and `invariant_reachable` gets the run invariant from CSLib's
 `mtrInv_of_trInv`.
 
+### Lease invariant (`LeaseInvariant.lean`)
+
+`LeaseInvariant P a` is `Invariant a.core` plus fifteen conjuncts. Eight bookkeeping
+facts: `primRecvLe`, `ackRecvLe`, `rlLe`, `tkoLe` (every recorded time is in the past),
+`dataTLe` (`dataT r ≤ primRecv r`), `plLe` (a primary lease starts no later than the
+grantor's last traffic), `echoLe` (an echo was sent no later than it arrived), `tkoAck`
+(every acknowledgement a primary holds arrived during its current primaryship). The
+two that carry the argument: `deposed` (a deposed primary has a witness, the replica
+that deposed it, eligible in its configuration and following someone else, whose
+lease to it is over for good) and `leaseAuth` (a valid read lease implies the holder is
+authoritative), with `leaseBound` (a read lease started no later than the current
+primary's last acknowledgement from its holder or its takeover) feeding the latter.
+Then `selfPrimNoLease` (a node whose configuration names it primary holds no read
+lease), `rviewLen` and `rviewHist` (the committed view is within the log and a committed
+prefix). `leaseValid_current` is the lemma that a primary holding its lease is the
+current primary; `lease_over_of_guards` turns the two demotion waits into "the read
+lease is not valid". Preservation is one theorem per action in the same file, with
+`leaseInvariant_withCore`, `_recvData_noEcho`, `_recvAck` and `_restart` as the shared
+frames.
+
 ### Durability (`Durability.lean`)
 
 `ReplyInvariant a` is `Invariant a.core` plus `TermLe` (every term is at most
@@ -300,6 +382,12 @@ and the robustness notes there:
 'SyncReplication.staleRestoreKeepsInc_loses' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.noIncWritable_oneCopy' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.uncountElig_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noStaleRead' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.lease_safety' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noWaitPrim_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noWaitRead_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.smallMargin_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.grantAny_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
 ```
 
 These are Lean's standard axioms. There is no `sorryAx`. `Classical.choice` enters
@@ -310,7 +398,9 @@ type; `Quot.sound` through function extensionality.
 
 | File | Lines |
 |---|---|
-| `SyncReplication/Model.lean` | 433 |
+| `SyncReplication/Model.lean` | 451 |
+| `SyncReplication/Leases.lean` | 322 |
+| `SyncReplication/LeaseInvariant.lean` | 1,085 |
 | `SyncReplication/Replies.lean` | 113 |
 | `SyncReplication/Invariant.lean` | 444 |
 | `SyncReplication/Contracts.lean` | 616 |
@@ -322,12 +412,12 @@ type; `Quot.sound` through function extensionality.
 | `SyncReplication/Preserve.lean` | 55 |
 | `SyncReplication/Safety.lean` | 43 |
 | `SyncReplication/Durability.lean` | 248 |
-| `SyncReplication/Counterexamples/` (9 files) | 641 |
+| `SyncReplication/Counterexamples/` (10 files) | 852 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 5,562 |
+| total | 7,200 |
 
-`lake build` of the whole tree takes about 15 seconds warm on a laptop-class
+`lake build` of the whole tree takes about 20 seconds warm on a laptop-class
 machine (1,030 jobs including Mathlib's and CSLib's prebuilt modules).
 
 ## Reproduce
@@ -438,6 +528,7 @@ history is `[1]`, on n0 and n1).
 | `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
+| `Leases.lean` | `LStepNoWaitPrim`, `LStepNoWaitRead`, `LStepGrantAny`, and `llts` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the eligible sync set; margin 1 with drift 1 | shared prefix count 0 1, makeEligible 0 1, learn 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `linit`) heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
 | `Uncount.lean` | `StepUncountElig` | Uncount of an eligible counted replica | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **uncount 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, count 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
 | `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |

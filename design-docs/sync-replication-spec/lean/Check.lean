@@ -12,3 +12,9 @@ import SyncReplication
 #print axioms SyncReplication.staleRestoreKeepsInc_loses
 #print axioms SyncReplication.noIncWritable_oneCopy
 #print axioms SyncReplication.uncountElig_unsafe
+#print axioms SyncReplication.noStaleRead
+#print axioms SyncReplication.lease_safety
+#print axioms SyncReplication.noWaitPrim_stale
+#print axioms SyncReplication.noWaitRead_stale
+#print axioms SyncReplication.smallMargin_stale
+#print axioms SyncReplication.grantAny_stale

@@ -216,7 +216,7 @@ variable {s : State Node} (h : Invariant s) {p r : Node} (hp : ThinksPrimary s p
 include h hp hkl
 
 /-- The new version records `r` as eligible with its current incarnation, and the primary's copy is that version. -/
-theorem config_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
+theorem config_makeEligible (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
     ConfigInvariant (makeEligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
@@ -253,7 +253,7 @@ theorem config_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false)
     · exact h.knownIncLe x y }
 
 /-- Promotion step 4 moves no log, sync replica set or acknowledgement. -/
-theorem repl_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
+theorem repl_makeEligible (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
     ReplInvariant (makeEligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
@@ -274,7 +274,7 @@ theorem repl_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
   syncCommit := by intro x y hx; exact h.syncCommit x y ((htp x).1 hx) }
 
 /-- `r` was already counted (step 2 comes before step 4), so every eligible replica is still counted. -/
-theorem membership_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
+theorem membership_makeEligible (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
     MembershipInvariant (makeEligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
@@ -320,7 +320,7 @@ theorem membership_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = fa
     · rw [hKp, hK, if_neg hf]; exact h.eligibleInOldConfig m hm hf }
 
 /-- MakeEligible changes no commit point, catch-up point or history. -/
-theorem commit_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
+theorem commit_makeEligible (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
     CommitInvariant (makeEligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
@@ -347,7 +347,7 @@ theorem commit_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false)
     · exact h.histAck n hn' }
 
 /-- Fences do not move. `r` holds a deposed primary's log up to its fence, because `r` acknowledged past the reconciliation point, which is past the fence. -/
-theorem failover_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
+theorem failover_makeEligible (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
     FailoverInvariant (makeEligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
@@ -397,7 +397,7 @@ theorem failover_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = fals
     rw [hI, if_neg (Ne.symm hrp)]; exact hpa }
 
 /-- `r` is the only node that can become authoritative, and it holds the history: it acknowledged past the reconciliation point, which covers the history. -/
-theorem ehc_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
+theorem ehc_makeEligible (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
     EligibleHoldsCommitted (makeEligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
@@ -424,17 +424,17 @@ theorem ehc_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
     · exact hhist
     · exact h.ehc n hn
 
-theorem invariant_makeElig (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
+theorem invariant_makeEligible (hs : s.sync p r = true) (he : s.cfg.eligible r = false) :
     Invariant (makeEligible s p r) where
-  toConfigInvariant := config_makeElig h hp hkl hs he
-  toReplInvariant := repl_makeElig h hp hkl hs he
-  toMembershipInvariant := membership_makeElig h hp hkl hs he
-  toCommitInvariant := commit_makeElig h hp hkl hs he
-  toFailoverInvariant := failover_makeElig h hp hkl hs he
-  ehc := ehc_makeElig h hp hkl hs he
+  toConfigInvariant := config_makeEligible h hp hkl hs he
+  toReplInvariant := repl_makeEligible h hp hkl hs he
+  toMembershipInvariant := membership_makeEligible h hp hkl hs he
+  toCommitInvariant := commit_makeEligible h hp hkl hs he
+  toFailoverInvariant := failover_makeEligible h hp hkl hs he
+  ehc := ehc_makeEligible h hp hkl hs he
 
 /-- The new version drops `r` from the eligible set; only the primary's copy changes. -/
-theorem config_makeInelig (_he : s.cfg.eligible r = true) :
+theorem config_makeIneligible (_he : s.cfg.eligible r = true) :
     ConfigInvariant (makeIneligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
@@ -459,7 +459,7 @@ theorem config_makeInelig (_he : s.cfg.eligible r = true) :
     · exact h.knownIncLe x y }
 
 /-- The primary stops counting `r`; no log or other acknowledgement moves. -/
-theorem repl_makeInelig (_he : s.cfg.eligible r = true) :
+theorem repl_makeIneligible (_he : s.cfg.eligible r = true) :
     ReplInvariant (makeIneligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
@@ -481,7 +481,7 @@ theorem repl_makeInelig (_he : s.cfg.eligible r = true) :
   syncCommit := by intro x y hx hxy; exact h.syncCommit x y ((htp x).1 hx) (hSle x y hxy) }
 
 /-- `r` is ineligible before any write commits without it (demotion ordering rule). -/
-theorem membership_makeInelig (he : s.cfg.eligible r = true) :
+theorem membership_makeIneligible (he : s.cfg.eligible r = true) :
     MembershipInvariant (makeIneligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
@@ -529,14 +529,14 @@ theorem membership_makeInelig (he : s.cfg.eligible r = true) :
 
 /-- MakeIneligible changes no commit point, catch-up point, history or primary, and the
 commit facts only mention the current primary. -/
-theorem commit_makeInelig (_he : s.cfg.eligible r = true) : CommitInvariant (makeIneligible s p r) := by
+theorem commit_makeIneligible (_he : s.cfg.eligible r = true) : CommitInvariant (makeIneligible s p r) := by
   obtain ⟨_, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
   exact { caLen := h.caLen, caHist := h.caHist, caEq := h.caEq, reconLen := h.reconLen,
           histLe := h.histLe, histAck := fun n hn => h.histAck n (makeIneligible_isAuthoritative hn) }
 
 /-- Fences do not move, and no node becomes authoritative. -/
-theorem failover_makeInelig (_he : s.cfg.eligible r = true) :
+theorem failover_makeIneligible (_he : s.cfg.eligible r = true) :
     FailoverInvariant (makeIneligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
@@ -569,7 +569,7 @@ theorem failover_makeInelig (_he : s.cfg.eligible r = true) :
   authEx := ⟨s.cfg.primary, Or.inr rfl, hpa⟩ }
 
 /-- No node becomes authoritative. -/
-theorem ehc_makeInelig (_he : s.cfg.eligible r = true) :
+theorem ehc_makeIneligible (_he : s.cfg.eligible r = true) :
     EligibleHoldsCommitted (makeIneligible s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
@@ -578,14 +578,14 @@ theorem ehc_makeInelig (_he : s.cfg.eligible r = true) :
     fun _ => makeIneligible_isAuthoritative
   exact fun n hn => h.ehc n (hauth n hn)
 
-theorem invariant_makeInelig (he : s.cfg.eligible r = true) :
+theorem invariant_makeIneligible (he : s.cfg.eligible r = true) :
     Invariant (makeIneligible s p r) where
-  toConfigInvariant := config_makeInelig h hp hkl he
-  toReplInvariant := repl_makeInelig h hp hkl he
-  toMembershipInvariant := membership_makeInelig h hp hkl he
-  toCommitInvariant := commit_makeInelig h hp hkl he
-  toFailoverInvariant := failover_makeInelig h hp hkl he
-  ehc := ehc_makeInelig h hp hkl he
+  toConfigInvariant := config_makeIneligible h hp hkl he
+  toReplInvariant := repl_makeIneligible h hp hkl he
+  toMembershipInvariant := membership_makeIneligible h hp hkl he
+  toCommitInvariant := commit_makeIneligible h hp hkl he
+  toFailoverInvariant := failover_makeIneligible h hp hkl he
+  ehc := ehc_makeIneligible h hp hkl he
 
 end cas
 
