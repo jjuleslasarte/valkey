@@ -1,34 +1,33 @@
-import RestartProof.Preserve
+import SyncReplication.Preserve
 
-/-! Main theorem: every reachable state of CoreRestart's replication part
-(ReconcileFirst = TRUE, RebuildSync = TRUE, the survival guard on RestartEmpty)
-satisfies Safety, with EligibleHoldsCommitted over authoritative nodes, for EVERY
+/-! # Main theorem
+
+Every reachable state satisfies Safety, with EligibleHoldsCommitted over authoritative nodes, for EVERY
 MinSync `m`, any node type, unbounded logs, versions, incarnations and restarts. -/
 
-namespace RestartProof
+namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
 /-- Safety for every min-sync-replicas value `m`.
 
-In prose: with the F1 fix (`rf = true`) and the F5 fix (`rb = true`), in every state
-reachable from `init i`, every authoritative node holds the whole committed history,
+In prose: in every state reachable from `init i`, every authoritative node holds the whole committed history,
 and no node has committed an entry that differs from it. This holds for any number
 of nodes, log length, configuration changes and restarts, provided each restart
 without data leaves some other authoritative node with its data. -/
-theorem safety {m : Nat} {i : Node} {s : State Node} (h : Reachable m true true i s) : Safety s :=
-  inv_safety (inv_reachable h)
+theorem safety {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) : Safety s :=
+  invariant_safety (invariant_reachable h)
 
 /-- What MinSync >= 1 adds: when the current primary commits, an eligible replica with a
 matching incarnation counts toward the commit, so after the commit the history is on
 at least two distinct authoritative nodes, the primary and that replica. -/
 theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
-    (h : Reachable m true true i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.prim)
+    (h : Reachable m i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.prim)
     (hw : Writable m s p) (hlen : s.commit p < (s.log p).length)
     (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
     ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
       (commitNext s p).hist <+: (commitNext s p).log e ∧ (commitNext s p).hist <+: (commitNext s p).log p := by
-  have hi := inv_reachable h
+  have hi := invariant_reachable h
   have hs' := (safety (h.stepR (Step.commit s p hp hw hlen hcap))).1
   obtain ⟨r, h1, h2, h3⟩ : (syncEligible s p).Nonempty :=
     Set.one_le_encard_iff_nonempty.mp (le_trans (by exact_mod_cast hm) hw)
@@ -41,4 +40,4 @@ theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
     have := hp.2; rw [hi.primKnows] at this; exact this
   exact ⟨r, hrp, har, hap, hs' r har, hs' _ hap⟩
 
-end RestartProof
+end SyncReplication

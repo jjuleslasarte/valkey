@@ -1,5 +1,5 @@
-import RestartProof.Inv
-import RestartProof.Contracts
+import SyncReplication.Invariant
+import SyncReplication.Contracts
 
 /-!
 # Preservation: the commit rule (design §2; promotion step 2)
@@ -8,7 +8,7 @@ Commit (a primary advances its committed offset once every sync replica has
 acknowledged) and Count (a primary starts counting a caught-up replica).
 -/
 
-namespace RestartProof
+namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
@@ -18,16 +18,16 @@ set_option linter.unusedSectionVars false
 
 section commit
 
-variable {s : State Node} (h : Inv s) (p : Node) (hp : ThinksPrimary s p) (hlen : s.commit p < (s.log p).length) (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r)
+variable {s : State Node} (h : Invariant s) (p : Node) (hp : ThinksPrimary s p) (hlen : s.commit p < (s.log p).length) (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r)
 
 include h hp hlen hcap
 
 /-- Commit changes no configuration. -/
-theorem config_commit : ConfigInv (commitNext s p) :=
-  (h.toConfigInv).frame rfl rfl rfl
+theorem config_commit : ConfigInvariant (commitNext s p) :=
+  (h.toConfigInvariant).frame rfl rfl rfl
 
 /-- The commit guard requires every sync replica to have acknowledged past the new commit point. -/
-theorem repl_commit : ReplInv (commitNext s p) := by
+theorem repl_commit : ReplInvariant (commitNext s p) := by
   have hold := commit_holds h hp hlen hcap
   have hC := commitNext_commit (s := s) p
   have hsucc := take_succ_getD hlen
@@ -69,11 +69,11 @@ theorem repl_commit : ReplInv (commitNext s p) := by
     · exact h.syncCommit q r hq hs }
 
 /-- Commit changes no sync replica set or eligibility. -/
-theorem membership_commit : MembershipInv (commitNext s p) :=
-  (h.toMembershipInv).frame rfl rfl rfl rfl rfl rfl
+theorem membership_commit : MembershipInvariant (commitNext s p) :=
+  (h.toMembershipInvariant).frame rfl rfl rfl rfl rfl rfl
 
 /-- The newly committed entry is the history's entry at that offset, or extends the history by one. -/
-theorem commit_commit : CommitInv (commitNext s p) := by
+theorem commit_commit : CommitInvariant (commitNext s p) := by
   have hold := commit_holds h hp hlen hcap
   have hC := commitNext_commit (s := s) p
   have hsucc := take_succ_getD hlen
@@ -163,7 +163,7 @@ theorem commit_commit : CommitInv (commitNext s p) := by
         · right; omega }
 
 /-- Fences do not mention commit points. -/
-theorem failover_commit : FailoverInv (commitNext s p) := by
+theorem failover_commit : FailoverInvariant (commitNext s p) := by
   have hold := commit_holds h hp hlen hcap
   have hsucc := take_succ_getD hlen
   have hcaEqP := h.caEq p
@@ -235,28 +235,28 @@ theorem ehc_commit : EligibleHoldsCommitted (commitNext s p) := by
   · have hh := commitNext_hist_old (s := s) he
     rw [hh]; exact h.ehc n hn
 
-theorem inv_commit : Inv (commitNext s p) where
-  toConfigInv := config_commit h p hp hlen hcap
-  toReplInv := repl_commit h p hp hlen hcap
-  toMembershipInv := membership_commit h p hp hlen hcap
-  toCommitInv := commit_commit h p hp hlen hcap
-  toFailoverInv := failover_commit h p hp hlen hcap
+theorem invariant_commit : Invariant (commitNext s p) where
+  toConfigInvariant := config_commit h p hp hlen hcap
+  toReplInvariant := repl_commit h p hp hlen hcap
+  toMembershipInvariant := membership_commit h p hp hlen hcap
+  toCommitInvariant := commit_commit h p hp hlen hcap
+  toFailoverInvariant := failover_commit h p hp hlen hcap
   ehc := ehc_commit h p hp hlen hcap
 
 end commit
 
 section count
 
-variable {s : State Node} (h : Inv s) (p r : Node) (hp : ThinksPrimary s p) (hrp : r ≠ p) (hf : primaryOf s r = p) (hcup : catchUpPoint true s p ≤ s.acked p r)
+variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p) (hrp : r ≠ p) (hf : primaryOf s r = p) (hcup : catchUpPoint s p ≤ s.acked p r)
 
 include h r hp hrp hf hcup
 
 /-- Count changes no configuration. -/
-theorem config_count : ConfigInv (count s p r) :=
-  (h.toConfigInv).frame rfl rfl rfl
+theorem config_count : ConfigInvariant (count s p r) :=
+  (h.toConfigInvariant).frame rfl rfl rfl
 
 /-- `r` has acknowledged up to the catch-up point, which is at least `p`'s commit point, so `p` still never commits past a sync replica's acknowledgement. -/
-theorem repl_count : ReplInv (count s p r) := by
+theorem repl_count : ReplInvariant (count s p r) := by
   have hle : s.commit p ≤ s.acked p r := Nat.le_trans (commit_le_catchUpPoint h p) hcup
   have hS := count_sync (s := s) p r
   exact {
@@ -274,7 +274,7 @@ theorem repl_count : ReplInv (count s p r) := by
     · exact hle }
 
 /-- A newly counted ineligible replica follows `p` and has acknowledged past the reconciliation point (promotion steps 1-2). -/
-theorem membership_count : MembershipInv (count s p r) := by
+theorem membership_count : MembershipInvariant (count s p r) := by
   have h0 := h
   have hS := count_sync (s := s) p r
   exact {
@@ -292,11 +292,11 @@ theorem membership_count : MembershipInv (count s p r) := by
   eligFol := h.eligFol }
 
 /-- Count changes no commit point, catch-up point or history. -/
-theorem commit_count : CommitInv (count s p r) :=
-  (h.toCommitInv).frame rfl rfl rfl rfl rfl rfl rfl
+theorem commit_count : CommitInvariant (count s p r) :=
+  (h.toCommitInvariant).frame rfl rfl rfl rfl rfl rfl rfl
 
 /-- Adding a sync replica does not move a fence. -/
-theorem failover_count : FailoverInv (count s p r) := by
+theorem failover_count : FailoverInvariant (count s p r) := by
   have hS := count_sync (s := s) p r
   exact {
   stale := by
@@ -311,14 +311,14 @@ theorem failover_count : FailoverInv (count s p r) := by
 theorem ehc_count : EligibleHoldsCommitted (count s p r) := by
   exact h.ehc
 
-theorem inv_count : Inv (count s p r) where
-  toConfigInv := config_count h p r hp hrp hf hcup
-  toReplInv := repl_count h p r hp hrp hf hcup
-  toMembershipInv := membership_count h p r hp hrp hf hcup
-  toCommitInv := commit_count h p r hp hrp hf hcup
-  toFailoverInv := failover_count h p r hp hrp hf hcup
+theorem invariant_count : Invariant (count s p r) where
+  toConfigInvariant := config_count h p r hp hrp hf hcup
+  toReplInvariant := repl_count h p r hp hrp hf hcup
+  toMembershipInvariant := membership_count h p r hp hrp hf hcup
+  toCommitInvariant := commit_count h p r hp hrp hf hcup
+  toFailoverInvariant := failover_count h p r hp hrp hf hcup
   ehc := ehc_count h p r hp hrp hf hcup
 
 end count
 
-end RestartProof
+end SyncReplication

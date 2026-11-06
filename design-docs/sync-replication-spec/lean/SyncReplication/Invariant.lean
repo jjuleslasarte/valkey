@@ -1,16 +1,24 @@
-import RestartProof.Lists
+import SyncReplication.Lists
 import Mathlib.Data.Nat.Lattice
-import RestartProof.Model
+import SyncReplication.Model
 
-/-! The inductive invariant of CoreRestart. It is `ReconProof.Inv` with:
-- `ehc` and `Fenced.eligHolds` over authoritative nodes (`IsAuthoritative`);
-- `eligSync` (O1) only for eligible replicas whose recorded incarnation matches;
-- `histLe` and the current-primary clauses of `Fenced` only while the current primary is
-  authoritative (`PrimaryAuthoritative`): a primary that came back empty holds nothing, and nothing new
-  is committed until an authoritative eligible replica takes over;
-- a new conjunct `incLe`: the config never records an incarnation ahead of the node. -/
+/-! # The inductive invariant
 
-namespace RestartProof
+`Invariant` is the predicate on states that `Safety` is strengthened to so that every
+step preserves it. It has five layers, each about one part of the design and stated
+in terms of the earlier ones: `ConfigInvariant` (the Cluster V2 configuration and
+incarnations), `ReplInvariant` (acknowledgements are real; the commit rule),
+`MembershipInvariant` (the ordering rules of promotion and demotion),
+`CommitInvariant` (committed prefixes and the reconciliation point) and
+`FailoverInvariant` (deposed primaries are fenced; some node is authoritative). The
+goal, EligibleHoldsCommitted, is `Invariant`'s own field `ehc`. Each conjunct's
+docstring cites the design.
+
+Facts about the current primary (`histLe`, the primary clauses of `Fenced`) hold
+only while it is authoritative: a primary that came back empty holds nothing, and
+nothing new is committed until an authoritative eligible replica takes over. -/
+
+namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
@@ -42,7 +50,7 @@ structure Fenced (s : State Node) (p : Node) : Prop where
   /-- Some member of `p`'s sync replica set has moved to a different primary. -/
   left      : (leftSync s p).Nonempty
   /-- While the current primary is authoritative, it must reconcile at least up to the
-  fence (F1). -/
+  fence. -/
   reconLe   : PrimaryAuthoritative s → fence s p ≤ s.recon s.cfg.prim
   /-- While the current primary is authoritative, it holds `p`'s log up to the fence. -/
   primHolds : PrimaryAuthoritative s → (s.log p).take (fence s p) <+: s.log s.cfg.prim
@@ -146,9 +154,9 @@ theorem Fenced.le_len {s : State Node} {p : Node} (hF : Fenced s p)
 /-!
 ## The inductive invariant, in layers
 
-`Inv` is the conjunction of five layers. Each layer is about one part of the design,
+`Invariant` is the conjunction of five layers. Each layer is about one part of the design,
 and each is stated in terms of the layers listed before it, with one exception:
-`MembershipInv.syncNew` already uses the reconciliation point that `CommitInv`
+`MembershipInvariant.syncNew` already uses the reconciliation point that `CommitInvariant`
 constrains. Read them in order; the last
 field of the last layer, `ehc`, is the property we want.
 -/
@@ -156,7 +164,7 @@ field of the last layer, `ehc`, is the property we want.
 /-- **Configuration.** Cluster V2 holds one totally ordered configuration; each node's
 copy may be behind it but never ahead, and incarnation records never run ahead of the
 nodes they describe (design §6). -/
-structure ConfigInv (s : State Node) : Prop where
+structure ConfigInvariant (s : State Node) : Prop where
   /-- No node has seen a configuration newer than the latest one. -/
   knownLe    : ∀ n, (s.known n).ver ≤ s.cfg.ver
   /-- A node that has seen the latest version has the latest configuration. -/
@@ -173,7 +181,7 @@ structure ConfigInv (s : State Node) : Prop where
 acknowledged offset never exceeds what the replica holds of the primary's log, and a
 primary's committed offset never passes a sync replica's acknowledgement (design §2,
 commit rule). -/
-structure ReplInv (s : State Node) : Prop where
+structure ReplInvariant (s : State Node) : Prop where
   /-- A node is never in its own sync replica set. -/
   noSelfSync : ∀ p, s.sync p p = false
   /-- The current primary has no acknowledgement recorded from a node that follows a
@@ -195,13 +203,14 @@ structure ReplInv (s : State Node) : Prop where
 /-- **Membership.** The two ordering rules of promotion and demotion (design §4): a
 replica counts toward commits before it becomes eligible, and stops being eligible
 before a write commits without it. -/
-structure MembershipInv (s : State Node) : Prop where
+structure MembershipInvariant (s : State Node) : Prop where
   /-- Every eligible replica with a matching incarnation is counted ("must count toward
-  commits **before** it becomes eligible"). F5 is what keeps this across a restart. -/
+  commits **before** it becomes eligible"). A restarted primary rebuilds its sync
+  replica set so that this survives the restart. -/
   eligSync   : ∀ p r, ThinksPrimary s p → (s.known p).elig r = true → (s.known p).inc r = s.inc r →
                  s.sync p r = true
   /-- A replica the current primary counts but has not made eligible follows it and has
-  acknowledged at least the reconciliation point (promotion steps 1-2; F1). -/
+  acknowledged at least the reconciliation point (promotion steps 1-2). -/
   syncNew    : ∀ r, s.sync s.cfg.prim r = true → s.cfg.elig r = false →
                  (s.known r).prim = s.cfg.prim ∧ s.recon s.cfg.prim ≤ s.acked s.cfg.prim r
   /-- An eligible replica that follows an old primary is still eligible in that
@@ -211,7 +220,7 @@ structure MembershipInv (s : State Node) : Prop where
 
 /-- **Commit.** Committed prefixes agree with the committed history, and the current
 primary's catch-up point covers it (design §2, "committed offset"; §5, reconciliation). -/
-structure CommitInv (s : State Node) : Prop where
+structure CommitInvariant (s : State Node) : Prop where
   /-- A committed offset is within the node's log. -/
   caLen      : ∀ p, s.commit p ≤ (s.log p).length
   /-- ... and within the committed history. -/
@@ -221,7 +230,7 @@ structure CommitInv (s : State Node) : Prop where
   /-- The current primary's catch-up point is within its log. -/
   reconLen   : s.recon s.cfg.prim ≤ (s.log s.cfg.prim).length
   /-- While the current primary is authoritative, the whole committed history is below
-  its commit point or its catch-up point: a new primary reconciles against all of it (F1). -/
+  its commit point or its catch-up point: a new primary reconciles against all of it. -/
   histLe     : PrimaryAuthoritative s → s.hist.length ≤ s.commit s.cfg.prim ∨ s.hist.length ≤ s.recon s.cfg.prim
   /-- Every authoritative node has acknowledged the whole committed history: a replica
   is counted, and so made eligible, only after acknowledging past the reconciliation
@@ -232,7 +241,7 @@ structure CommitInv (s : State Node) : Prop where
 /-- **Failover.** A deposed primary cannot commit anything the new configuration does
 not hold ("Writes can't split-brain", design §5), and some node keeps the data (the
 survival condition). -/
-structure FailoverInv (s : State Node) : Prop where
+structure FailoverInvariant (s : State Node) : Prop where
   /-- A node that still thinks it is primary under an old configuration is fenced:
   it can only commit below its `fence`, and the new configuration holds its log up
   to there. -/
@@ -243,20 +252,20 @@ structure FailoverInv (s : State Node) : Prop where
 /-! ### Frame lemmas: a layer is kept by any step that leaves its variables alone. -/
 
 /-- A step that changes neither the configuration, nor any node's copy of it, nor any
-incarnation keeps `ConfigInv`. -/
-theorem ConfigInv.frame {s s' : State Node} (h : ConfigInv s)
+incarnation keeps `ConfigInvariant`. -/
+theorem ConfigInvariant.frame {s s' : State Node} (h : ConfigInvariant s)
     (hcfg : s'.cfg = s.cfg) (hknown : s'.known = s.known) (hinc : s'.inc = s.inc) :
-    ConfigInv s' := by
+    ConfigInvariant s' := by
   obtain ⟨h1, h2, h3, h4, h5⟩ := h
   exact ⟨by rw [hcfg, hknown]; exact h1, by rw [hcfg, hknown]; exact h2,
     by rw [hcfg, hknown]; exact h3, by rw [hcfg, hinc]; exact h4, by rw [hknown, hinc]; exact h5⟩
 
 /-- A step that changes no commit point, catch-up point, log, history, configuration or
-incarnation keeps `CommitInv`. -/
-theorem CommitInv.frame {s s' : State Node} (h : CommitInv s)
+incarnation keeps `CommitInvariant`. -/
+theorem CommitInvariant.frame {s s' : State Node} (h : CommitInvariant s)
     (hcommit : s'.commit = s.commit) (hrecon : s'.recon = s.recon) (hlog : s'.log = s.log)
     (hhist : s'.hist = s.hist) (hcfg : s'.cfg = s.cfg) (hinc : s'.inc = s.inc)
-    (hah : s'.ackHigh = s.ackHigh) : CommitInv s' := by
+    (hah : s'.ackHigh = s.ackHigh) : CommitInvariant s' := by
   obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
   refine ⟨by rw [hcommit, hlog]; exact h1, by rw [hcommit, hhist]; exact h2,
     by rw [hcommit, hlog, hhist]; exact h3, by rw [hrecon, hlog, hcfg]; exact h4, ?_, ?_⟩
@@ -266,11 +275,11 @@ theorem CommitInv.frame {s s' : State Node} (h : CommitInv s)
     exact h6 n (by unfold IsAuthoritative at hn ⊢; rw [hcfg, hinc] at hn; exact hn)
 
 /-- A step that changes no sync replica set, acknowledgement, configuration, copy of it,
-incarnation or catch-up point keeps `MembershipInv`. -/
-theorem MembershipInv.frame {s s' : State Node} (h : MembershipInv s)
+incarnation or catch-up point keeps `MembershipInvariant`. -/
+theorem MembershipInvariant.frame {s s' : State Node} (h : MembershipInvariant s)
     (hsync : s'.sync = s.sync) (hacked : s'.acked = s.acked) (hcfg : s'.cfg = s.cfg)
     (hknown : s'.known = s.known) (hinc : s'.inc = s.inc) (hrecon : s'.recon = s.recon) :
-    MembershipInv s' := by
+    MembershipInvariant s' := by
   obtain ⟨h1, h2, h3⟩ := h
   have htp : ∀ p, ThinksPrimary s' p ↔ ThinksPrimary s p := by
     intro p; unfold ThinksPrimary; rw [hknown, hinc]
@@ -279,17 +288,17 @@ theorem MembershipInv.frame {s s' : State Node} (h : MembershipInv s)
   · intro r; rw [hcfg, hsync, hknown, hrecon, hacked]; exact h2 r
   · intro m; rw [hcfg, hknown]; exact h3 m
 
-/-- The inductive invariant of CoreRestart: the five layers plus the goal. -/
-structure Inv (s : State Node) : Prop
-    extends ConfigInv s, ReplInv s, MembershipInv s, CommitInv s, FailoverInv s where
+/-- The inductive invariant: the five layers plus the goal. -/
+structure Invariant (s : State Node) : Prop
+    extends ConfigInvariant s, ReplInvariant s, MembershipInvariant s, CommitInvariant s, FailoverInvariant s where
   /-- **Goal**, EligibleHoldsCommitted: every authoritative node holds the whole
   committed history. -/
   ehc        : ∀ n, IsAuthoritative s n → s.hist <+: s.log n
 
-theorem inv_safety {s : State Node} (h : Inv s) : Safety s :=
+theorem invariant_safety {s : State Node} (h : Invariant s) : Safety s :=
   ⟨h.ehc, fun p => ⟨h.caLen p, h.caEq p⟩⟩
 
-theorem inv_init (i : Node) : Inv (init i) where
+theorem invariant_init (i : Node) : Invariant (init i) where
   ehc := by intro n _; simp [init]
   caLen := by intro p; simp [init]
   caHist := by intro p; simp [init]
@@ -317,7 +326,7 @@ theorem inv_init (i : Node) : Inv (init i) where
 /-! ### Derived facts -/
 
 section
-variable {s : State Node} (h : Inv s)
+variable {s : State Node} (h : Invariant s)
 include h
 
 theorem thinksPrimary_prim (hpa : PrimaryAuthoritative s) : ThinksPrimary s s.cfg.prim := by
@@ -358,7 +367,7 @@ theorem prim_holds_sync (hpa : PrimaryAuthoritative s) {m : Node} (hs : s.sync s
     exact h.ackHolds _ _ (thinksPrimary_prim h hpa) hne hf
   · rw [h.ackedPrim m hf]; simp
 
-/-- Core commit fact: if `p` may commit offset `c` by the commit rule, every
+/-- The commit fact: if `p` may commit offset `c` by the commit rule, every
 authoritative node holds the first `c+1` entries of `p`. -/
 theorem commit_holds {p : Node} (hp : ThinksPrimary s p) (hlen : s.commit p < (s.log p).length)
     (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
@@ -414,22 +423,22 @@ end
 /-! ### CatchUpPoint facts -/
 
 /-- CatchUpPoint is at least the committed offset. -/
-theorem commit_le_catchUpPoint {s : State Node} (h : Inv s) (p : Node) : s.commit p ≤ catchUpPoint true s p := by
+theorem commit_le_catchUpPoint {s : State Node} (h : Invariant s) (p : Node) : s.commit p ≤ catchUpPoint s p := by
   have := h.caLen p
   unfold catchUpPoint; split_ifs with c
   · omega
   · exact Nat.le_refl _
 
 /-- For the current primary, CatchUpPoint covers the reconciliation point. -/
-theorem recon_le_catchUpPoint {s : State Node} (h : Inv s) : s.recon s.cfg.prim ≤ catchUpPoint true s s.cfg.prim := by
+theorem recon_le_catchUpPoint {s : State Node} (h : Invariant s) : s.recon s.cfg.prim ≤ catchUpPoint s s.cfg.prim := by
   have := h.reconLen
   unfold catchUpPoint; split_ifs with c
   · omega
   · simp at c; exact c
 
-theorem catchUpPoint_le_len {s : State Node} (h : Inv s) (p : Node) : catchUpPoint true s p ≤ (s.log p).length := by
+theorem catchUpPoint_le_len {s : State Node} (h : Invariant s) (p : Node) : catchUpPoint s p ≤ (s.log p).length := by
   unfold catchUpPoint; split
   · exact Nat.min_le_right _ _
   · exact h.caLen p
 
-end RestartProof
+end SyncReplication

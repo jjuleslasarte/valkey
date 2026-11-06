@@ -1,5 +1,5 @@
-import RestartProof.Inv
-import RestartProof.Contracts
+import SyncReplication.Invariant
+import SyncReplication.Contracts
 
 /-!
 # Preservation: failover (design §5)
@@ -8,7 +8,7 @@ Takeover: an eligible replica becomes primary in a new configuration. The old pr
 is not stopped; it is fenced (`Fenced`).
 -/
 
-namespace RestartProof
+namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
@@ -20,13 +20,13 @@ matches. They all take the same arguments, so some lemmas take a guard part they
 not use. -/
 set_option linter.unusedSectionVars false
 
-variable {s : State Node} (h : Inv s) (n : Node) (hkl : KnowsLatest s n)
+variable {s : State Node} (h : Invariant s) (n : Node) (hkl : KnowsLatest s n)
     (hel : s.cfg.elig n = true) (hnp : n ≠ s.cfg.prim) (hin : s.cfg.inc n = s.inc n)
 include h hkl hel hnp hin
 
 /-- Configuration: the takeover's configuration becomes the latest one, `n`'s copy is it,
 and recorded incarnations do not change. -/
-theorem config_takeover : ConfigInv (takeover s n) := by
+theorem config_takeover : ConfigInvariant (takeover s n) := by
   have hK : ∀ x, (takeover s n).known x = if x = n then takeoverCfg s n else s.known x :=
     takeover_known
   exact {
@@ -49,7 +49,7 @@ theorem config_takeover : ConfigInv (takeover s n) := by
 
 /-- Replication: `n` starts its primaryship with no acknowledgements recorded; every other
 node's records are unchanged, and no log moves. -/
-theorem repl_takeover : ReplInv (takeover s n) := by
+theorem repl_takeover : ReplInvariant (takeover s n) := by
   have hK : ∀ x, (takeover s n).known x = if x = n then takeoverCfg s n else s.known x :=
     takeover_known
   have hKo : ∀ x, x ≠ n → (takeover s n).known x = s.known x := fun _ => takeover_known_other
@@ -93,7 +93,7 @@ theorem repl_takeover : ReplInv (takeover s n) := by
 
 /-- Membership: `n` counts exactly the eligible replicas of the new configuration whose
 recorded incarnation matches, and counts no ineligible replica. -/
-theorem membership_takeover : MembershipInv (takeover s n) := by
+theorem membership_takeover : MembershipInvariant (takeover s n) := by
   have hK : ∀ x, (takeover s n).known x = if x = n then takeoverCfg s n else s.known x :=
     takeover_known
   have hKo : ∀ x, x ≠ n → (takeover s n).known x = s.known x := fun _ => takeover_known_other
@@ -129,8 +129,8 @@ theorem membership_takeover : MembershipInv (takeover s n) := by
 
 /-- Commit: `n`'s commit point is 0 and its catch-up point is the end of its log. As an
 eligible replica it held the whole committed history, so the history is below its
-catch-up point (F1: it reconciles before it serves). -/
-theorem commit_takeover : CommitInv (takeover s n) := by
+catch-up point: it reconciles before it serves. -/
+theorem commit_takeover : CommitInvariant (takeover s n) := by
   have hCn : (takeover s n).commit n = 0 := takeover_commit_self
   have hCo : ∀ x, x ≠ n → (takeover s n).commit x = s.commit x := fun _ => takeover_commit_other
   have hRn : (takeover s n).recon n = (s.log n).length := takeover_recon_self
@@ -161,7 +161,7 @@ theorem commit_takeover : CommitInv (takeover s n) := by
 
 /-- Failover: every deposed primary is fenced, including the one `n` replaced, and `n`
 itself is authoritative. -/
-theorem failover_takeover : FailoverInv (takeover s n) := by
+theorem failover_takeover : FailoverInvariant (takeover s n) := by
   have hkn : s.known n = s.cfg := h.knownEq n hkl
   have hfn : (s.known n).prim = s.cfg.prim := by rw [hkn]
   have hK : ∀ x, (takeover s n).known x = if x = n then takeoverCfg s n else s.known x :=
@@ -282,14 +282,14 @@ theorem ehc_takeover :
   · exact h.ehc m ⟨Or.inl ((hNE m).1 hm).1, hi⟩
   · exact hehn
 /-- Takeover preserves the invariant, layer by layer. -/
-theorem inv_takeover : Inv (takeover s n) where
-  toConfigInv := config_takeover h n hkl hel hnp hin
-  toReplInv := repl_takeover h n hkl hel hnp hin
-  toMembershipInv := membership_takeover h n hkl hel hnp hin
-  toCommitInv := commit_takeover h n hkl hel hnp hin
-  toFailoverInv := failover_takeover h n hkl hel hnp hin
+theorem invariant_takeover : Invariant (takeover s n) where
+  toConfigInvariant := config_takeover h n hkl hel hnp hin
+  toReplInvariant := repl_takeover h n hkl hel hnp hin
+  toMembershipInvariant := membership_takeover h n hkl hel hnp hin
+  toCommitInvariant := commit_takeover h n hkl hel hnp hin
+  toFailoverInvariant := failover_takeover h n hkl hel hnp hin
   ehc := ehc_takeover h n hkl hel hnp hin
 
 end takeover
 
-end RestartProof
+end SyncReplication

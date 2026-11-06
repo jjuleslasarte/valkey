@@ -1,10 +1,10 @@
-import RestartProof.Model
+import SyncReplication.Model
 
 /-!
 # Action contracts
 
 What each action of `Model.lean` changes and what it leaves alone (AppendWrite and
-Replicate only extend one log, and are covered by `inv_grow` instead), stated in the
+Replicate only extend one log, and are covered by `invariant_grow` instead), stated in the
 design's terms: who thinks it is primary, who is authoritative, whose log, sync
 replica set, acknowledgements and commit point move. The invariant proofs
 (`Preserve/*.lean`) use these lemmas instead of unfolding the
@@ -15,7 +15,7 @@ None of these lemmas needs the invariant; they follow from the action's definiti
 alone. Hypotheses that come from the action's guard are named after it.
 -/
 
-namespace RestartProof
+namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node] {s : State Node}
 
@@ -24,7 +24,8 @@ variable {Node : Type} [DecidableEq Node] {s : State Node}
 An eligible replica `n` becomes primary in a new configuration. Logs do not move. `n`
 starts a new primaryship: its sync replica set is the matching eligible replicas,
 its acknowledgements and commit point are reset, and its catch-up point is the end of
-its log (F1). Every other node keeps its state, including the old primary, which is
+its log, so it reconciles before it serves. Every other node keeps its state,
+including the old primary, which is
 not told. -/
 
 section takeover
@@ -53,7 +54,7 @@ theorem takeover_commit_self : (takeover s n).commit n = 0 := by simp [takeover]
 theorem takeover_commit_other {x : Node} (hx : x ≠ n) : (takeover s n).commit x = s.commit x := by
   simp [takeover, upd, hx]
 
-/-- The new primary must commit its whole inherited log before it serves (F1). -/
+/-- The new primary must commit its whole inherited log before it serves. -/
 theorem takeover_recon_self : (takeover s n).recon n = (s.log n).length := by simp [takeover]
 
 /-- The new primary counts exactly the eligible replicas of the new configuration
@@ -298,34 +299,34 @@ section resync
 variable {r : Node}
 
 theorem resync_log_self :
-    (resync true s r).log r = (s.log (primaryOf s r)).take (catchUpPoint true s (primaryOf s r)) := by
+    (resync s r).log r = (s.log (primaryOf s r)).take (catchUpPoint s (primaryOf s r)) := by
   simp [resync]
 
-theorem resync_log_other {x : Node} (hx : x ≠ r) : (resync true s r).log x = s.log x := by
+theorem resync_log_other {x : Node} (hx : x ≠ r) : (resync s r).log x = s.log x := by
   simp [resync, upd, hx]
 
 theorem resync_commit_self :
-    (resync true s r).commit r = min (s.commit r) (s.commit (primaryOf s r)) := by simp [resync]
+    (resync s r).commit r = min (s.commit r) (s.commit (primaryOf s r)) := by simp [resync]
 
-theorem resync_commit_other {x : Node} (hx : x ≠ r) : (resync true s r).commit x = s.commit x := by
+theorem resync_commit_other {x : Node} (hx : x ≠ r) : (resync s r).commit x = s.commit x := by
   simp [resync, upd, hx]
 
 theorem resync_acked (q x : Node) :
-    (resync true s r).acked q x = if q = primaryOf s r ∧ x = r then 0 else s.acked q x := by
+    (resync s r).acked q x = if q = primaryOf s r ∧ x = r then 0 else s.acked q x := by
   by_cases hq : q = primaryOf s r
   · subst hq; by_cases hx : x = r
     · subst hx; simp [resync, upd]
     · simp [resync, upd, hx]
   · simp [resync, upd, hq]
 
-theorem resync_acked_le (q x : Node) : (resync true s r).acked q x ≤ s.acked q x := by
+theorem resync_acked_le (q x : Node) : (resync s r).acked q x ≤ s.acked q x := by
   rw [resync_acked]; split
   · exact Nat.zero_le _
   · exact Nat.le_refl _
 
 /-- Acknowledgements the primary counts are untouched, because `r` is not counted. -/
 theorem resync_acked_sync (hsy : s.sync (primaryOf s r) r = false) {q x : Node}
-    (hs : s.sync q x = true) : (resync true s r).acked q x = s.acked q x := by
+    (hs : s.sync q x = true) : (resync s r).acked q x = s.acked q x := by
   rw [resync_acked]; split_ifs with c
   · obtain ⟨rfl, rfl⟩ := c; rw [hsy] at hs; exact absurd hs (by decide)
   · rfl
@@ -445,48 +446,48 @@ theorem restartEmpty_primaryAuthoritative (hinc : s.cfg.inc n ≤ s.inc n)
 
 end restartEmpty
 
-/-! ## RestartKeep(n) (RebuildSync = TRUE)
+/-! ## RestartKeep(n)
 
 `n` keeps its log and incarnation and loses its volatile state: commit point and
 acknowledgements reset, and it must re-commit its whole log before serving. If it is
-primary, its sync replica set is rebuilt from the configuration (F5). Who thinks it
+primary, its sync replica set is rebuilt from the configuration. Who thinks it
 is primary does not change. -/
 
 section restartKeep
 variable {n : Node}
 
 theorem restartKeep_commit_other {x : Node} (e : x ≠ n) :
-    (restartKeep true s n).commit x = s.commit x := by simp [restartKeep, upd, e]
+    (restartKeep s n).commit x = s.commit x := by simp [restartKeep, upd, e]
 
-theorem restartKeep_commit_self : (restartKeep true s n).commit n = 0 := by simp [restartKeep]
+theorem restartKeep_commit_self : (restartKeep s n).commit n = 0 := by simp [restartKeep]
 
 theorem restartKeep_recon_other {x : Node} (e : x ≠ n) :
-    (restartKeep true s n).recon x = s.recon x := by simp [restartKeep, upd, e]
+    (restartKeep s n).recon x = s.recon x := by simp [restartKeep, upd, e]
 
-theorem restartKeep_recon_self : (restartKeep true s n).recon n = (s.log n).length := by
+theorem restartKeep_recon_self : (restartKeep s n).recon n = (s.log n).length := by
   simp [restartKeep]
 
 theorem restartKeep_acked_other {x : Node} (e : x ≠ n) :
-    (restartKeep true s n).acked x = s.acked x := by simp [restartKeep, upd, e]
+    (restartKeep s n).acked x = s.acked x := by simp [restartKeep, upd, e]
 
-theorem restartKeep_acked_self : (restartKeep true s n).acked n = fun _ => 0 := by
+theorem restartKeep_acked_self : (restartKeep s n).acked n = fun _ => 0 := by
   simp [restartKeep]
 
 theorem restartKeep_sync_other {x : Node} (e : x ≠ n) :
-    (restartKeep true s n).sync x = s.sync x := by simp [restartKeep, upd, e]
+    (restartKeep s n).sync x = s.sync x := by simp [restartKeep, upd, e]
 
-/-- F5: a restarted primary's sync replica set is rebuilt from the configuration. -/
-theorem restartKeep_sync_self : (restartKeep true s n).sync n =
+/-- A restarted primary's sync replica set is rebuilt from the configuration. -/
+theorem restartKeep_sync_self : (restartKeep s n).sync n =
     if (s.known n).prim = n ∧ (s.known n).inc n = s.inc n then rebuiltSync s n
     else fun _ => false := by
   simp [restartKeep]
 
 theorem restartKeep_thinksPrimary (x : Node) :
-    ThinksPrimary (restartKeep true s n) x ↔ ThinksPrimary s x := Iff.rfl
+    ThinksPrimary (restartKeep s n) x ↔ ThinksPrimary s x := Iff.rfl
 
 end restartKeep
 
-/-! ## RestartPartial(n, k) (RebuildSync = TRUE)
+/-! ## RestartPartial(n, k)
 
 `n` restarts from a persistence file holding only the first `k` entries of its log.
 Keeping its incarnation (`restartPartialKeep`), it is RestartKeep on the truncated log;
@@ -498,43 +499,43 @@ section restartPartialKeep
 variable {n : Node} {k : Nat}
 
 theorem restartPartialKeep_log (x : Node) :
-    (restartPartialKeep true s n k).log x = if x = n then (s.log n).take k else s.log x := by
+    (restartPartialKeep s n k).log x = if x = n then (s.log n).take k else s.log x := by
   show upd s.log n ((s.log n).take k) x = _; rfl
 
 theorem restartPartialKeep_log_other {x : Node} (e : x ≠ n) :
-    (restartPartialKeep true s n k).log x = s.log x := by rw [restartPartialKeep_log, if_neg e]
+    (restartPartialKeep s n k).log x = s.log x := by rw [restartPartialKeep_log, if_neg e]
 
-theorem restartPartialKeep_log_self : (restartPartialKeep true s n k).log n = (s.log n).take k := by
+theorem restartPartialKeep_log_self : (restartPartialKeep s n k).log n = (s.log n).take k := by
   rw [restartPartialKeep_log, if_pos rfl]
 
 theorem restartPartialKeep_commit_other {x : Node} (e : x ≠ n) :
-    (restartPartialKeep true s n k).commit x = s.commit x := restartKeep_commit_other e
+    (restartPartialKeep s n k).commit x = s.commit x := restartKeep_commit_other e
 
-theorem restartPartialKeep_commit_self : (restartPartialKeep true s n k).commit n = 0 :=
+theorem restartPartialKeep_commit_self : (restartPartialKeep s n k).commit n = 0 :=
   restartKeep_commit_self
 
 theorem restartPartialKeep_recon_other {x : Node} (e : x ≠ n) :
-    (restartPartialKeep true s n k).recon x = s.recon x := by
+    (restartPartialKeep s n k).recon x = s.recon x := by
   show upd s.recon n k x = _; rw [upd_ne _ _ e]
 
-theorem restartPartialKeep_recon_self : (restartPartialKeep true s n k).recon n = k := by
+theorem restartPartialKeep_recon_self : (restartPartialKeep s n k).recon n = k := by
   show upd s.recon n k n = _; rw [upd_same]
 
 theorem restartPartialKeep_acked_other {x : Node} (e : x ≠ n) :
-    (restartPartialKeep true s n k).acked x = s.acked x := restartKeep_acked_other e
+    (restartPartialKeep s n k).acked x = s.acked x := restartKeep_acked_other e
 
-theorem restartPartialKeep_acked_self : (restartPartialKeep true s n k).acked n = fun _ => 0 :=
+theorem restartPartialKeep_acked_self : (restartPartialKeep s n k).acked n = fun _ => 0 :=
   restartKeep_acked_self
 
 theorem restartPartialKeep_sync_other {x : Node} (e : x ≠ n) :
-    (restartPartialKeep true s n k).sync x = s.sync x := restartKeep_sync_other e
+    (restartPartialKeep s n k).sync x = s.sync x := restartKeep_sync_other e
 
-theorem restartPartialKeep_sync_self : (restartPartialKeep true s n k).sync n =
+theorem restartPartialKeep_sync_self : (restartPartialKeep s n k).sync n =
     if (s.known n).prim = n ∧ (s.known n).inc n = s.inc n then rebuiltSync s n
     else fun _ => false := restartKeep_sync_self
 
 theorem restartPartialKeep_thinksPrimary (x : Node) :
-    ThinksPrimary (restartPartialKeep true s n k) x ↔ ThinksPrimary s x := Iff.rfl
+    ThinksPrimary (restartPartialKeep s n k) x ↔ ThinksPrimary s x := Iff.rfl
 
 end restartPartialKeep
 
@@ -603,4 +604,4 @@ theorem restartPartialFresh_primaryAuthoritative (hinc : s.cfg.inc n ≤ s.inc n
 
 end restartPartialFresh
 
-end RestartProof
+end SyncReplication

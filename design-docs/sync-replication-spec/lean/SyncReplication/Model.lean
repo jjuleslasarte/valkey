@@ -1,13 +1,14 @@
-import RestartProof.Lists
+import SyncReplication.Lists
 import Cslib.Foundations.Semantics.LTS.Basic
 
 open Cslib
 
 /-!
-# CoreRestart: the replication model
+# The replication model
 
-Transition-system encoding of the replication part of `spec/CoreRestart.tla`
-(EarlyDrop = FALSE, IncCheck = TRUE, NoSurvivor = FALSE).
+Transition-system encoding of the synchronous replication design
+(`design-docs/sync-replication.md`): the commit protocol, the Cluster V2 shard
+configuration, failover and node restarts.
 
 ## In prose
 
@@ -19,33 +20,38 @@ of replicas eligible to take over, and the incarnation recorded for each node);
 every node keeps its own possibly stale copy. A node can restart and keep its data,
 or restart empty with a new incarnation.
 
-The theorem proved about this model (`RestartProof.safety` in `Safety.lean`):
+The theorem proved about this model (`SyncReplication.safety` in `Safety.lean`):
 
 > In every reachable state, for every min-sync-replicas value, every authoritative
 > node (the primary or an eligible replica, with the incarnation the configuration
 > records for it) holds the whole committed history, and no node has committed an
 > entry that differs from that history.
 
-It assumes the F1 fix (a new primary commits its inherited log before writing,
-`rf = true`), the F5 fix (a restarted primary rebuilds its sync set, `rb = true`),
-and the survival assumption (a node restarts empty only while some other
-authoritative node keeps its data).
+The model is the design with its reconciliation and restart rules in place: a new
+primary commits its inherited log before it writes (`Reconciled`), a primary that
+restarts with its data rebuilds its sync set from its configuration (`rebuiltSync`),
+a node keeps its incarnation across a restart only if the data it restores covers
+what it has acknowledged (`ackHigh`), and a node restarts empty only while some other
+authoritative node keeps its data (the survival assumption). `Counterexamples/`
+shows what each of these rules prevents.
 
-## Relation to the other models
+## Incarnations
 
-Same as `ReconProof.Model` plus:
-- `inc n`: the node's incarnation; `cfg.inc r`: the incarnation the config records.
-- ThinksPrim checks the recorded incarnation: `ThinksPrimary s p` is
-  `known[p].prim = p /\ known[p].inc[p] = inc[p]`.
-- `IsAuthoritative s n`: `n \in cfg.elig \catchUpPoint {cfg.prim} /\ cfg.inc[n] = inc[n]` (Auth).
+- `inc n` is the node's incarnation; `cfg.inc r` is the incarnation the configuration
+  records for it. A node that restarts without its data takes a new incarnation.
+- A node thinks it is primary only if its configuration names it primary with its
+  current incarnation: `ThinksPrimary s p` is `known[p].prim = p ∧ known[p].inc p = inc p`.
+- A node is authoritative if the latest configuration lists it as primary or eligible
+  with its current incarnation: `IsAuthoritative s n` is
+  `(cfg.elig n ∨ n = cfg.prim) ∧ cfg.inc n = inc n`.
 - Writable counts eligible sync members with a matching incarnation; Count does not
   count an eligible replica whose incarnation does not match; Takeover checks the new
   primary's incarnation and counts only the matching eligible replicas; MakeEligible
   records the replica's incarnation.
-- RestartEmpty / RestartKeep (both require KnowsLatest, see the TLA+ header).
-  `rb` = RebuildSync. RestartEmpty is guarded by the survival assumption
-  `∃ m, m ≠ n ∧ IsAuthoritative s m`. Under it the TLA+ history cut never fires
-  (EligibleHoldsCommitted), so here RestartEmpty leaves `hist` unchanged.
+- Every restart requires KnowsLatest: a node syncs the Cluster V2 log before it
+  rejoins (design §6). RestartEmpty is guarded by the survival assumption
+  `∃ m, m ≠ n ∧ IsAuthoritative s m`, so it leaves the committed history on some
+  authoritative node and `hist` unchanged.
 
 ## Encoding conventions
 
@@ -53,15 +59,15 @@ Same as `ReconProof.Model` plus:
 - A log entry is the term it was written in, so a write is identified by its
   offset and term.
 - Each action is a function `State → State` returning the post-state; fields it
-  does not mention keep their value (TLA+ `UNCHANGED`). Its guard lives in the
+  does not mention keep their value. Its guard lives in the
   matching `Step` constructor.
 - No `MaxLen` / `MaxVer` / `MaxRestarts` bounds.
 -/
 
-namespace RestartProof
+namespace SyncReplication
 
 /-- Functional update: `f` with the value at `a` replaced by `b`
-(TLA+ `[f EXCEPT ![a] = b]`). -/
+-/
 def upd {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) : α → β :=
   fun x => if x = a then b else f x
 
@@ -140,8 +146,9 @@ def ThinksPrimary (s : State Node) (p : Node) : Prop :=
 def KnowsLatest (s : State Node) (n : Node) : Prop := (s.known n).ver = s.cfg.ver
 /-- PrimOf(n): the node `n` believes is primary, the one it replicates from. -/
 def primaryOf (s : State Node) (n : Node) : Node := (s.known n).prim
-/-- Reconciled(p): with ReconcileFirst on, `p` has committed up to its catch-up point. -/
-def Reconciled (rf : Bool) (s : State Node) (p : Node) : Prop := rf = true → s.recon p ≤ s.commit p
+/-- Reconciled(p): `p` has committed up to its catch-up point, so it holds and has
+committed everything it inherited. -/
+def Reconciled (s : State Node) (p : Node) : Prop := s.recon p ≤ s.commit p
 /-- `n \in Auth`: in the latest configuration, `n` is the primary or an eligible
 replica, and the incarnation recorded for it is its actual one. These are the nodes
 that must hold the committed history. -/
@@ -233,8 +240,8 @@ def takeover (s : State Node) (n : Node) : State Node :=
 
 /-- The point a replica must have acknowledged before `p` counts it: `p`'s catch-up
 point while it is still reconciling, otherwise its commit point. -/
-def catchUpPoint (rf : Bool) (s : State Node) (p : Node) : Nat :=
-  if rf = true ∧ s.commit p < s.recon p then min (s.recon p) (s.log p).length else s.commit p
+def catchUpPoint (s : State Node) (p : Node) : Nat :=
+  if s.commit p < s.recon p then min (s.recon p) (s.log p).length else s.commit p
 
 /-- `sync[p] \cap MatchElig(known[p])`: the sync members of `p` that are eligible in
 `p`'s configuration with the incarnation it records for them. These are the replicas
@@ -258,8 +265,8 @@ theorem writable_iff_list (m : Nat) (s : State Node) (p : Node) :
 
 /-- Resync(r): a replica whose log has diverged from its primary's replaces it with
 the primary's log up to the primary's catch-up point, and starts acking from 0. -/
-def resync (rf : Bool) (s : State Node) (r : Node) : State Node :=
-  { s with log := upd s.log r ((s.log (primaryOf s r)).take (catchUpPoint rf s (primaryOf s r))),
+def resync (s : State Node) (r : Node) : State Node :=
+  { s with log := upd s.log r ((s.log (primaryOf s r)).take (catchUpPoint s (primaryOf s r))),
            acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r 0),
            commit := upd s.commit r (min (s.commit r) (s.commit (primaryOf s r))) }
 
@@ -276,35 +283,35 @@ def restartEmpty (s : State Node) (n : Node) : State Node :=
            acked := fun p => if p = n then (fun _ => 0)
                              else if p = s.cfg.prim then upd (s.acked p) n 0 else s.acked p }
 
-/-- The rebuilt sync set of a restarted primary (F5 fix):
-`MatchElig(known[n]) \ {n}`. -/
+/-- The rebuilt sync set of a restarted primary: `MatchElig(known[n]) \ {n}`, the
+eligible replicas whose recorded incarnation matches. -/
 def rebuiltSync (s : State Node) (n : Node) : Node → Bool :=
   fun r => (s.known n).elig r && decide ((s.known n).inc r = s.inc r) && decide (r ≠ n)
 
 /-- RestartKeep(n): data and incarnation kept, volatile state lost. `n` must commit
-its whole log again before it serves. If `n` is primary and `rb` (RebuildSync) is
-on, its sync set is rebuilt; otherwise it is emptied. -/
-def restartKeep (rb : Bool) (s : State Node) (n : Node) : State Node :=
+its whole log again before it serves. If `n` is primary, its sync set is rebuilt from
+the configuration it knows (`rebuiltSync`); otherwise it is empty. -/
+def restartKeep (s : State Node) (n : Node) : State Node :=
   { s with commit := upd s.commit n 0,
            recon := upd s.recon n (s.log n).length,
            acked := upd s.acked n (fun _ => 0),
            sync := upd s.sync n
-             (if rb = true ∧ (s.known n).prim = n ∧ (s.known n).inc n = s.inc n
+             (if (s.known n).prim = n ∧ (s.known n).inc n = s.inc n
               then rebuiltSync s n else fun _ => false) }
 
 /-- RestartPartial(n, k), keeping the incarnation: `n` restarts from a persistence
 file holding only the first `k` entries of its log. Everything else is RestartKeep on
 the truncated log: volatile state lost, catch-up point at the end of what it holds,
-sync replica set rebuilt if it is primary (F5). -/
-def restartPartialKeep (rb : Bool) (s : State Node) (n : Node) (k : Nat) : State Node :=
-  { restartKeep rb s n with log := upd s.log n ((s.log n).take k), recon := upd s.recon n k }
+sync replica set rebuilt if it is primary. -/
+def restartPartialKeep (s : State Node) (n : Node) (k : Nat) : State Node :=
+  { restartKeep s n with log := upd s.log n ((s.log n).take k), recon := upd s.recon n k }
 
 /-- RestartPartial(n, k), taking a new incarnation: RestartEmpty, except that `n` keeps
 the first `k` entries of its log as a starting point for resynchronisation. -/
 def restartPartialFresh (s : State Node) (n : Node) (k : Nat) : State Node :=
   { restartEmpty s n with log := upd s.log n ((s.log n).take k) }
 
-/-- The actions of CoreRestart's replication part, one per `Step` constructor. A run of
+/-- The actions of the protocol, one per `Step` constructor. A run of
 the protocol is a list of actions, so a counterexample's trace can be read off its
 statement. `restartPartial n k` labels both outcomes of a stale restore. -/
 inductive Action (Node : Type)
@@ -319,81 +326,81 @@ def Action.isRestart : Action Node → Bool
   | .restartEmpty _ | .restartKeep _ | .restartPartial _ _ => true
   | _ => false
 
-/-- `Next` of CoreRestart (replication part). `m` = MinSync, `rf` = ReconcileFirst,
-`rb` = RebuildSync. Each constructor is one action: its arguments after the state
-are the guard, and its result is the action's label and the post-state. -/
-inductive Step (m : Nat) (rf rb : Bool) : State Node → Action Node → State Node → Prop
+/-- The step relation. `m` is `min-sync-replicas`. Each constructor is one
+action: its arguments after the state are the guard, and its result is the action's
+label and the post-state. -/
+inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
   /-- A node that thinks it is primary, has enough sync replicas and has reconciled
   may append a write. -/
-  | append (s p) : ThinksPrimary s p → Writable m s p → Reconciled rf s p → Step m rf rb s (.append p) (appendWrite s p)
+  | append (s p) : ThinksPrimary s p → Writable m s p → Reconciled s p → Step m s (.append p) (appendWrite s p)
   /-- A replica whose log is a strict prefix of its primary's may copy the next entry. -/
   | replicate (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      (s.log r).length < (s.log (primaryOf s r)).length → Step m rf rb s (.replicate r) (replicate s r)
+      (s.log r).length < (s.log (primaryOf s r)).length → Step m s (.replicate r) (replicate s r)
   /-- A replica whose log is a prefix of its primary's may acknowledge new entries. -/
   | ack (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      s.acked (primaryOf s r) r < (s.log r).length → Step m rf rb s (.ack r) (ack s r)
+      s.acked (primaryOf s r) r < (s.log r).length → Step m s (.ack r) (ack s r)
   /-- A writable primary may commit its next entry once every sync member has
   acknowledged it. -/
   | commit (s p) : ThinksPrimary s p → Writable m s p → s.commit p < (s.log p).length →
-      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m rf rb s (.commit p) (commitNext s p)
+      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m s (.commit p) (commitNext s p)
   /-- A primary may count one of its replicas once that replica has acknowledged up
   to the catch-up point, unless it is eligible with a stale recorded incarnation. -/
   | count (s p r) : ThinksPrimary s p → r ≠ p → primaryOf s r = p →
       ((s.known p).elig r = true → (s.known p).inc r = s.inc r) → s.sync p r = false →
-      catchUpPoint rf s p ≤ s.acked p r → Step m rf rb s (.count p r) (count s p r)
+      catchUpPoint s p ≤ s.acked p r → Step m s (.count p r) (count s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
   | makeElig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.elig r = false →
-      Step m rf rb s (.makeElig p r) (makeElig s p r)
+      Step m s (.makeElig p r) (makeElig s p r)
   /-- A primary that knows the latest configuration may make a replica ineligible. -/
   | makeInelig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.cfg.elig r = true →
-      Step m rf rb s (.makeInelig p r) (makeInelig s p r)
+      Step m s (.makeInelig p r) (makeInelig s p r)
   /-- A node with a stale configuration may learn the latest one. -/
-  | learn (s n) : ¬ KnowsLatest s n → Step m rf rb s (.learn n) (learn s n)
+  | learn (s n) : ¬ KnowsLatest s n → Step m s (.learn n) (learn s n)
   /-- An eligible replica that knows the latest configuration, with a matching
   recorded incarnation, may take over from the current primary. -/
   | takeover (s n) : KnowsLatest s n → s.cfg.elig n = true → n ≠ s.cfg.prim →
-      s.cfg.inc n = s.inc n → Step m rf rb s (.takeover n) (takeover s n)
+      s.cfg.inc n = s.inc n → Step m s (.takeover n) (takeover s n)
   /-- A diverged replica may resync once its primary has neither counted it nor made
   it eligible. -/
   | resync (s r) : primaryOf s r ≠ r → ¬ (s.log r <+: s.log (primaryOf s r)) →
       s.sync (primaryOf s r) r = false → (s.known (primaryOf s r)).elig r = false →
-      Step m rf rb s (.resync r) (resync rf s r)
+      Step m s (.resync r) (resync s r)
   /-- A node that knows the latest configuration may restart empty while some other
   authoritative node keeps its data (the survival assumption). -/
-  | restartEmpty (s n) : KnowsLatest s n → (∃ m, m ≠ n ∧ IsAuthoritative s m) → Step m rf rb s (.restartEmpty n) (restartEmpty s n)
+  | restartEmpty (s n) : KnowsLatest s n → (∃ m, m ≠ n ∧ IsAuthoritative s m) → Step m s (.restartEmpty n) (restartEmpty s n)
   /-- A node that knows the latest configuration may restart and keep its data. -/
-  | restartKeep (s n) : KnowsLatest s n → Step m rf rb s (.restartKeep n) (restartKeep rb s n)
+  | restartKeep (s n) : KnowsLatest s n → Step m s (.restartKeep n) (restartKeep s n)
   /-- A node may restart from a persistence file holding only the first `k` entries of
   its log. It keeps its incarnation only if the file covers every offset it has
   acknowledged (`ackHigh n ≤ k`). -/
   | restartPartialKeep (s n k) : KnowsLatest s n → k < (s.log n).length → s.ackHigh n ≤ k →
-      Step m rf rb s (.restartPartial n k) (restartPartialKeep rb s n k)
+      Step m s (.restartPartial n k) (restartPartialKeep s n k)
   /-- Otherwise it takes a new incarnation and rejoins as after RestartEmpty, under the
   same survival assumption, keeping the `k` entries it has. -/
   | restartPartialFresh (s n k) : KnowsLatest s n → k < (s.log n).length → k < s.ackHigh n →
       (∃ m, m ≠ n ∧ IsAuthoritative s m) →
-      Step m rf rb s (.restartPartial n k) (restartPartialFresh s n k)
+      Step m s (.restartPartial n k) (restartPartialFresh s n k)
 
 /-- The protocol as a labelled transition system (CSLib's `LTS`): `Step` is its
 transition relation, so CSLib's runs (`MTr`), reachability (`CanReach`), invariants
-(`TrInv`, `MTrInv`) and simulations apply to it. -/
-def lts (m : Nat) (rf rb : Bool) : LTS (State Node) (Action Node) where
-  Tr := Step m rf rb
+(`TrInv`, `MTrInv`) apply to it. -/
+def lts (m : Nat) : LTS (State Node) (Action Node) where
+  Tr := Step m
 
-@[simp] theorem lts_tr {m : Nat} {rf rb : Bool} {s s' : State Node} {μ : Action Node} :
-    (lts m rf rb).Tr s μ s' ↔ Step m rf rb s μ s' := Iff.rfl
+@[simp] theorem lts_tr {m : Nat} {s s' : State Node} {μ : Action Node} :
+    (lts m).Tr s μ s' ↔ Step m s μ s' := Iff.rfl
 
 /-- The states reachable from `init i` by any finite run. -/
-def Reachable (m : Nat) (rf rb : Bool) (i : Node) (s : State Node) : Prop :=
-  (lts m rf rb).CanReach (init i) s
+def Reachable (m : Nat) (i : Node) (s : State Node) : Prop :=
+  (lts m).CanReach (init i) s
 
-theorem Reachable.init {m : Nat} {rf rb : Bool} (i : Node) : Reachable m rf rb i (init i) :=
-  LTS.CanReach.refl (lts m rf rb) _
+theorem Reachable.init {m : Nat} (i : Node) : Reachable m i (init i) :=
+  LTS.CanReach.refl (lts m) _
 
 /-- One more step keeps a state reachable. -/
-theorem Reachable.stepR {m : Nat} {rf rb : Bool} {i : Node} {s s' : State Node} {μ : Action Node}
-    (h : Reachable m rf rb i s) (hs : Step m rf rb s μ s') : Reachable m rf rb i s' :=
-  let ⟨_, run⟩ := h; ⟨_, LTS.MTr.stepR (lts m rf rb) run hs⟩
+theorem Reachable.stepR {m : Nat} {i : Node} {s s' : State Node} {μ : Action Node}
+    (h : Reachable m i s) (hs : Step m s μ s') : Reachable m i s' :=
+  let ⟨_, run⟩ := h; ⟨_, LTS.MTr.stepR (lts m) run hs⟩
 
 /-! ### Properties -/
 
@@ -408,8 +415,8 @@ have committed different entries at the same offset. -/
 def CommittedAgree (s : State Node) : Prop :=
   ∀ p, s.commit p ≤ (s.log p).length ∧ (s.log p).take (s.commit p) = s.hist.take (s.commit p)
 
-/-- The property `RestartProof.safety` proves for every reachable state:
+/-- The property `SyncReplication.safety` proves for every reachable state:
 EligibleHoldsCommitted and CommittedAgree. -/
 def Safety (s : State Node) : Prop := EligibleHoldsCommitted s ∧ CommittedAgree s
 
-end RestartProof
+end SyncReplication

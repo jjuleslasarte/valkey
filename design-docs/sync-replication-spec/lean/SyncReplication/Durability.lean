@@ -1,13 +1,16 @@
-import RestartProof.AckModel
+import SyncReplication.Replies
 
-/-! Unbounded proof that no acknowledged write is lost in CoreRestart, for every
-MinSync (ReconcileFirst = TRUE, NoReplyFence = FALSE, RebuildSync = TRUE), with node
-restarts with and without data under the survival assumption. Adapted from
-`ReconProof.AckProof`. -/
+/-! # No acknowledged write is lost
+
+`ackSafety`: every write released as OK is in the committed history at its offset,
+and `ackedHeld`: every authoritative node holds it. For every `min-sync-replicas`,
+with node restarts with, without and with stale data, under the survival assumption.
+The proof extends the replication invariant with three facts about held replies
+(`ReplyInvariant`). -/
 
 open Cslib
 
-namespace RestartProof
+namespace SyncReplication
 
 
 variable {Node : Type} [DecidableEq Node]
@@ -23,27 +26,28 @@ theorem getD_take {l : List Nat} {i k : Nat} (hi : i < k) :
 
 /-- Held-reply invariant: a reply whose primaryship is current points at its own
 entry in that primary's log. -/
-def HeldInv (s : State Node) (held : List (Held Node)) : Prop :=
+def HeldInvariant (s : State Node) (held : List (Held Node)) : Prop :=
   ∀ x ∈ held, x.2.2 ≤ s.cfg.ver ∧
     (fenced s x → 1 ≤ x.2.1 ∧ x.2.1 ≤ (s.log x.1).length ∧ (s.log x.1).getD (x.2.1 - 1) 0 = x.2.2)
 
 def TermLe (s : State Node) : Prop := ∀ n, s.term n ≤ s.cfg.ver
 
-structure AInv (a : AState Node) : Prop where
-  core  : Inv a.core
+structure ReplyInvariant (a : AState Node) : Prop where
+  core  : Invariant a.core
   term  : TermLe a.core
-  held  : HeldInv a.core a.held
+  held  : HeldInvariant a.core a.held
   acked : AckedDurable a
 
-theorem ainv_init (i : Node) : AInv (ainit i) where
-  core := inv_init i
+theorem replyInvariant_init (i : Node) : ReplyInvariant (ainit i) where
+  core := invariant_init i
   term := by intro n; simp only [ainit, init, initCfg]; split <;> omega
   held := by intro x hx; simp [ainit] at hx
   acked := by intro x hx; simp [ainit] at hx
 
-/-- What a Core step other than a restart does to the parts the reply invariants read. -/
-theorem step_facts {s s' : State Node} (h : Inv s) (ht : TermLe s) {m : Nat} {μ : Action Node}
-    (hs : Step m true true s μ s') (hμ : μ.isRestart = false) :
+/-- What a replication step other than a restart does to the parts the reply
+invariants read. -/
+theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermLe s) {m : Nat} {μ : Action Node}
+    (hs : Step m s μ s') (hμ : μ.isRestart = false) :
     s.hist <+: s'.hist ∧ s.cfg.ver ≤ s'.cfg.ver ∧ TermLe s' ∧
     ∀ x t, t ≤ s.cfg.ver → ThinksPrimary s' x → s'.term x = t →
       ThinksPrimary s x ∧ s.term x = t ∧ s.log x <+: s'.log x := by
@@ -128,11 +132,11 @@ theorem step_facts {s s' : State Node} (h : Inv s) (ht : TermLe s) {m : Nat} {μ
   | restartPartialKeep n k _ _ _ => exact absurd hμ (by simp [Action.isRestart])
   | restartPartialFresh n k _ _ _ _ => exact absurd hμ (by simp [Action.isRestart])
 
-theorem ainv_core {a : AState Node} {c : State Node} (h : AInv a) {m : Nat} {μ : Action Node}
-    (hs : Step m true true a.core μ c) (hμ : μ.isRestart = false) :
-    AInv ⟨c, a.held, a.okd⟩ := by
+theorem replyInvariant_core {a : AState Node} {c : State Node} (h : ReplyInvariant a) {m : Nat} {μ : Action Node}
+    (hs : Step m a.core μ c) (hμ : μ.isRestart = false) :
+    ReplyInvariant ⟨c, a.held, a.okd⟩ := by
   obtain ⟨hh, hv, ht', hx⟩ := step_facts h.core h.term hs hμ
-  refine ⟨inv_step h.core hs, ht', ?_, ?_⟩
+  refine ⟨invariant_step h.core hs, ht', ?_, ?_⟩
   · intro x hm
     obtain ⟨hb, hf⟩ := h.held x hm
     refine ⟨Nat.le_trans hb hv, fun hf' => ?_⟩
@@ -143,9 +147,9 @@ theorem ainv_core {a : AState Node} {c : State Node} (h : AInv a) {m : Nat} {μ 
     obtain ⟨h1, h2, h3⟩ := h.acked x hm
     exact ⟨h1, Nat.le_trans h2 hh.length_le, by rw [getD_prefix hh (by omega)]; exact h3⟩
 
-theorem ainv_write {a : AState Node} (h : AInv a) (p : Node) : AInv (write a p) := by
+theorem replyInvariant_write {a : AState Node} (h : ReplyInvariant a) (p : Node) : ReplyInvariant (write a p) := by
   have hlog : ∀ x, a.core.log x <+: (appendWrite a.core p).log x := grow_upd a.core.log p _
-  refine ⟨inv_append h.core p, h.term, ?_, h.acked⟩
+  refine ⟨invariant_append h.core p, h.term, ?_, h.acked⟩
   intro x hm
   rcases List.mem_cons.mp hm with rfl | hm
   · refine ⟨h.term p, fun _ => ⟨by simp, ?_, ?_⟩⟩
@@ -158,8 +162,8 @@ theorem ainv_write {a : AState Node} (h : AInv a) (p : Node) : AInv (write a p) 
       by show ((appendWrite a.core p).log x.1).getD _ 0 = _
          rw [getD_prefix (hlog x.1) (by omega)]; exact h3⟩
 
-theorem ainv_release {a : AState Node} (h : AInv a) (x : Held Node) (hm : x ∈ a.held)
-    (hc : x.2.1 ≤ a.core.commit x.1) (hf : fenced a.core x) : AInv (release a x) := by
+theorem replyInvariant_release {a : AState Node} (h : ReplyInvariant a) (x : Held Node) (hm : x ∈ a.held)
+    (hc : x.2.1 ≤ a.core.commit x.1) (hf : fenced a.core x) : ReplyInvariant (release a x) := by
   refine ⟨h.core, h.term, fun y hy => h.held y (List.mem_of_mem_erase hy), ?_⟩
   intro y hy
   rcases List.mem_cons.mp hy with rfl | hy
@@ -173,17 +177,17 @@ theorem ainv_release {a : AState Node} (h : AInv a) (x : Held Node) (hm : x ∈ 
     exact h3
   · exact h.acked y hy
 
-theorem ainv_abort {a : AState Node} (h : AInv a) (x : Held Node) : AInv (abort a x) :=
+theorem replyInvariant_abort {a : AState Node} (h : ReplyInvariant a) (x : Held Node) : ReplyInvariant (abort a x) :=
   ⟨h.core, h.term, fun y hy => h.held y (List.mem_of_mem_erase hy), h.acked⟩
 
 /-- A restart of `n` keeps the layer invariant once `n`'s held replies are dropped: the
 surviving replies are on other nodes, whose logs, primaryship and terms it leaves alone,
 and it changes neither the history nor the configuration version. -/
-theorem ainv_restart {a : AState Node} {c : State Node} (h : AInv a) (hc : Inv c) (n : Node)
+theorem replyInvariant_restart {a : AState Node} {c : State Node} (h : ReplyInvariant a) (hc : Invariant c) (n : Node)
     (hhist : c.hist = a.core.hist) (hver : c.cfg.ver = a.core.cfg.ver) (hterm : c.term = a.core.term)
     (hlog : ∀ x, x ≠ n → c.log x = a.core.log x)
     (htp : ∀ x, x ≠ n → ThinksPrimary c x → ThinksPrimary a.core x) :
-    AInv ⟨c, dropHeld a.held n, a.okd⟩ := by
+    ReplyInvariant ⟨c, dropHeld a.held n, a.okd⟩ := by
   refine ⟨hc, fun x => by rw [hterm, hver]; exact h.term x, ?_, ?_⟩
   · intro x hx
     obtain ⟨hm, hxn⟩ := List.mem_filter.mp hx
@@ -195,45 +199,43 @@ theorem ainv_restart {a : AState Node} {c : State Node} (h : AInv a) (hc : Inv c
     rw [hlog x.1 hxn']; exact ⟨h1, h2, h3⟩
   · intro x hx; show _ ∧ x.1 ≤ c.hist.length ∧ c.hist.getD _ 0 = _; rw [hhist]; exact h.acked x hx
 
-theorem ainv_step {a a' : AState Node} (h : AInv a) {m : Nat}
-    {μ : AAction Node} (hs : AStep m true false true a μ a') : AInv a' := by
+theorem replyInvariant_step {a a' : AState Node} (h : ReplyInvariant a) {m : Nat}
+    {μ : AAction Node} (hs : AStep m a μ a') : ReplyInvariant a' := by
   cases hs with
-  | core _ c hc hμ => exact ainv_core h hc hμ
-  | write p _ _ _ => exact ainv_write h p
-  | release x hm hc hf => exact ainv_release h x hm hc (hf rfl)
-  | abort x _ _ => exact ainv_abort h x
+  | core _ c hc hμ => exact replyInvariant_core h hc hμ
+  | write p _ _ _ => exact replyInvariant_write h p
+  | release x hm hc hf => exact replyInvariant_release h x hm hc hf
+  | abort x _ _ => exact replyInvariant_abort h x
   | restartE n hk hsv =>
-    exact ainv_restart h (inv_step h.core (Step.restartEmpty (m := m) _ n hk hsv)) n rfl rfl rfl
+    exact replyInvariant_restart h (invariant_step h.core (Step.restartEmpty (m := m) _ n hk hsv)) n rfl rfl rfl
       (fun _ e => restartEmpty_log_other e)
       (fun _ _ hx => (restartEmpty_thinksPrimary (h.core.knownEq n hk) (h.core.incLe n) hx).2)
   | restartK n hk =>
-    exact ainv_restart h (inv_step h.core (Step.restartKeep (m := m) _ n hk)) n rfl rfl rfl
+    exact replyInvariant_restart h (invariant_step h.core (Step.restartKeep (m := m) _ n hk)) n rfl rfl rfl
       (fun _ _ => rfl) (fun _ _ hx => hx)
   | restartPK n k hkl hk hkeep =>
-    exact ainv_restart h (inv_step h.core (Step.restartPartialKeep (m := m) _ n k hkl hk hkeep)) n
+    exact replyInvariant_restart h (invariant_step h.core (Step.restartPartialKeep (m := m) _ n k hkl hk hkeep)) n
       rfl rfl rfl (fun _ e => restartPartialKeep_log_other e) (fun _ _ hx => hx)
   | restartPF n k hkl hk hfresh hsv =>
-    exact ainv_restart h (inv_step h.core (Step.restartPartialFresh (m := m) _ n k hkl hk hfresh hsv)) n
+    exact replyInvariant_restart h (invariant_step h.core (Step.restartPartialFresh (m := m) _ n k hkl hk hfresh hsv)) n
       rfl rfl rfl (fun _ e => restartPartialFresh_log_other e)
       (fun _ _ hx => (restartPartialFresh_thinksPrimary (h.core.knownEq n hkl) (h.core.incLe n) hx).2)
 
-theorem ainv_reachable {i : Node} {a : AState Node} {m : Nat} (h : AReachable m true false true i a) :
-    AInv a :=
+theorem replyInvariant_reachable {i : Node} {a : AState Node} {m : Nat} (h : AReachable m i a) :
+    ReplyInvariant a :=
   let ⟨_, run⟩ := h
-  LTS.mtrInv_of_trInv (p := AInv) (fun _ _ _ hs h => ainv_step h hs) _ _ _ run (ainv_init i)
+  LTS.mtrInv_of_trInv (p := ReplyInvariant) (fun _ _ _ hs h => replyInvariant_step h hs) _ _ _ run (replyInvariant_init i)
 
 /-- No acknowledged write is lost, for any number of nodes, log length, configuration
-changes and restarts, and EVERY min-sync-replicas value `m`; with reconciliation
-against the inherited log (A1), the F2 fix (reply fence) and the F5 fix (a primary
-that restarts with its data rebuilds its sync set), as long as no restart without
-data removes the last authoritative node (survival assumption). -/
-theorem ackSafety {i : Node} {a : AState Node} {m : Nat} (h : AReachable m true false true i a) :
+changes and restarts, and EVERY min-sync-replicas value `m`, as long as no restart
+without data removes the last authoritative node (survival assumption). -/
+theorem ackSafety {i : Node} {a : AState Node} {m : Nat} (h : AReachable m i a) :
     AckedDurable a ∧ Safety a.core :=
-  let hi := ainv_reachable h
-  ⟨hi.acked, inv_safety hi.core⟩
+  let hi := replyInvariant_reachable h
+  ⟨hi.acked, invariant_safety hi.core⟩
 
 /-- Every authoritative node holds every acknowledged write. -/
-theorem ackedHeld {i : Node} {a : AState Node} {m : Nat} (h : AReachable m true false true i a) :
+theorem ackedHeld {i : Node} {a : AState Node} {m : Nat} (h : AReachable m i a) :
     AckedHeld a := by
   obtain ⟨hd, he, _⟩ := ackSafety h
   intro x hx n hn
@@ -241,4 +243,4 @@ theorem ackedHeld {i : Node} {a : AState Node} {m : Nat} (h : AReachable m true 
   have hp := he n hn
   exact ⟨Nat.le_trans h2 hp.length_le, by rw [getD_prefix hp (by omega)]; exact h3⟩
 
-end RestartProof
+end SyncReplication

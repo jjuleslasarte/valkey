@@ -1,150 +1,313 @@
-# Lean 4 proof of Core safety (iteration 3B)
+# The Lean proofs: reference
 
-## Proof structure
+The companion to [`../README.md`](../README.md), which states the guarantee, the
+model and the method in design terms. This file is the reference for the code: the
+theorem statements as Lean prints them, the encoding of the design, how the proof is
+laid out, the conventions it follows, and how to rebuild and check it. The
+counterexamples are in the appendix.
 
-There is one inductive invariant proof, for CoreRestart (`RestartProof/Inv.lean`,
-`Preserve/*.lean`, `Preserve.lean`, `AckProof.lean`). The Core, CoreAck and CoreRecon
-results are corollaries, obtained by embedding each smaller model into the next.
-The embeddings are simulations in CSLib's sense (`LTS.IsSimulation`, up to the
-label renamings `Action.toRecon` / `Action.toRestart`), and CSLib's `sim_trace`
-lifts them from steps to runs:
+## Layout
 
 ```
-Core  --toRecon-->  CoreRecon at MinSync 0  --emb-->  CoreRestart with no restart
-CoreAck --atoRecon--> CoreRecon + replies   --aemb--> CoreRestart + replies
+lean/
+  SyncReplication.lean          root import
+  SyncReplication/
+    Model.lean                  state, actions, Step, lts, Reachable, the safety properties
+    Replies.lean                held client replies: AState, AStep, AckedDurable, AckedHeld
+    Invariant.lean              the inductive invariant in five layers; the fence; frame lemmas
+    Contracts.lean              each action's effect in design terms, proved without the invariant
+    Preserve.lean               dispatch: every Step preserves Invariant
+    Preserve/                   Replication, Commit, Config, Failover, Restart
+    Safety.lean                 safety, commit_two_copies
+    Durability.lean             ReplyInvariant; ackSafety, ackedHeld
+    Counterexamples/            Basic, Reconcile, ReplyFence, Rebuild, Incarnation, Survival, StaleRestore
+    Lists.lean                  list-prefix lemmas
+  Lease/                        Additive, Rate, Durations
+  Check.lean                    #print axioms for every theorem
+  LeaseCheck.lean               the same for Lease/
 ```
 
-- `CoreProof/Embed.lean`: `toRecon` copies every field. `step_toRecon` shows that every
-  Core step with ReconcileFirst = TRUE and EarlyDrop = FALSE is a CoreRecon step at
-  MinSync 0 under the A1 rule. Writable at MinSync 0 always holds, and under Reconciled
-  CatchUpPoint is the commit, so Core's strict Count and Resync are A1 steps.
-- `ReconProof/Embed.lean`: `emb` sets every incarnation, and every incarnation a config
-  records, to 1, as in CoreRestart's `Init`. Every incarnation check then holds, so every
-  CoreRecon step is a CoreRestart step (`step_emb`), with either RebuildSync value.
-  `IsAuthoritative` becomes "eligible or primary", so CoreRestart's Safety and AckedHeld of the
-  image are CoreRecon's (`safety_of_emb`).
-- `toRecon_isSimulation`, `emb_isSimulation`, `atoRecon_isSimulation`,
-  `aemb_isSimulation` package the step lemmas as CSLib simulations, and
-  `reach_toRecon`, `reach_emb`, `areach_toRecon`, `areach_emb` apply
-  `LTS.IsSimulation.sim_trace` to lift them to reachability.
-  `CoreProof.safety`, `AckProof.ackSafety`/`ackedHeld` and
-  `ReconProof.safety`/`ackSafety`/`ackedHeld` are each a few lines on top of
-  `RestartProof.safety`/`ackSafety`/`ackedHeld`.
+Dependency order: `Lists` → `Model` → `Replies`, `Invariant` → `Contracts` →
+`Preserve/*` → `Preserve` → `Safety` → `Durability` → `Counterexamples/*`.
 
-The models (`*/Model.lean`, `*/AckModel.lean`) and the counterexamples are unchanged;
-each still states its own TLA+ module. Every theorem statement is unchanged; this was
-checked by printing all 13 theorems and the definitions they mention at commit 24680af
-and after the change, with identical output. The axioms are unchanged too.
+## Theorems
 
-## Reading the RestartProof invariant proof
+### Log safety (`Safety.lean`)
 
-Three parts are written so the proof can be read against the design doc:
+```lean
+theorem safety {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) : Safety s
 
-- **Action contracts** (`RestartProof/Contracts.lean`). For each action, what it
-  changes and what it leaves alone, in design terms: who thinks it is primary, who is
-  authoritative, whose log, sync replica set, acknowledgements and commit point move
-  (`takeover_thinksPrimary`, `restartEmpty_isAuthoritative`, `takeover_log`, …). These
-  follow from the action alone, without the invariant. Each preservation lemma starts
-  by taking the facts it needs from the action's contract; the action is not unfolded
-  in the proof body.
-- **Subsystems** (`RestartProof/Preserve/`). The preservation proofs are grouped as
-  in the design doc: `Replication.lean`, `Commit.lean`, `Config.lean`, `Failover.lean`,
-  `Restart.lean`; `Preserve.lean` dispatches each action to its file. Every action
-  with a non-trivial proof is proved one layer at a time: `config_X`, `repl_X`,
-  `membership_X`, `commit_X`, `failover_X`, `ehc_X` for X in ack, resync, commit,
-  count, learn, makeElig, makeInelig, takeover, restartEmpty, restartKeep,
-  restartPartialKeep, restartPartialFresh. Each has a
-  docstring saying in design terms why that layer survives the action, and `inv_X`
-  assembles them. Each layer lemma takes the action's whole guard, so the files turn
-  off the unused-variable linter.
-- **Layers** (`RestartProof/Inv.lean`). `Inv` extends five structures, each about one
-  part of the design and stated in terms of the earlier ones (except that
-  `syncNew` uses the reconciliation point, which `CommitInv` constrains): `ConfigInv` (Cluster V2
-  configuration and incarnations), `ReplInv` (acknowledgements are real; the commit
-  rule), `MembershipInv` (the two ordering rules of promotion and demotion),
-  `CommitInv` (committed prefixes and the reconciliation point), `FailoverInv` (deposed
-  primaries are fenced; survival). The goal `ehc` is `Inv`'s own field. Each conjunct
-  has a docstring tied to the doc. Field names are unchanged, so `h.ehc` etc. work as
-  before.
-- **The fence** (`Inv.lean`, "The fence of a deposed primary"). `fence s p` is the
-  smallest acknowledgement `p` has recorded from a sync replica that has left it for a
-  newer primary. That replica never acknowledges `p` again, so `p` can never commit past
-  the fence. `Fenced s p` says some replica has left and the new configuration holds
-  `p`'s log up to the fence. The `stale` conjunct is "every deposed primary is
-  `Fenced`", the design's "Writes can't split-brain" stated directly. `fence` is
-  defined from existing state (a minimum, `sInf`), so the model is unchanged.
-  The preservation proofs work with the fence directly, through four lemmas:
-  `Fenced.of_left` (to show `p` is fenced, name any one replica that has left it and
-  check the properties at its acknowledgement; the fence is at most that), `attained`
-  (the fence is some departed replica's acknowledgement), `Fenced.mono` (steps that
-  only extend logs or add sync replicas: AppendWrite, Replicate, Ack, Commit, Count) and
-  `Fenced.transfer` (steps that leave the fenced primary's row alone: MakeEligible,
-  MakeIneligible, Resync, restarts of other nodes). Learn and Takeover are the two
-  actions where the fence can drop: a replica that learns of the new configuration
-  leaves `p`, and its acknowledgement may be below the old fence. The earlier
-  existential witness `Wit`, which also had to carry "this witness has the smallest
-  acknowledgement", is gone.
+theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
+    (h : Reachable m i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.prim)
+    (hw : Writable m s p) (hlen : s.commit p < (s.log p).length)
+    (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
+    ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
+      (commitNext s p).hist <+: (commitNext s p).log e ∧ (commitNext s p).hist <+: (commitNext s p).log p
+```
 
-Checked against b14b36c: all 13 theorem statements and the definitions they mention
-print identically, and the theorems' axioms are unchanged. The TLC cross-checks (see
-"Cross-check against TLC") passed with 0 failures at these statements.
+`m` is `min-sync-replicas`, universally quantified. `Node` is any type with decidable
+equality, so any number of nodes; logs, configuration versions, incarnations and
+restarts are unbounded. `Safety` is `EligibleHoldsCommitted ∧ CommittedAgree`:
 
-Until commit 24680af, CoreProof, ReconProof and RestartProof were three separate proofs,
-each a copy of the previous one with changes. The Core-only invariant described in "The
-invariant" and "Proof status" below is the one that standalone Core proof used.
-RestartProof's invariant generalizes it (see "Invariant changes" in the ReconProof and
-RestartProof sections). The old files are in git history.
+```lean
+IsAuthoritative s n       :=  (s.cfg.elig n = true ∨ n = s.cfg.prim) ∧ s.cfg.inc n = s.inc n
+EligibleHoldsCommitted s  :=  ∀ n, IsAuthoritative s n → s.hist <+: s.log n
+CommittedAgree s          :=  ∀ p, s.commit p ≤ (s.log p).length ∧
+                                   (s.log p).take (s.commit p) = s.hist.take (s.commit p)
+```
+
+`commit_two_copies` says what `min-sync-replicas ≥ 1` adds: a commit by the current
+primary needs an eligible sync member whose recorded incarnation matches (`Writable`
+counts only those), so right after the commit the history is on at least two distinct
+authoritative nodes, the primary and that replica.
+
+### No acknowledged write is lost (`Durability.lean`)
+
+```lean
+theorem ackSafety {i : Node} {a : AState Node} {m : Nat} (h : AReachable m i a) :
+    AckedDurable a ∧ Safety a.core
+
+theorem ackedHeld {i : Node} {a : AState Node} {m : Nat} (h : AReachable m i a) : AckedHeld a
+```
+
+```lean
+AckedDurable a  :=  ∀ x ∈ a.okd, 1 ≤ x.1 ∧ x.1 ≤ a.core.hist.length ∧ a.core.hist.getD (x.1 - 1) 0 = x.2
+AckedHeld a     :=  ∀ x ∈ a.okd, ∀ n, IsAuthoritative a.core n →
+                      x.1 ≤ (a.core.log n).length ∧ (a.core.log n).getD (x.1 - 1) 0 = x.2
+```
+
+`okd` is the list of `(offset, value)` pairs released to clients as OK. `hist` only
+grows, so an acknowledged write stays in the committed history.
+
+### Counterexamples (`Counterexamples/`)
+
+Each states a reachable state of a *weakened* protocol (the model's `Step` plus one
+action with a rule removed) that violates the guarantee; see the appendix.
+
+```lean
+theorem noReconcile_unsafe        : ∃ s, (ltsNoReconcile 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noReplyFence_unsafe       : ∃ a, (altsNoFence 0).CanReach (ainit 0) a ∧ ¬ AckedDurable a
+theorem noRebuild_unsafe          : ∃ s, (ltsNoRebuild 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noIncCheck_unsafe         : ∃ s, (ltsNoInc 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem staleRestoreKeepsInc_unsafe : ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noSurvivor_loses          : ∃ s, (ltsNoSurv 1).CanReach (init 0) s ∧
+    s.hist ≠ [] ∧ (∀ n, ¬ s.hist <+: s.log n) ∧ (∀ n, ¬ IsAuthoritative s n)
+```
+
+### Lease timing (`Lease/`)
+
+See "Lease timing" below.
+
+## Encoding
+
+### State (`Model.lean`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `log` | `Node → List Nat` | Each node's replication log. An entry is the term of the primary that wrote it, so a write is identified by its offset and term. 0-indexed; the design's offset `o` is index `o - 1`. |
+| `inc` | `Node → Nat` | Each node's incarnation. A restart without data increments it. |
+| `cfg` | `Cfg Node` | The latest Cluster V2 configuration: `ver`, `prim`, `elig : Node → Bool`, `inc : Node → Nat` (the incarnation recorded for each node). |
+| `known` | `Node → Cfg Node` | The configuration each node last learned; possibly stale. |
+| `sync` | `Node → Node → Bool` | `sync p r`: `r` is in `p`'s sync replica set. |
+| `acked` | `Node → Node → Nat` | `acked p r`: how far `p` believes `r` has acknowledged. |
+| `commit` | `Node → Nat` | Each node's committed offset. |
+| `recon` | `Node → Nat` | Each node's catch-up point: a new primary must commit up to here before it serves. |
+| `term` | `Node → Nat` | The term each node writes new entries with. |
+| `ackHigh` | `Node → Nat` | Each node's acknowledgement high-water mark: the highest offset it has acknowledged as a replica (Ack) or as a primary (Commit). Survives a restart with data. |
+| `hist` | `List Nat` | Ghost: the committed history, extended the first time any node commits an offset. |
+
+Sets of nodes are `Node → Bool`. `upd f a b` is `f` with the value at `a` replaced by
+`b`. `init i` has `i` primary at version 1, no eligible replica, every incarnation 1,
+empty logs.
+
+Derived predicates: `ThinksPrimary s p` (`known[p]` names `p` primary with its current
+incarnation), `KnowsLatest s n` (`known[n].ver = cfg.ver`), `primaryOf s n`
+(`known[n].prim`), `Reconciled s p` (`recon p ≤ commit p`), `IsAuthoritative`,
+`PrimaryAuthoritative s` (the current primary's incarnation matches),
+`catchUpPoint s p` (`commit p` once reconciled, else `min (recon p) (log p).length`),
+`Writable m s p` (`m ≤` the number of sync members of `p` that are eligible with a
+matching incarnation in `known[p]`, as `Set.encard`).
+
+### Actions
+
+Each action is a function `State → State` using structure update, so fields it does
+not mention are unchanged. Its guard is the corresponding `Step` constructor, which
+also carries the action's label (`Action`). `Step m s μ s'` reads: with
+`min-sync-replicas = m`, action `μ` takes `s` to `s'`.
+
+| Action | Guard | Effect |
+|---|---|---|
+| `append p` | `p` thinks it is primary, is writable and reconciled | appends `term p` to `log p` |
+| `replicate r` | `r`'s log is a strict prefix of its primary's | copies the next entry |
+| `ack r` | `r`'s log is a prefix of its primary's and longer than its recorded ack | primary records `acked p r := (log r).length`; `ackHigh r` raised to it |
+| `commit p` | `p` thinks it is primary, is writable, has an uncommitted entry, and every sync member has acknowledged past `commit p` | `commit p + 1`; `hist` extended if this offset is new; `ackHigh p` raised to the new commit point |
+| `count p r` | `p` thinks it is primary; `r` follows `p`, is not counted, is not an eligible replica with a stale recorded incarnation, and has acknowledged `catchUpPoint s p` | `sync p r := true` |
+| `makeElig p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new version with `r` eligible and `inc r` recorded; `known p` updated |
+| `makeInelig p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `sync p r := false` |
+| `learn n` | `n` does not know the latest configuration | `known n := cfg`; `sync n` emptied unless `n` is primary there |
+| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.inc n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the matching eligible replicas; `acked n`, `commit n` reset; `recon n := (log n).length`; `term n := cfg.ver + 1` |
+| `resync r` | `r`'s log is not a prefix of its primary's; `r` is neither counted nor eligible in its primary's configuration | `log r := (log p).take (catchUpPoint s p)`; `acked p r := 0`; `commit r` capped |
+| `restartEmpty n` | `n` knows the latest configuration; some other node is authoritative | `log n := []`, `inc n + 1`, volatile state and `ackHigh n` reset; the current primary drops `n` from its sync set and acks |
+| `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `recon n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `known n`), else emptied |
+| `restartPartial n k`, keeping the incarnation | as `restartKeep`, with `k < (log n).length` and `ackHigh n ≤ k` | `restartKeep` on `(log n).take k`, with `recon n := k` |
+| `restartPartial n k`, new incarnation | `k < (log n).length`, `k < ackHigh n`, some other node authoritative | `restartEmpty`, except `log n := (log n).take k` |
+
+The protocol is a CSLib labelled transition system, `lts m : LTS (State Node)
+(Action Node)` with `Tr := Step m`, and `Reachable m i s := (lts m).CanReach (init i) s`.
+
+### Held client replies (`Replies.lean`)
+
+`AState` is a `State` plus `held : List (Held Node)` and `okd : List (Nat × Nat)`. A
+held reply is `(p, o, t)`: primary `p`, 1-based offset `o`, tag `t = term p` at the
+append; since a log entry is the term, `t` is also the value written. `AStep m` has:
+
+| Action | Guard | Effect |
+|---|---|---|
+| `core μ` | `Step m` for a non-restart action `μ` | the replication step; `held`, `okd` unchanged |
+| `write p` | as `append p` | `appendWrite` plus `(p, (log p).length + 1, term p)` held |
+| `release h` | `h` held, `h.o ≤ commit h.p`, and `fenced`: `h.p` thinks it is primary with `term h.p = h.t` | `h` removed; `(h.o, h.t)` added to `okd` |
+| `abort h` | `h` held and not `fenced` | `h` removed (UNCOMMITTED) |
+| `restartE n`, `restartK n`, `restartP n k` | as the replication restarts | the replication restart; `n`'s held replies dropped |
+
+`alts m`, `AReachable m i a` as above.
+
+## The proof
+
+### Invariant (`Invariant.lean`)
+
+`Invariant s` extends five structures, `ConfigInvariant`, `ReplInvariant`,
+`MembershipInvariant`, `CommitInvariant`, `FailoverInvariant`, and adds the goal
+`ehc`. README §3.1 lists all 23 fields with their meaning; each has a docstring here
+citing the design. `invariant_init` proves it of `init i`, and `invariant_safety`
+that it implies `Safety`.
+
+The fence of a deposed primary `p` is `fence s p := sInf (s.acked p '' leftSync s p)`,
+the smallest acknowledgement `p` recorded from a sync member that now follows another
+primary. `Fenced s p` packages the five facts the proof needs about it (`left`,
+`reconLe`, `primHolds`, `primAck`, `eligHolds`). The preservation proofs use four
+lemmas rather than the definition: `Fenced.of_left` (to show `p` is fenced, name one
+departed replica and check the properties at its acknowledgement), `Fenced.attained`
+(the fence is some departed replica's acknowledgement), `Fenced.mono` (for steps that
+only extend logs or add sync members) and `Fenced.transfer` (for steps that leave the
+fenced primary's row alone). `Learn` and `Takeover` are the two actions where the fence
+can drop, and they build a fresh witness.
+
+`commit_holds` is the central lemma: if any primary, current or deposed, may commit
+offset `c` by the commit rule, every authoritative node holds the first `c + 1`
+entries of its log. `commit_ackHigh` is its acknowledgement-side counterpart.
+
+### Contracts (`Contracts.lean`)
+
+For each action, what it changes and what it leaves alone, in design terms: who
+thinks it is primary, who is authoritative, whose log, sync replica set,
+acknowledgements and commit point move (`takeover_thinksPrimary`,
+`restartEmpty_isAuthoritative`, `takeover_log`, ...). These follow from the action's
+definition alone. Each preservation lemma takes the facts it needs from the contract;
+the action is not unfolded in a preservation proof.
+
+### Preservation (`Preserve/`, `Preserve.lean`)
+
+One file per subsystem of the design: `Replication.lean` (AppendWrite, Replicate, Ack,
+Resync), `Commit.lean` (Commit, Count), `Config.lean` (Learn, MakeEligible,
+MakeIneligible), `Failover.lean` (Takeover), `Restart.lean` (RestartEmpty,
+RestartKeep, RestartPartial). Every action with a non-trivial proof is proved one
+layer at a time, `config_X`, `repl_X`, `membership_X`, `commit_X`, `failover_X`,
+`ehc_X`, each with a docstring saying in design terms why that layer survives the
+action, and `invariant_X` assembles them as a term. Steps that leave a layer's
+variables alone use that layer's frame lemma (`ConfigInvariant.frame`, ...).
+
+`Preserve.lean` is the dispatch: `invariant_step` does a `cases` on `Step` and calls
+the `invariant_X` for each constructor; `invariant_trInv` states this as a CSLib
+one-step invariant, and `invariant_reachable` gets the run invariant from CSLib's
+`mtrInv_of_trInv`.
+
+### Durability (`Durability.lean`)
+
+`ReplyInvariant a` is `Invariant a.core` plus `TermLe` (every term is at most
+`cfg.ver`), `HeldInvariant` (a held reply's tag is at most `cfg.ver`, and a fenced
+reply points at its own entry in its primary's log) and `AckedDurable`. `step_facts`
+shows that every non-restart replication step extends `hist`, does not lower
+`cfg.ver`, keeps `TermLe`, and keeps fenced replies fenced with their log only grown;
+the cases that matter are Takeover (the new term `cfg.ver + 1` exceeds every tag),
+Learn (can never make a node primary) and Resync (changes only a node that does not
+think it is primary). `release` reads its entry from `HeldInvariant`, and
+`CommittedAgree` turns that into `hist[o] = t`.
 
 ## Proof style
 
-Conventions, following *Theorem Proving in Lean 4* ch. 5 (Structuring Tactic
-Proofs) and the robustness notes there:
+Conventions, following *Theorem Proving in Lean 4* ch. 5 (Structuring Tactic Proofs)
+and the robustness notes there:
 
-- Every sub-goal is a bullet (`·`) closed in place; `show` states the goal
-  where it is not obvious from the field name.
-- Hypotheses introduced by a case split are named at the split
-  (`split_ifs with e`, `cases hs with | append p …`, `obtain ⟨…⟩`), never
-  recovered afterwards with `rename_i`. The tree has no `rename_i`.
-- `simp` with the default simp set is used only to close a goal. When a
-  tactic follows, the call is `simp only [...]` with the lemmas named, so a
-  change in the simp set cannot change the shape of the goal the next tactic
-  sees.
-- Layer assemblies (`inv_takeover : Inv … where …`) are term-style; the field
-  names carry the structure.
+- Every sub-goal is a bullet (`·`) closed in place; `show` states the goal where it is
+  not obvious from the field name.
+- Hypotheses introduced by a case split are named at the split (`split_ifs with e`,
+  `cases hs with | append p …`, `obtain ⟨…⟩`), never recovered afterwards with
+  `rename_i`. The tree has no `rename_i`.
+- `simp` with the default simp set is used only to close a goal. When a tactic
+  follows, the call is `simp only [...]` with the lemmas named, so a change in the simp
+  set cannot change the shape of the goal the next tactic sees.
+- Layer assemblies (`invariant_takeover : Invariant … where …`) are term-style; the
+  field names carry the structure.
+- Names follow the design where it has one (`ThinksPrimary`, `KnowsLatest`,
+  `IsAuthoritative`, `Writable`, `catchUpPoint`); otherwise Mathlib's: UpperCamelCase
+  for types and propositions, lowerCamelCase for functions, snake_case for theorems.
+- No `sorry`, and no theorem statement is weakened to make a proof go through; a
+  property that does not hold gets a counterexample instead.
 
-## Result
+## Libraries
 
-`CoreProof.safety` (`CoreProof/Safety.lean`):
+- **Mathlib** `v4.35.0`: list-prefix lemmas (`List.IsPrefix`, `take`), `Set.encard`
+  for `Writable`, `sInf` on `Nat` for the fence, and the `@[refl]` lemmas that let
+  `rw` close reflexive goals.
+- **CSLib** at `0b1e3680` (its last commit on Lean 4.35.0, built against the same
+  Mathlib revision): `Cslib.Foundations.Semantics.LTS.Basic`, supplying `LTS`, `MTr`
+  (runs; `refl`, `stepL`, `comp`), `CanReach`, `TrInv`, `MTrInv` and
+  `mtrInv_of_trInv`. Nothing about the protocol comes from CSLib.
 
-```lean
-theorem safety {Node : Type} [DecidableEq Node] {i : Node} {s : State Node}
-    (h : Reachable true false i s) : Safety s
+## Axioms
+
+`Check.lean`:
+
+```
+'SyncReplication.safety' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.commit_two_copies' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.ackSafety' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.ackedHeld' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noReconcile_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noReplyFence_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noRebuild_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noIncCheck_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noSurvivor_loses' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.staleRestoreKeepsInc_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
 ```
 
-This holds for any node type with decidable equality, so any number of nodes (even
-infinitely many). It also holds for any log length and any number of configuration
-changes. Every state reachable from `Init` under `Next` with `ReconcileFirst = TRUE` and
-`EarlyDrop = FALSE` satisfies `EligibleHoldsCommitted /\ CommittedAgree`.
+These are Lean's standard axioms. There is no `sorryAx`. `Classical.choice` enters
+through `sInf`, `Set.encard` and `by_cases` on propositions over an abstract node
+type; `Quot.sound` through function extensionality.
 
-`#print axioms` (from `Check.lean`):
+## Size
 
-```
-'CoreProof.safety' depends on axioms: [propext, Classical.choice, Quot.sound]
-'CoreProof.noReconcile_unsafe' depends on axioms: [propext, Quot.sound]
-```
+| File | Lines |
+|---|---|
+| `SyncReplication/Model.lean` | 422 |
+| `SyncReplication/Replies.lean` | 113 |
+| `SyncReplication/Invariant.lean` | 444 |
+| `SyncReplication/Contracts.lean` | 607 |
+| `SyncReplication/Preserve/Replication.lean` | 343 |
+| `SyncReplication/Preserve/Commit.lean` | 324 |
+| `SyncReplication/Preserve/Config.lean` | 592 |
+| `SyncReplication/Preserve/Failover.lean` | 295 |
+| `SyncReplication/Preserve/Restart.lean` | 859 |
+| `SyncReplication/Preserve.lean` | 55 |
+| `SyncReplication/Safety.lean` | 43 |
+| `SyncReplication/Durability.lean` | 246 |
+| `SyncReplication/Counterexamples/` (7 files) | 472 |
+| `SyncReplication/Lists.lean` | 68 |
+| `Lease/` (3 files) | 377 |
+| total | 5,260 |
 
-These are Lean's standard axioms. There is no `sorryAx`, and the sorry count is 0.
-`Classical.choice` comes from `by_cases` on propositions over an abstract node type.
-
-`CoreProof.noReconcile_unsafe` (`CoreProof/Counterexample.lean`) covers
-`ReconcileFirst = FALSE`. An explicit 11-step run on `Fin 3` reaches a state that
-violates `EligibleHoldsCommitted`. This is the F1 scenario:
-
-1. n0 commits a write with n1 as its only sync replica.
-2. n1 takes over with commit 0.
-3. n1 counts and promotes n2, whose log is empty.
-
-`decide` discharges every guard.
+`lake build` of the whole tree takes about 15 seconds warm on a laptop-class
+machine (1,030 jobs including Mathlib's and CSLib's prebuilt modules).
 
 ## Reproduce
 
@@ -154,272 +317,20 @@ docker build -t valkey-lean:24.04 -f ../tools/Dockerfile.lean ../tools   # once
 ../tools/lean.sh lake exe cache get         # once: Mathlib's prebuilt oleans (~7 GB)
 ../tools/lean.sh lake build                 # about 30 s from clean
 ../tools/lean.sh lake env lean Check.lean   # prints the axioms
-```
-
-This uses Lean 4.35.0, Mathlib `v4.35.0` and CSLib at `0b1e3680` (its last commit on
-Lean 4.35.0, built against the same Mathlib revision; all pinned in `lakefile.lean`
-and `lake-manifest.json`). Mathlib is used for list-prefix lemmas and for `Set.encard`
-in `Writable`. CSLib supplies the transition-system layer; see "CSLib" below. Since commit 5f88591 (the last core-only commit), every theorem
-statement is unchanged; see "Mathlib" below. `tools/lean.sh` runs the toolchain in
-an Ubuntu image that adds git and curl, which Lake and `cache get` need. If the
-container has no `git`, clone Mathlib and the packages listed in its
-`lake-manifest.json` into `.lake/packages/` on the host at the pinned revisions;
-Lake then uses those checkouts.
-
-## CSLib
-
-The models are labelled transition systems from CSLib
-(`Cslib.Foundations.Semantics.LTS`). Each `Step` constructor now carries the label of
-its action (`Action`, one constructor per action), `lts m rf rb : LTS (State Node)
-(Action Node)` packages the relation, and `Reachable` is `lts.CanReach init`. What
-this replaced:
-
-- The hand-written `Reachable` / `AReachable` inductives and the `ReachableBy`
-  helper in `RestartProof/Counterexample.lean`: now `LTS.CanReach` and `LTS.MTr`.
-- The induction over runs in `inv_reachable`, `ainv_reachable`, `reach_*` and
-  `areach_*`: now `LTS.mtrInv_of_trInv` (invariants) and
-  `LTS.IsSimulation.sim_trace` (embeddings). The project supplies only the one-step
-  facts, `inv_trInv` and the `*_isSimulation` theorems.
-- Counterexample runs built as chains of `Reachable.step`: now one `MTr` per run whose
-  label list is the trace, so the sequence of actions is in the theorem statement
-  (`noRebuild_run`, `noIncCheck_run`, `noSurvivor_run`, `noReconcile_run`,
-  `noReplyFence_run`).
-
-The 13 theorem statements are unchanged (checked with `.lake/verify.sh` against the
-b14b36c baseline: identical). The printed definitions of `Step`, `AStep` (one extra
-label index) and `Reachable`, `AReachable` (now `def`s) differ as expected. Axioms are
-unchanged. `noIncCheck_unsafe` and `noSurvivor_loses` now state reachability as
-`(ltsNoInc 1 true true).CanReach (init 0) s` instead of the local `ReachableBy`.
-
-Build time is unchanged (about 14 s warm, 1,061 jobs); CSLib's LTS modules add 10
-oleans on top of Mathlib's.
-
-## Mathlib
-
-Changes when Mathlib was added:
-
-- `RestartProof/Lists.lean` drops the lemmas that duplicated core or Mathlib
-  (`List.take_append_of_le_length`, `List.take_prefix_take_left`,
-  `List.length_take_of_le`, `List.prefix_append_of_prefix`) and the ones nothing used.
-- `Writable m s p` is `(m : ℕ∞) ≤ (syncEligible s p).encard`, the TLA+
-  `Cardinality(...) >= m` with `Set.encard`, which needs no finiteness assumption on
-  `Node`. `writable_iff_list` proves it equivalent to the earlier list form (a
-  duplicate-free list of at least `m` counted nodes), in both `ReconProof` and
-  `RestartProof`.
-- Seven `exact List.prefix_refl _` / `exact Nat.le_refl _` steps became redundant
-  (Mathlib's `@[refl]` lemmas let `rw` close the goal) and were removed.
-
-Checked against 5f88591: all 13 theorem statements and the `Step`, `Reachable`,
-`Safety`, `AStep`, `AReachable`, `AckedDurable` and `AckedHeld` definitions print
-identically (after normalising `Nat`/`ℕ` and `.fst`/`.1`, which only Mathlib's pretty
-printer changes). The axioms are unchanged except `ReconProof.noReconcile_unsafe`,
-which now also uses `Classical.choice`: its run proves `Writable 0` by `simp` on
-`Set.encard`, whose lemmas use classical reasoning. `XCheck/Axioms.lean` is unchanged.
-
-## Encoding (`CoreProof/Model.lean`)
-
-| Core.tla | Lean |
-|---|---|
-| `log : [Nodes -> Seq(Nat)]` | `log : Node → List Nat` (0-indexed: TLA `log[p][k+1]` is `getD k`) |
-| `cfg` record | `Cfg := {ver : Nat, prim : Node, elig : Node → Bool}` |
-| `known`, `commit`, `recon`, `term` | `Node → Cfg`, `Node → Nat` |
-| `sync : [Nodes -> SUBSET Nodes]` | `Node → Node → Bool` |
-| `acked` | `Node → Node → Nat` |
-| `hist` | `List Nat` |
-| `IsPrefix(s, t)` | `s <+: t` (`List.IsPrefix`) |
-| `Prefix(s, k)` | `s.take k` (`take` already clamps to `min(k, Len)`) |
-| `[f EXCEPT ![a] = b]` | `upd f a b` |
-
-Each action's post-state is an explicit function (`appendWrite s p`, ...). `Step rf ed s s'`
-has one constructor per action, and each constructor carries that action's guards.
-The table below lists, action by action, where the encoding differs from the TLA text.
-
-| Action | Correspondence |
-|---|---|
-| AppendWrite | `Len(log[p]) < MaxLen` dropped (it only bounds TLC) |
-| Replicate, Ack, Count, Learn, Resync | literal |
-| Commit | `commit[p] < CommitCap(p)` is encoded as `∀ r, sync[p][r] → commit[p] < acked[p][r]`, next to `commit[p] < Len(log[p])`. This is equivalent to the TLA guard for both an empty and a non-empty sync set, and needs no `CHOOSE`/min. The `hist` update is literal. |
-| MakeEligible, MakeIneligible, Takeover | `CanCas` (`cfg.ver < MaxVer`) dropped |
-| EarlyUncount | present and guarded by `ed = true`. With `ed = false`, as in the theorem, it is impossible. |
-| Takeover | `takeoverElig = elig \ {prim, n}` as a Bool function |
-
-The only deviation is the removal of `MaxLen`/`MaxVer`. `Init` is `init i`.
-
-## The invariant (standalone Core proof, until 24680af)
-
-This section and the next describe the standalone Core proof, `CoreProof/Inv.lean` and
-`CoreProof/Actions1-3.lean` at commit 24680af. `RestartProof/Inv.lean` keeps these
-conjuncts with the changes listed under "Invariant changes" for ReconProof and
-RestartProof, and `RestartProof/Preserve/` has the same lemma names.
-
-The invariant has 17 conjuncts, and the `stale` conjunct uses a witness predicate `Wit`
-with 6 parts.
-
-Notation:
-- `ThinksPrimary p` means `known[p].prim = p`, that is, p thinks it is primary.
-- `prim` means `cfg.prim`.
-
-1. `ehc`: EligibleHoldsCommitted.
-2. `caLen`, `caHist`, `caEq`: CommittedAgree, with `commit[p] ≤ Len(hist)` stated explicitly.
-3. `knownLe`, `knownEq`, `primKnows`: every config a node knows is a past config.
-   - A known version is at most `cfg.ver`.
-   - A known version equal to `cfg.ver` means the known config equals `cfg`.
-   - The primary knows the current config.
-4. `eligSync` (O1): a primary counts every replica that is eligible in the config it
-   knows. `noSelfSync`: no primary counts itself.
-5. `ackedPrim`: the current primary has ack 0 from every node that does not follow it.
-6. `ackedLe`: a primary's acks are at most its log length.
-7. `ackHolds`: a follower `n` of a primary `p` holds `take acked[p][n] log[p]`.
-8. `syncNew`: a counted replica that is not yet eligible follows the current primary, and
-   that primary is reconciled. **`ReconcileFirst` is used here and nowhere else.**
-9. `syncCommit`: a primary's commit is at most the ack of each of its sync members.
-10. `eligFol`: an eligible replica that follows a stale primary `q` is eligible in
-    `known[q]`. This is why Resync never truncates an eligible replica.
-11. `histLe`: `Len(hist) ≤ commit[prim]`, or `Len(hist) ≤ recon[prim]`.
-12. `stale`: every stale primary `p` (`ThinksPrimary p`, `known[p].ver < cfg.ver`) has a witness `w`
-    satisfying `Wit s p w`:
-    - `w` is in `sync[p]`.
-    - `w` no longer follows `p`, so `acked[p][w]` is frozen.
-    - `acked[p][w]` is the least ack among the frozen members.
-    - `acked[p][w] ≤ recon[prim]`.
-    - `take acked[p][w] log[p]` is a prefix of `log[prim]`.
-    - Every eligible replica either holds that prefix, or is a sync member that still
-      follows `p`.
-
-The key lemma is `commit_holds`. If any primary, current or stale, may commit offset `c`,
-then the current primary and every eligible replica hold `take (c+1) log[p]`.
-
-The O2 argument is in `stale`. A stale primary cannot shrink its sync set, because the
-ineligible CAS needs the latest config. So the taker bounds the stale primary's commits
-forever.
-
-The O1/F1 argument is in `syncNew`, `histLe`, and the MakeEligible case of `stale`.
-Promotion waits until the primary's commit passes its reconciliation point. That point
-covers every frozen witness prefix and the whole history.
-
-## Proof status
-
-Every action's preservation lemma is proven, and the proof contains no `sorry`.
-
-| Action | Lemma | Conjuncts that need real work |
-|---|---|---|
-| AppendWrite, Replicate | `inv_grow` (logs only extend) | `caEq`, `ackHolds`, `stale` (`wit_mono`) |
-| Ack | `inv_ack` | `ackedPrim`, `ackedLe`, `ackHolds`, `syncCommit` |
-| Commit | `inv_commit` | `ehc`, `caHist`, `caEq`, `syncNew`, `syncCommit`, `histLe` |
-| Count | `inv_count` | `eligSync`, `noSelfSync`, `syncNew`, `syncCommit`, `stale` |
-| MakeEligible | `inv_makeElig` | `ehc` (needs reconciliation), `known*`, `eligSync`, `syncNew`, `eligFol`, `stale` |
-| MakeIneligible | `inv_makeInelig` | `known*`, `eligSync`, `syncNew`, `eligFol`, `stale` |
-| Learn | `inv_learn` | `ackHolds`, `syncNew`, `eligFol`, `stale` (the witness may switch to the learner) |
-| Takeover | `inv_takeover` | nearly all; `stale` builds a fresh witness for the deposed primary |
-| Resync | `inv_resync` | `ca*`, `ackHolds`, `syncCommit`, `stale` |
-| EarlyUncount | impossible (`ed = false`) | |
-
-## Observations about the model
-
-These were read off the standalone Core proof.
-
-- **The proof never uses terms.** It never inspects log values. Prefix and ack
-  bookkeeping are enough, with no Raft-style log matching. Terms only let TLC tell a
-  deposed primary's entries apart.
-- **Only Count needs `Reconciled`.** For these two properties, the proof never uses the
-  `Reconciled` guard on AppendWrite or on Resync. Those guards may matter for properties
-  outside Core, such as client-visible durability. This is a reading of the proof, not a
-  recommendation to remove them.
-- **The proof never uses these guards either:**
-  - Resync's `~IsPrefix` and `r ∉ sync[p]`. Only `r ∉ known[p].elig` matters, through `eligFol`.
-  - Count's `r ∉ sync[p]`.
-  - Replicate's prefix guard. The proof only uses the fact that logs grow.
-
-  Ack's prefix guard is essential.
-- **Deposed primaries do commit.** A deposed primary can keep committing up to its
-  taker's frozen ack. This is safe only because of `stale`.
-- The proof found no protocol bug and no Core.tla modelling issue. The counterexample for
-  `ReconcileFirst = FALSE` reproduces F1 as expected.
-
-## Metrics (for the TLA+ vs Lean comparison)
-
-These metrics are for the standalone Core proof as first written. The dedup is
-summarized in "Size after the dedup" at the end of this file.
-
-| Metric | Value |
-|---|---|
-| Wall time (reading Core.tla to full proof) | about 20 min (16:57 to 17:16 UTC) |
-| Invariant conjuncts | 17, plus the 6-part `Wit` |
-| Lean lines | 1421 total: model 154, invariant and derived lemmas 137, list lemmas 66, preservation 962, top theorem 34, counterexample 50 |
-| `sorry` at the end | 0 |
-| Clean build | about 6 s, no dependencies (core only, before Mathlib was added) |
-| Compile/fix iterations | about 10 |
-| Invariant revisions forced by Lean | 0 |
-
-**How the invariant was found.** All compile errors were at the tactic level:
-
-- a lemma used in the wrong direction,
-- `omega` atoms hidden behind `{s with ..}` projections,
-- deprecated names.
-
-None of them required a change to the invariant. The invariant was derived by hand,
-action by action, before any Lean was written. The failed proof goals were never used as
-counterexamples to induction. A weaker first guess would have needed that loop, which is
-the expensive mode because Lean gives no traces.
-
-**What was hard:**
-
-- **The stale-primary argument.** It needs:
-  - an existential witness,
-  - a "least frozen ack" condition, because the witness switches when a stale follower
-    learns,
-  - a disjunctive cover,
-  - a fresh witness at takeover.
-- **List prefix algebra.** `take` and prefix reasoning needed small lemmas. `grind` and
-  `omega` did most of the arithmetic.
-- **Function updates.** Each `upd` needs a case split, and there are 10 to 17 conjuncts
-  per action.
-- **Projections of `{s with ...}`.** They are definitionally equal to the original fields
-  but differ syntactically, so `rw` and `omega` need `show` or `change`.
-
-**What Lean gives that TLC and Apalache do not:**
-
-- An unbounded result: any number of nodes, any log length, any number of versions.
-  TLC checked 3 nodes, MaxLen 2 and MaxVer 6.
-- A checked explanation of why the protocol is safe.
-- A guard-usage audit for free (see Observations).
-
-**What TLC gives that Lean does not:**
-
-- Counterexample traces. In Lean, a wrong invariant shows up only as an unprovable goal,
-  and you must reconstruct the bad state yourself. The F1 run had to be written by hand
-  (TLC had found it earlier). Once written, a run is an `LTS.MTr` whose label list is
-  the trace, so Lean does state the trace; it just does not find it.
-- Zero proof effort for new configurations and bug switches.
-- Reachability and liveness checks. In Lean, non-vacuity is shown only by explicit runs.
-
-## Cross-check against TLC (not in this tree)
-
-The Lean step relations of Core and CoreAck were compared with TLC's complete
-state graphs of `spec/Core_xcheck.cfg` and `spec/CoreAck_xcheck.cfg` (3 nodes,
-`MaxLen = 1`, `MaxVer = 5`): 45,284 states and 146,532 transitions for Core,
-111,840 states and 410,788 transitions for CoreAck. Initial states, every
-transition in both directions within the bounds, and `RestartProof.Inv` /
-`AInv` on every state all matched, with 0 failures, last run after the dedup
-(2026-11-05) at the current theorem statements. A mutation test made the checks
-fail as expected. CoreRestart was not cross-checked.
-
-The checker (`lean/XCheck/`, `xcheck/dot2lean.py`) needs TLC and the TLA+ models,
-so it was removed from this Lean-only tree. It is in git history and will come
-back with the TLA+ models.
-
-# Lease timing proofs (F11)
-
-Files: `Lease/Additive.lean`, `Lease/Rate.lean`, `Lease/Durations.lean`, root
-`Lease.lean`, axioms in `LeaseCheck.lean`. The lakefile has a second default target,
-`lean_lib Lease`. Lean core only, `omega` plus a few `Int.mul_*` lemmas, about 390 lines, no
-`sorry`. Wall time about 10 minutes (18:30 to 18:40 UTC).
-
-```
-cd lean
-../tools/lean.sh lake build
 ../tools/lean.sh lake env lean LeaseCheck.lean
 ```
+
+Lean 4.35.0, Mathlib `v4.35.0` and CSLib `0b1e3680`, all pinned in `lakefile.lean`
+and `lake-manifest.json`. `tools/lean.sh` runs the toolchain in an Ubuntu image that
+adds git and curl, which Lake and `cache get` need. If the container has no `git`,
+clone Mathlib and the packages listed in its `lake-manifest.json` into
+`.lake/packages/` on the host at the pinned revisions; Lake then uses those checkouts.
+
+# Lease timing
+
+Files: `Lease/Additive.lean`, `Lease/Rate.lean`, `Lease/Durations.lean`, root
+`Lease.lean`, axioms in `LeaseCheck.lean`. Lean core only (`omega` plus a few
+`Int.mul_*` lemmas), about 380 lines, no `sorry`. Independent of the replication model.
 
 ## Setting
 
@@ -429,18 +340,18 @@ One lease instance. The holder H sends at real time `s`. The grantor G receives 
 
 * `Valid cH s W t`: `s ≤ t` and `cH t - cH s < W`, so H believes its lease valid.
 * `Over cG r G t`: `r ≤ t` and `cG t - cG r ≥ G`, so G's promise is over.
-* The asymmetric rule (the model's) is `W = Dur - M`, `G = Dur`.
+* The asymmetric rule (the holder subtracts the margin) is `W = Dur - M`, `G = Dur`.
 * The literal reading ("both sides subtract a margin") is `W = G = Dur - M`.
 
-There are two clock models.
+Two clock models:
 
-* **Additive** (`AddDrift c a D`, the Leases.tla model). For every `t ≥ a`, local elapsed
-  since `a` is within `D` of real elapsed. Every type is `Int`.
+* **Additive** (`AddDrift c a D`). For every `t ≥ a`, local elapsed since `a` is
+  within `D` of real elapsed. Every type is `Int`.
 * **Rate** (`RateClock a b c`, drift rate `ρ = a/b`, `0 ≤ a < b`). Lean core has no
-  ordered-field lemmas for `Rat`, so the model is **scaled to integers**. Clocks read in
-  units of `1/b` real tick, and for all `t1 ≤ t2`:
-  `(b-a)(t2-t1) ≤ c t2 - c t1 ≤ (b+a)(t2-t1)`.
-  A duration `X` corresponds to `b*X` local units. Such clocks are monotone.
+  ordered-field lemmas for `Rat`, so the model is **scaled to integers**. Clocks read
+  in units of `1/b` real tick, and for all `t1 ≤ t2`:
+  `(b-a)(t2-t1) ≤ c t2 - c t1 ≤ (b+a)(t2-t1)`. A duration `X` corresponds to `b*X`
+  local units. Such clocks are monotone.
 
 ## Theorems
 
@@ -449,13 +360,13 @@ There are two clock models.
 | `asym_safe` | `M ≥ 2D` ⇒ no real time where H is valid and G is over. Holds for all `s ≤ r`, all additive clocks (monotone or not), and all `Dur, D, M`. |
 | `asym_tight` | `0 ≤ D`, `M < 2D`, `M < Dur` ⇒ overlap with zero delay. H's clock is `D` slow and G's clock is `D` fast, both monotone, at real time `max D (Dur - D)`. |
 | `asym_safe_iff` | For `D ≥ 0`: every instance is safe ⇔ `2D ≤ M ∨ Dur ≤ M`. The second disjunct says H's lease is never valid. |
-| `literal_unsafe` | F11: `D > 0`, `M < Dur` ⇒ overlap, **for every margin M**. |
+| `literal_unsafe` | `D > 0`, `M < Dur` ⇒ overlap, **for every margin M**. |
 | `literal_safe_iff` | For `D ≥ 0`: the literal reading is safe ⇔ `D = 0 ∨ Dur ≤ M`. The margin size never matters. |
 | `rate_asym_safe` | `2a·Dur ≤ (b+a)·M`, that is `M ≥ 2ρ·Dur/(1+ρ)`, ⇒ no overlap, for all `s ≤ r` and all rate clocks. |
 | `rate_asym_tight` | `(b+a)M < 2a·Dur` ⇒ overlap. H runs at `1-ρ` and G at `1+ρ`, with zero delay. |
 | `rate_literal_unsafe` / `rate_literal_safe_nodrift` | The literal reading is unsafe for every `a > 0` when `M < Dur`, and safe when `a = 0`. |
-| `demotion_in_time` | Doc "Lease durations", with bus commit delay `≤ B` and round trip `≤ Δ`. See below. |
-| `doc_condition_insufficient_drift` / `_rtt` | Concrete runs where the doc's condition holds and P's lease has already expired at commit. |
+| `demotion_in_time` | A sufficient condition for the "Lease durations" rule, with bus commit delay `≤ B` and round trip `≤ Δ`. See below. |
+| `doc_condition_insufficient_drift` / `_rtt` | Concrete runs where the design's own condition holds and P's lease has already expired at commit. |
 
 **The rate tightness theorems are tight up to a tick refinement.** With integer real
 time, the overlap window `bW/(b-a) - bG/(b+a)` can be shorter than one tick. The
@@ -473,604 +384,41 @@ lease, and `D ≈ ρ·Dur` recovers `M ≥ 2D` to first order.
 4. P's wait ends at `w`, the earliest time with local elapsed since `ra` `≥ ReadDur`.
 5. The demotion commits at `d ≤ w + B`.
 
-If `ReadDur + B + Δ + M + 2D < PrimDur` and `M ≥ 2D`, then at `d` P's primary lease from
-R is still valid and R's read lease is invalid.
-
-The doc's condition, read lease + commit + margin < primary lease, is **not sufficient**
-on its own:
-
-* It omits the round trip `Δ`. With no drift, `ReadDur=2, B=1, PrimDur=4, Δ=2` already
-  fails.
-* In the additive model, P's clock can run `D` slow while P waits and then `D` fast.
-  This costs `2D` beyond the margin. With `D=1, M=2, ReadDur=2, B=1, PrimDur=6`, the
-  lease expires at commit.
-
-This is an availability property only: P then stops serving reads, which is safe. It
-matches the "Model limits" note that the commit delay is not modelled in Leases.tla,
-whose `ASSUME ReadDur + Margin < PrimDur` is the `B = Δ = 0` case without the `2D`.
+If `ReadDur + B + Δ + M + 2D < PrimDur` and `M ≥ 2D`, then at `d` P's primary lease
+from R is still valid and R's read lease is invalid. The design's condition, read
+lease + commit + margin < primary lease, omits the round trip `Δ` (with no drift,
+`ReadDur=2, B=1, PrimDur=4, Δ=2` already fails) and a second drift term (P's clock can
+run `D` slow while P waits and then `D` fast; with `D=1, M=2, ReadDur=2, B=1,
+PrimDur=6` the lease expires at commit). This is an availability property only: P
+then stops serving reads, which is safe.
 
 `#print axioms`: every theorem depends only on `[propext, Quot.sound]`, plus
 `Classical.choice` for the `_iff` theorems, `rate_asym_tight`, `rate_literal_*`, and
 `doc_condition_*` (from `by_cases` and `decide`/`simp` on `Int` propositions). There is
 no `sorryAx`.
 
-## Correspondence to Leases.tla
+# Appendix: Counterexamples
 
-TLC encodes the following:
+Every counterexample is a concrete run on three nodes (`N := Fin 3`, node 0 the initial
+primary) in a weakened protocol: the model's `Step` plus one action with a rule
+removed, as its own inductive relation with a `step` constructor that admits every
+model step. Each run is a CSLib `MTr` whose label list is the trace, so the sequence of
+actions is in the theorem statement; every guard is discharged by `decide`, so each run
+is a genuine execution. `Counterexamples/Basic.lean` has the decidability instances,
+`writable_one` (a `Writable 1` witness from one counted replica), `mtr_of_step` (a run
+of the model is a run of any weakening), and the prefix three runs share: n0 promotes
+n1, writes, n1 replicates and acknowledges, n0 commits (`committed_run`, 6 steps; the
+history is `[1]`, on n0 and n1).
 
-* `HolderValid(start, dur) == now - start < dur - Margin + Drift`
-* `GrantorOver(recv, dur) == now - recv >= dur - Drift`
-
-In the additive model, `Valid` implies `t - s < Dur - M + D`, because local ≥ real − D.
-`Over` implies `t - r ≥ Dur - D`, because local ≤ real + D. So each TLA predicate is the
-weakest real-time consequence of the Lean one.
-
-The extremes are attained by the clocks used in the Lean witnesses:
-
-* With `slowClock D`, `Valid` ⇔ `t - s < Dur - M + D` once `t - s ≥ D`.
-* With `fastClock D`, `Over` ⇔ `t - r ≥ Dur - D` once `t - r ≥ D`.
-
-TLC therefore checks the extreme case of the additive model: holder exactly `D` slow
-and grantor exactly `D` fast, at the same time. In TLC terms the safety condition is
-`M ≥ 2D`, the same as `asym_safe_iff`.
-
-The extreme case differs in one place. For elapsed times `< D`, `HolderValid` accepts
-some states that no monotone clock can produce. A holder that is `D` slow after `e < D`
-ticks would need a negative local elapsed. One example: `Dur ≤ M < Dur + D` is valid in
-TLC at `now = start`, but is never valid in Lean with a monotone clock. This is
-conservative for safety, since TLC allows more validity than any real clock does. It
-could only add spurious violations, never hide one.
-
-## Surprises
-
-* The literal reading's failure does not depend on the margin, and its exact safety
-  condition is `D = 0`.
-* The doc's duration rule needs the round trip and an extra `2D` term, which the doc's
-  rule omits.
-
-# Acknowledged writes are never lost (`AckProof/`, CoreAck.tla)
-
-## Theorem
-
-`AckProof.ackSafety` (`AckProof/Proof.lean`):
-
-```lean
-theorem ackSafety {Node : Type} [DecidableEq Node] {i : Node} {a : AState Node}
-    (h : AReachable true false false i a) : AckedDurable a ∧ Safety a.core
-```
-
-and the corollary `AckProof.ackedHeld : AReachable true false false i a → AckedHeld a`.
-For any node type, log length and number of configuration changes:
-- `AckedDurable`: every acknowledged `(o, v)` has `1 ≤ o ≤ |hist|` and `hist[o] = v`.
-  `hist` only grows, so an acknowledged write stays in the committed history.
-- `Safety` is Core's `EligibleHoldsCommitted ∧ CommittedAgree`.
-- `AckedHeld`: the current primary and every eligible replica hold every acknowledged
-  write at its offset.
-
-The three flags are ReconcileFirst = TRUE (F1 fix), EarlyDrop = FALSE, and
-NoReplyFence = FALSE (F2 fix: release OK only while `ThinksPrim(p) ∧ term[p] = tag`).
-
-## Assumptions and scope
-
-- **F1 fix and F2 fix:** both needed. Each must-fail switch has a TLC counterexample,
-  and NoReplyFence also has a Lean one (below).
-- **F8 fix not needed here.** There is no lease and no `cfg.prim = p` guard on Commit or
-  Release. A deposed primary that still believes it is primary may commit and release OK
-  (TLC: `CoreAck_ReachDeposedCommit`, `CoreAck_ReachDeposedAck`). It is still safe
-  because Core's `CommittedAgree` covers deposed primaries: a deposed primary commits only
-  up to the frozen ack of a sync replica that left it, and the new primary holds that
-  prefix (`Fenced` in `RestartProof/Inv.lean`). The F8 loss trace (`Shard_f_noFence`) relies on
-  forced failover, which is out of scope here.
-- **Out of scope:** forced failover (F7, an operator action whose losses the doc
-  accepts), and lossy or correlated events (crash with log loss, restart with empty
-  state).
-- **min-sync-replicas = 0** (Core's setting, the weakest case). A primary with an empty
-  sync set commits alone. That is safe because no action destroys the log of the primary
-  or of an eligible replica: `Resync` truncates only an ineligible, uncounted replica.
-  min-sync > 0 guards against losing the only copy, which needs a lossy event.
-- The Lean model over-approximates CoreAck.tla: `AStep.core` allows any Core step,
-  including an append that records no reply. CoreAck.tla's `Write` always records one.
-  Bounds (`MaxLen`, `MaxVer`) are dropped.
-
-## Invariant (`AInv`)
-
-`AckProof.ackSafety` is now derived through `ReconProof.ackSafety` from
-`RestartProof.ackSafety`, whose invariant `RestartProof.AInv` is CoreRestart's `Inv` plus
-the three conjuncts below (with `fenced` reading CoreRestart's ThinksPrim). Until 24680af
-AckProof had its own `AInv`: Core's 17-conjunct `Inv`, plus:
-- `TermLe`: `term[n] ≤ cfg.ver` for every node.
-- `HeldInv`: every held `(p, o, t)` has `t ≤ cfg.ver`. If `ThinksPrim(p) ∧ term[p] = t`,
-  then `1 ≤ o ≤ |log[p]|` and `log[p][o] = t`.
-- `AckedDurable`.
-
-`step_facts` shows that every Core step extends `hist`, does not lower `cfg.ver`, keeps
-`TermLe`, and preserves the fence: a node that is fenced for tag `t ≤ cfg.ver` after the
-step was fenced before it, and its log only grew. The interesting cases are:
-- `Takeover` gives a new term `cfg.ver + 1`, which exceeds every existing tag.
-- `Learn` can never make a node primary, because the current primary already knows the
-  latest config.
-- `Resync` changes only a node that does not think it is primary.
-
-`Release` then reads `log[p][o] = t` from `HeldInv`. `CommittedAgree` with
-`o ≤ commit[p] ≤ |hist|` turns that into `hist[o] = t`.
-
-## Counterexample (`AckProof/Counterexample.lean`)
-
-`AckProof.noReplyFence_unsafe`: with NoReplyFence = TRUE, a 14-step run on `Fin 3`
-acknowledges `(1, 1)` while `hist = [5]`. It is the same scenario as TLC's
-`CoreAck_noReplyFence` trace, and it reuses the offset after a full resync:
-1. n0 writes at offset 1 with term 1, and the reply is held.
-2. n1 takes over with an empty log, and n0 is resynced to the empty log.
-3. n0 is promoted again and takes over with term 5.
-4. n0 writes term 5 at offset 1 and commits it alone.
-5. The old reply is released as OK.
-
-## Axioms
-
-```
-'AckProof.ackSafety' depends on axioms: [propext, Classical.choice, Quot.sound]
-'AckProof.ackedHeld' depends on axioms: [propext, Classical.choice, Quot.sound]
-'AckProof.noReplyFence_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
-```
-
-There is no `sorry`.
-
-## Size
-
-| File | Lines |
-|---|---|
-| `AckProof/Model.lean` | 70 |
-| `AckProof/Proof.lean` | 48 (the embedding into CoreRecon; 190 until 24680af) |
-| `AckProof/Counterexample.lean` | 53 |
-| `AckProof.lean` | 3 |
-| total | 174 |
-
-## TLC (`spec/CoreAck.tla`, 3 nodes, MaxLen 2, MaxVer 6; `gen_coreack_cfgs.sh`)
-
-| cfg | result |
-|---|---|
-| `CoreAck_safe` | pass, 10,382,580 distinct states, ~40 s. Checks TypeOK, EHC, CA, AckedDurable, AckedHeld, HeldInv, TermLe |
-| `CoreAck_noReplyFence` | violated: AckedDurable (15-state trace) |
-| `CoreAck_noReconcile` | violated: AckedHeld (14-state trace) |
-| `CoreAck_ReachAck` | violated: Reach_Ack (an OK is released) |
-| `CoreAck_ReachDeposedAck` | violated: Reach_DeposedAck (a deposed primary can release OK) |
-| `CoreAck_ReachDeposedCommit` | violated: Reach_DeposedCommit (a deposed primary can advance commit) |
-
-# Reconciliation against the inherited log, any min-sync-replicas (`ReconProof/`, CoreRecon.tla)
-
-## Theorem
-
-`ReconProof/Safety.lean`, `ReconProof/AckProof.lean`:
-
-```lean
-theorem ReconProof.safety {Node : Type} [DecidableEq Node] {m : Nat} {i : Node}
-    {s : State Node} (h : Reachable m true i s) : Safety s
-
-theorem ReconProof.ackSafety {Node : Type} [DecidableEq Node] {i : Node}
-    {a : AState Node} {m : Nat} (h : AReachable m true false i a) :
-    AckedDurable a ∧ Safety a.core
-
-theorem ReconProof.ackedHeld ... (h : AReachable m true false i a) : AckedHeld a
-```
-
-`m` is MinSync and is universally quantified, so this covers every
-min-sync-replicas value, every node type with decidable equality, unbounded logs
-and unbounded configuration changes. `Safety` is `EligibleHoldsCommitted /\
-CommittedAgree`. `true` is ReconcileFirst; `false` in `AReachable` is
-NoReplyFence (the F2 fence is on).
-
-## Rule proven (A1)
-
-While a new primary `p` is unreconciled (`commit[p] < recon[p]`), promotion
-catch-up and full resync are measured against the log it inherited:
-
-```
-CatchUpPoint(p) = IF Reconciled(p) THEN commit[p] ELSE Min(recon[p], Len(log[p]))
-Count(p, r):  acked[p][r] >= CatchUpPoint(p)            (no Reconciled gate)
-Resync(r):    log[r] := Prefix(log[p], CatchUpPoint(p))  (no Reconciled gate)
-AppendWrite:  Writable(p) /\ Reconciled(p)              (serve only once reconciled)
-Commit:       Writable(p) /\ the commit rule
-Writable(p) == Cardinality(sync[p] \cap known[p].elig) >= MinSync
-```
-
-`Writable` is Shard.tla's definition (`EligOf(p)` there is the eligible set of the
-config `p` knows). In Lean, `Writable m s p` is `(m : ℕ∞) ≤ (syncEligible s p).encard`,
-where `syncEligible s p` is the set of nodes in `sync[p]` that are eligible in
-`known[p]`. `Set.encard` is the cardinality in `ℕ∞`, so there is no `Fintype`
-assumption. `writable_iff_list` gives the equivalent list form used before Mathlib.
-
-The proof never reads `Writable`: it only restricts AppendWrite and Commit, and
-the invariant is preserved by every step whether or not the guard holds. So the
-all-`m` theorem needed no simulation lemma.
-
-## Relation to Core's stricter rule
-
-Core (and CoreRecon with `StrictRecon = TRUE`) gates Count and Resync on
-Reconciled and measures them against `commit[p]`. A strict Count or Resync step
-fires only when `p` is reconciled, where `CatchUpPoint(p) = commit[p]`, so every
-strict step is an A1 step: strict reachable states are a subset of A1 reachable
-states and the theorem covers the strict rule too. At MinSync 0 this is a Lean
-lemma: `CoreProof.step_toRecon` proves every Core step is an A1 step, and
-`CoreProof.safety` is derived from `ReconProof.safety` through it. For MinSync ≥ 1
-it is still argued, not stated in Lean, because CoreRecon's `StrictRecon = TRUE`
-is not encoded. The A1 rule is strictly more permissive: it allows an unreconciled
-primary to count a replica that has acked its whole inherited log, which is
-what removes the deadlock below.
-
-## Invariant changes (`ReconProof/Inv.lean` until 24680af)
-
-ReconProof now has no invariant of its own: `ReconProof.safety` is derived from
-`RestartProof.safety` through `ReconProof.emb`. The changes below, made when ReconProof
-was a copy of CoreProof, are carried in `RestartProof/Inv.lean` and the lemmas named
-here are in `RestartProof/Preserve/`.
-
-CoreProof's 17 conjuncts and `Wit` are kept, except:
-
-- `syncNew` (counted, not yet eligible replica `r` of the current primary):
-  Core required the primary to be reconciled (`recon ≤ commit`). Now it requires
-  `recon[prim] ≤ acked[prim][r]`: the replica acked the whole inherited log.
-  Core's version implies this one through `syncCommit`.
-- New `reconLen`: `recon[prim] ≤ Len(log[prim])`. An unreconciled primary
-  cannot append and no step shortens a primary's log, so
-  `CatchUpPoint = recon` for the current primary.
-
-Where it matters:
-
-- Count: `recon_le_catchUpPoint` (`recon[prim] ≤ CatchUpPoint`) gives the new
-  `syncNew`; `commit_le_catchUpPoint` (`commit ≤ CatchUpPoint`) gives `syncCommit`.
-- MakeEligible: the new eligible replica holds `hist` because
-  `Len(hist) ≤ commit[prim] ≤ acked` or `Len(hist) ≤ recon[prim] ≤ acked`
-  (`histLe`), and it holds `take acked log[prim]` (`ackHolds`), of which `hist`
-  is a prefix (`ehc`). The stale-witness case uses
-  `acked[p][w] ≤ recon[prim] ≤ acked[prim][r]` directly.
-- Resync: `commit[p] ≤ CatchUpPoint(p) ≤ Len(log[p])` (`catchUpPoint_le_len`) is all
-  CommittedAgree needs; Core's Resync proof never used the Reconciled gate.
-- Ack: the acked value only grows, so `syncNew` is kept.
-
-The stale/`Wit` conjunct needed no change.
-
-## Counterexample (`ReconProof/Counterexample.lean`)
-
-`ReconProof.noReconcile_unsafe`: with `ReconcileFirst = FALSE` (CatchUpPoint is
-the own commit, AppendWrite ungated) at MinSync 0, Core's 11-step F1 run on
-`Fin 3` reaches a state violating EligibleHoldsCommitted. `decide` discharges the
-guards.
-
-## Encoding differences to CoreRecon.tla
-
-As CoreProof: `MaxLen`/`MaxVer` dropped. EarlyUncount is omitted (EarlyDrop =
-FALSE). StrictRecon is not encoded (see above). As in AckProof, `AStep.core`
-allows an append without a reply, a superset of CoreRecon.tla's `Write`.
-
-## Axioms
-
-```
-'ReconProof.safety' depends on axioms: [propext, Classical.choice, Quot.sound]
-'ReconProof.ackSafety' depends on axioms: [propext, Classical.choice, Quot.sound]
-'ReconProof.ackedHeld' depends on axioms: [propext, Classical.choice, Quot.sound]
-'ReconProof.noReconcile_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
-```
-
-There is no `sorry`. (`noReconcile_unsafe` used only `propext` and `Quot.sound`
-before `Writable` moved to `Set.encard`; see "Mathlib".)
-
-## Size
-
-| File | Lines | Content |
-|---|---|---|
-| `ReconProof/Model.lean` | 169 | the CoreRecon model |
-| `ReconProof/Embed.lean` | 129 | `emb` into CoreRestart, `step_emb`, `reach_emb`, `safety_of_emb` |
-| `ReconProof/Safety.lean` | 17 | `safety` |
-| `ReconProof/AckModel.lean` | 70 | held replies |
-| `ReconProof/AckProof.lean` | 50 | `aemb`, `astep_emb`, `ackSafety`, `ackedHeld` |
-| `ReconProof/Counterexample.lean` | 54 | `noReconcile_unsafe` |
-| `ReconProof.lean` | 6 | |
-| total | 495 | 1742 until 24680af, when ReconProof was a copy of CoreProof + AckProof |
-
-## TLC (`spec/CoreRecon.tla`, 3 nodes, MaxLen 2, MaxVer 6; `gen_corerecon_cfgs.sh`)
-
-| cfg | MinSync | rule | result | distinct states |
+| File | Weakened relation | Rule removed | Trace | Violates |
 |---|---|---|---|---|
-| `CoreRecon_safeMin0` | 0 | A1 | pass (TypeOK, EHC, CA, AckedDurable, AckedHeld, SyncNew, ReconLen) | 14,206,308 |
-| `CoreRecon_safeMin1` | 1 | A1 | pass (same) | 9,289,348 |
-| `CoreRecon_strictMin0` | 0 | strict | pass (TypeOK, EHC, CA, AckedDurable, AckedHeld) | 10,382,580 |
-| `CoreRecon_strictMin1` | 1 | strict | pass (same) | 3,800,584 |
-| `CoreRecon_noReconcileMin0` | 0 | ReconcileFirst = FALSE | violated: EligibleHoldsCommitted | 23,501 |
-| `CoreRecon_noReconcileMin1` | 1 | ReconcileFirst = FALSE | violated: EligibleHoldsCommitted | 9,645 |
-| `CoreRecon_noReplyFenceMin1` | 1 | NoReplyFence = TRUE | violated: AckedDurable | 375,915 |
-| `CoreRecon_earlyDropMin1` | 1 | EarlyDrop = TRUE | violated: EligibleHoldsCommitted | 7,277 |
-| `CoreRecon_ReachAckMin1` | 1 | A1 | violated: Reach_Ack (reachable) | 1,679 |
-| `CoreRecon_ReachLoneMin1` | 1 | A1 | violated: Reach_Lone (reachable) | 1,120 |
-| `CoreRecon_ReachLoneReconMin1` | 1 | A1 | violated: Reach_LoneReconcile (reachable) | 12,161 |
-| `CoreRecon_strictReachLoneMin1` | 1 | strict | violated: Reach_Lone (reachable) | 1,471 |
-| `CoreRecon_strictReachLoneReconMin1` | 1 | strict | pass: Reach_LoneReconcile unreachable | 3,800,584 |
-| `CoreRecon_strictReachReconMin1` | 1 | strict | violated: Reach_Reconcile (reachable) | 25,137 |
+| `Reconcile.lean` | `StepNoReconcile` | Count measures catch-up against the primary's own commit point | count 0 1, makeElig 0 1, append 0, learn 1, replicate 1, ack 1, commit 0, takeover 1, learn 2, **count 1 2**, makeElig 1 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `ReplyFence.lean` | `AStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | count 0 1, makeElig 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, count 1 0, makeElig 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[5]` |
+| `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeElig 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeElig 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
+| `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].prim = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeElig 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
+| `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** | EligibleHoldsCommitted: n1 authoritative without the write |
 
-`strictMin0` has exactly CoreAck_safe's state count (10,382,580), as expected:
-at MinSync 0 with the strict rule CoreRecon is CoreAck.
-
-Deadlock evidence. The ghost `lone` holds a primary whose primaryship began by a
-takeover with a non-empty inherited log and an empty sync set (no eligible
-survivor). `Reach_LoneReconcile` says such a primary later reconciles.
-
-- A1, MinSync 1, reachable in 12 states: Count(n1,n2), MakeEligible(n1,n2),
-  Learn(n2), Write(n1), Replicate(n2), Takeover(n2) (sync set empty, n2 lone),
-  Learn(n1), Ack(n1), Count(n2,n1) (ack 1 ≥ CatchUpPoint = recon 1),
-  MakeEligible(n2,n1), Commit(n2).
-- Strict, MinSync 1: unreachable over the full state space (3,800,584 states, the
-  same as `strictMin1`), while a lone primary itself is reachable
-  (`strictReachLoneMin1`). It is stuck: Count needs Reconciled, Commit needs
-  Writable, and the sync set can only grow through Count.
-- The strict rule can still reconcile when a takeover keeps an eligible survivor
-  in the sync set (`strictReachReconMin1`): n1 counts n2 and n3, makes both
-  eligible, writes, n2 takes over with sync set {n3}, n3 acks, n2 commits. So the
-  deadlock needs a takeover with no eligible survivor.
-
-# Restarts, incarnations and the F5 fix (`RestartProof/`, CoreRestart.tla)
-
-## Theorems
-
-`RestartProof/Safety.lean`, `RestartProof/AckProof.lean`:
-
-```lean
-theorem RestartProof.safety {Node : Type} [DecidableEq Node] {m : Nat} {i : Node}
-    {s : State Node} (h : Reachable m true true i s) : Safety s
-
-theorem RestartProof.ackSafety {Node : Type} [DecidableEq Node] {i : Node}
-    {a : AState Node} {m : Nat} (h : AReachable m true false true i a) :
-    AckedDurable a ∧ Safety a.core
-
-theorem RestartProof.ackedHeld ... (h : AReachable m true false true i a) : AckedHeld a
-
-theorem RestartProof.commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
-    (h : Reachable m true true i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.prim)
-    (hw : Writable m s p) (hlen : s.commit p < (s.log p).length)
-    (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
-    ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
-      (commitNext s p).hist <+: (commitNext s p).log e ∧ (commitNext s p).hist <+: (commitNext s p).log p
-```
-
-`m` (MinSync) is universally quantified. The Bool arguments are ReconcileFirst =
-`true`, NoReplyFence = `false` (F2 fence on) and RebuildSync = `true` (F5 fix on).
-Nodes, log lengths, configuration changes, incarnations and the number of restarts
-are unbounded. `Safety` is `EligibleHoldsCommitted /\ CommittedAgree`, where EligibleHoldsCommitted is restated
-for authoritative nodes:
-
-```
-IsAuthoritative s n       :=  (cfg.elig n ∨ n = cfg.prim) ∧ cfg.inc n = inc n   -- TLA+: n \in Auth
-EligibleHoldsCommitted s  :=  ∀ n, IsAuthoritative s n → hist <+: log n
-AckedHeld                 :=  ∀ acknowledged (o, v), ∀ n, IsAuthoritative s n → log n holds v at o
-```
-
-The primary is authoritative only while its own incarnation matches: a primary
-that came back empty holds nothing and is not a primary any more.
-
-## Survival assumption
-
-RestartEmpty(n) (n loses its log and gets a new incarnation) has the guard
-
-```
-∃ m, m ≠ n ∧ IsAuthoritative s m    -- TLA+: \E m \in Auth : m # n
-```
-
-At every restart without data, some other node that is the primary or an eligible
-replica, with the incarnation the config records for it, keeps its data. This is
-the doc's "as long as the primary or at least one eligible replica keeps its
-data", stated per restart. RestartKeep (restart with data) has no guard. With the
-guard, `Auth` is never empty (`Inv.authEx`), so by EHC some node always holds the
-whole committed history; the TLA+ history cut (below) never fires and the Lean
-model leaves `hist` unchanged on RestartEmpty.
-
-`NoSurvivor = TRUE` drops the guard. As in Shard.tla, a restart that leaves no
-authoritative holder of the history is then an explicit loss that cuts the ghost
-history to `<< >>`, and AckedDurable fails (`CoreRestart_noSurvivorMin0/Min1`).
-
-## What MinSync >= 1 adds
-
-EHC alone says every authoritative node holds the history. With MinSync = 0 the
-current primary may commit with an empty sync set, so the history may be on the
-primary only. `commit_two_copies`: with MinSync >= 1, a commit by the current
-primary needs an eligible sync member whose recorded incarnation matches (Writable
-counts only those), so right after the commit the history is on at least two
-distinct authoritative nodes, the primary and that replica. A later RestartEmpty of
-one of them is allowed by the survival guard as long as another authoritative
-node remains. TLC checks the same statement as the action property `TwoCopies`.
-
-## Model (`RestartProof/Model.lean`; TLA+ header of `spec/CoreRestart.tla`)
-
-CoreRecon plus:
-
-- `inc n`; the config records `cfg.inc r`. MakeEligible records `inc[r]`;
-  Takeover keeps `cfg.inc` and checks `cfg.inc[n] = inc[n]`.
-- ThinksPrim checks the incarnation the config `p` knows records for `p`:
-  `ThinksPrimary s p := known[p].prim = p ∧ known[p].inc p = inc p`.
-- Primaries ack-count only replicas of the matching incarnation: Writable counts
-  `sync[p] ∩ {r ∈ known[p].elig : known[p].inc r = inc r}`; Count refuses an
-  eligible replica whose incarnation does not match; Takeover counts only the
-  matching eligible replicas; when an eligible replica restarts empty the current
-  primary stops counting it and forgets its ack. It rejoins by demotion and the
-  promotion flow (MakeIneligible, Count, MakeEligible records the new incarnation).
-- Both restarts require KnowsLatest(n): a node syncs the Cluster V2 log first
-  (doc s6). A node that does not know the latest config takes a Learn step first,
-  which reaches the same state.
-- RestartEmpty(n): `log = []`, `inc + 1`, commit, recon, own acks and own sync set
-  reset; the current primary drops `n` from its sync set and resets its ack. Its
-  old incarnation stays in `cfg.inc` until it is demoted, but it can neither act
-  as primary nor take over.
-- RestartKeep(n): log and incarnation kept; commit 0, own acks 0, `recon = Len(log)`
-  (it must commit its log again before serving). If `n` is primary, F5 fix:
-  `sync[n] := {r ∈ known[n].elig : known[n].inc r = inc r} \ {n}`, so it commits
-  nothing until fresh acks arrive. Other primaries keep their ack from `n`, whose
-  log is unchanged.
-- RestartPartial(n, k) (F13): `n` restarts from a persistence file holding only
-  the first `k < Len(log[n])` entries. `ackHigh n` is `n`'s acknowledgement
-  high-water mark: raised by Ack to `n`'s log length and by Commit to `n`'s new
-  commit point, lost with a new incarnation. If `ackHigh n ≤ k`
-  (`restartPartialKeep`) the restart is RestartKeep on the truncated log, with
-  `recon = k`. Otherwise (`restartPartialFresh`) it is RestartEmpty with the `k`
-  entries kept as the log, under the same survival guard. Both outcomes carry
-  the label `.restartPartial n k`.
-- Held replies of the restarted node are dropped (`dropHeld`): they are lost with
-  the client connections, so the client gets neither OK nor UNCOMMITTED. A restarted
-  primary therefore never acknowledges a write it held before the restart. Every
-  restart goes through the layer's own actions (`restartE`, `restartK`,
-  `restartPK`, `restartPF`); `AStep.core` covers the other actions
-  (`Action.isRestart = false`), as `held' = DropHeld(n)` versus `Keep` does in
-  the TLA+. Until F13 `AStep.core` also admitted a restart that kept the replies;
-  a stale restore of a primary with its replies kept would break `HeldInv`, and
-  the behaviour was not in the TLA+.
-
-## Invariant changes (`RestartProof/Inv.lean`)
-
-ReconProof's invariant, with:
-
-- `ehc`, and `Fenced.eligHolds` (formerly the last clause of `Wit`), over authoritative nodes.
-- `eligSync` (O1) only for eligible replicas whose recorded incarnation matches.
-- `histLe`, and the `Fenced` clauses about the current primary's log and recon point,
-  only while the current primary is authoritative (`PrimaryAuthoritative s`).
-- New: `incLe` (`cfg.inc n ≤ inc n`), `knownIncLe` (the same for every known
-  config): a restarted-empty node never matches its old record.
-- New: `authEx` (some node is authoritative), kept by the survival guard. Commit
-  uses it where ReconProof used the current primary as the common holder of the
-  history.
-- New for F13 (stale restore): `ackedHigh` (a primary's record of a follower's
-  acknowledgement is within the follower's `ackHigh`), `histAck` (every
-  authoritative node's `ackHigh` covers the committed history), and two fence
-  facts, `Fenced.primAck` (a deposed primary's fence is within the current
-  primary's `ackHigh`) and the `ackHigh` half of `Fenced.eligHolds` (within every
-  authoritative replica's). `commit_ackHigh` is the acknowledgement side of
-  `commit_holds`. These are what let a node that keeps a prefix covering its
-  `ackHigh` keep everything the invariant says it holds.
-
-Preservation for the restarts is `RestartProof/Preserve/Restart.lean`. RestartKeep
-with RebuildSync = TRUE keeps `eligSync`, the conjunct F5 breaks: with an empty
-sync set a restarted primary may commit without an eligible replica, which then
-lacks the write (`CoreRestart_noRebuildMin1`). `restartPartialKeep` is the
-RestartKeep proof plus `prefix_take_of_length_le` wherever the truncated log
-must still hold a prefix: `ackHolds` (via `ackedHigh`), `ehc` and `histLe` (via
-`histAck`), and the fence facts (via `primAck`/`eligHolds`).
-`restartPartialFresh` is the RestartEmpty proof verbatim, which never used
-`log n = []`.
-
-## Axioms
-
-```
-'RestartProof.safety' depends on axioms: [propext, Classical.choice, Quot.sound]
-'RestartProof.ackSafety' depends on axioms: [propext, Classical.choice, Quot.sound]
-'RestartProof.ackedHeld' depends on axioms: [propext, Classical.choice, Quot.sound]
-'RestartProof.commit_two_copies' depends on axioms: [propext, Classical.choice, Quot.sound]
-```
-
-The counterexamples `noRebuild_unsafe`, `noIncCheck_unsafe`, `noSurvivor_loses` and
-`staleRestoreKeepsInc_unsafe` (F13) use the same three axioms. There is no `sorry`.
-
-## Size
-
-RestartProof was written as a copy of ReconProof; "Changed" counts diff lines (`<` plus
-`>`) against the ReconProof file at 24680af with the namespace renamed. It is now the
-only invariant proof (see "Proof structure").
-
-| File | Lines | Changed |
-|---|---|---|
-| `RestartProof/Lists.lean` | 66 | 0 |
-| `RestartProof/Model.lean` | 216 | 145 |
-| `RestartProof/Inv.lean` | 147 | 90 |
-| `RestartProof/Actions1.lean` | 315 | 43 |
-| `RestartProof/Actions2.lean` | 450 | 180 |
-| `RestartProof/Actions3.lean` | 343 | 102 |
-| `RestartProof/Restart.lean` | 326 | new |
-| `RestartProof/Safety.lean` | 62 | 48 |
-| `RestartProof/AckModel.lean` | 81 | 49 |
-| `RestartProof/AckProof.lean` | 215 | 64 |
-| `RestartProof.lean` | 2 | |
-| total | 2223 | |
-
-## TLC (`spec/CoreRestart.tla`, 3 nodes, MaxLen 2, MaxVer 6, MaxRestarts 1; `gen_corerestart_cfgs.sh`)
-
-| cfg | MinSync | switch | result | distinct states |
-|---|---|---|---|---|
-| `CoreRestart_safeMin0` | 0 | fixed | pass (TypeOK, EHC, CA, AckedDurable, AckedHeld, SyncNew, ReconLen, EligSync, IncLe) | 120,618,059 |
-| `CoreRestart_safeMin1` | 1 | fixed | pass (same) | 78,768,204 |
-| `CoreRestart_twoCopiesMin1` | 1 | fixed | pass (action property TwoCopies) | 78,768,204 |
-| `CoreRestart_noSurvivorMin0` | 0 | NoSurvivor = TRUE | violated: AckedDurable | 1,706 |
-| `CoreRestart_noSurvivorMin1` | 1 | NoSurvivor = TRUE | violated: AckedDurable | 64,983 |
-| `CoreRestart_noRebuildMin0` | 0 | RebuildSync = FALSE | violated: EligibleHoldsCommitted | 4,954 |
-| `CoreRestart_noRebuildMin1` | 1 | RebuildSync = FALSE | violated: EligibleHoldsCommitted | 16,689 |
-| `CoreRestart_noRebuildMin1Ack` | 1 | RebuildSync = FALSE | violated: AckedHeld | 120,853 |
-| `CoreRestart_noRebuildMin1Loss` | 1 | RebuildSync = FALSE | violated: AckedDurable | 8,806,708 |
-| `CoreRestart_noIncMin1` | 1 | IncCheck = FALSE | violated: EligibleHoldsCommitted | 27,361 |
-| `CoreRestart_noReconcileMin1` | 1 | ReconcileFirst = FALSE | violated: EligibleHoldsCommitted | 23,611 |
-| `CoreRestart_noReplyFenceMin1` | 1 | NoReplyFence = TRUE | violated: AckedDurable | 1,891,176 |
-| `CoreRestart_earlyDropMin1` | 1 | EarlyDrop = TRUE | violated: EligibleHoldsCommitted | 20,986 |
-| `CoreRestart_ReachRestartEmptyMin1` | 1 | fixed | violated: Reach_RestartEmpty (reachable) | 1,530 |
-| `CoreRestart_ReachTakeoverAfterEmptyMin1` | 1 | fixed | violated: Reach_TakeoverAfterEmpty (reachable) | 39,907 |
-| `CoreRestart_ReachReEligibleMin1` | 1 | fixed | violated: Reach_ReEligible (reachable) | 1,809 |
-| `CoreRestart_ReachKeepCommitMin1` | 1 | fixed | violated: Reach_KeepCommit (reachable) | 2,162 |
-| `CoreRestart_ReachAckSurvivesEmptyPrimMin1` | 1 | fixed | violated: Reach_AckSurvivesEmptyPrim (reachable) | 61,062 |
-
-Traces:
-
-- `noRebuildMin1` (F5, 10 states): n1 counts n2 and makes it eligible, writes,
-  restarts with its data and an empty sync set, counts n3 (which acked the
-  write), makes n3 eligible and commits with n3's ack only. n2 is eligible and
-  authoritative but lacks the committed write.
-- `noRebuildMin1Loss` (22 states): the same start, then n2, eligible and lacking
-  the committed write, takes over (Learn, Takeover), resyncs n1 to its own log,
-  writes at offset 1, counts n1, makes n1 eligible, demotes n3 (the only other
-  holder of the committed write) and commits: the committed write at offset 1 is
-  replaced. The OK released for the new write fails AckedDurable against the
-  ghost history. The lost write itself was not acknowledged (its held reply was
-  dropped with the restart); MaxLen 2 leaves no room for an acknowledged write
-  after reconciliation. So without the F5 fix a committed write is lost, which
-  Shard_f_noRestoreMin1Loss did not reach within its bounds (one client write).
-- `noSurvivorMin1` (10 states): a write commits on n1 and n2, n2 is demoted, the
-  OK is released, n1 (the only authoritative node) restarts empty.
-- `noIncMin1` (11 states): without incarnation checks n1 restarts empty and still
-  acts as primary: it counts n3 and makes it eligible with an empty log.
-- `ReachAckSurvivesEmptyPrimMin1` (11 states): a write commits on n1 and n2 and is
-  acknowledged, n1 restarts empty, n2 takes over with the write.
-
-Coverage (`COVERAGE=1`): see `spec/coverage.tsv`.
-
-# Size after the dedup (2026-11-05)
-
-Lines per tree, including the root module file, at 24680af and after the dedup:
-
-| Tree | Before | After | What is left |
-|---|---|---|---|
-| `CoreProof` | 1411 | 360 | model, `Embed.lean` (Core → CoreRecon at MinSync 0), `safety`, counterexample |
-| `AckProof` | 316 | 174 | model, embedding into CoreRecon, `ackSafety`/`ackedHeld`, counterexample |
-| `ReconProof` | 1742 | 495 | model, `Embed.lean` (CoreRecon → CoreRestart), `safety`/`ackSafety`/`ackedHeld`, counterexample |
-| `RestartProof` | 2223 | 2223 | unchanged; the only invariant proof |
-| `XCheck` | 899 | 932 | check (d) now decides `RestartProof.Inv`/`AInv` of the lifted states |
-| total | 6591 | 4184 | |
-
-Checks after the change:
-
-- `lake build`: clean, no `sorry`.
-- `Check.lean`: the same axioms for all 13 theorems as at 24680af.
-- All 13 theorem statements, and the `Safety`, `Reachable`, `AckedDurable` and
-  `AckedHeld` definitions they mention, print identically (`#check @…` / `#print`)
-  before and after.
-- `XCheck/Axioms.lean`: `propext`, `Quot.sound`, plus `Classical.choice` for
-  `asuccs_sound`/`astepLB_sound`, as before.
-- `xcheck` and `xcheck_ack` rerun on freshly generated TLC graphs: 0 failures.
-
-# Counterexamples for restarts (`RestartProof/Counterexample.lean`)
-
-Three runs on `Fin 3`, every guard checked by `decide`, at MinSync 1:
-
-- `noRebuild_unsafe`: `Reachable 1 true false 0 s ∧ ¬ Safety s`, the model's own
-  `Step` with RebuildSync = FALSE (F5). 9 steps: n0 counts and promotes n1, writes,
-  restarts with its data and an empty sync set, n2 replicates and acks, n0 counts and
-  promotes n2 and commits. n1 is authoritative and lacks the write.
-- `noIncCheck_unsafe`: `StepNoInc` is `Step` plus Count and MakeEligible guarded by
-  `known[p].prim = p` alone. 9 steps: a write commits on n0 and n1, n0 restarts empty,
-  then counts and promotes empty n2. Only the ThinksPrimary incarnation check is
-  removed; TLC's `CoreRestart_noIncMin1` removes all three.
-- `noSurvivor_loses`: `StepNoSurv` is `Step` plus RestartEmpty without the survival
-  guard. 9 steps: a write commits on n0 and n1, n1 and then n0 restart empty. The
-  history is non-empty, no log holds it, and no node is authoritative, so
-  EligibleHoldsCommitted holds vacuously; the theorem states the loss.
-
-Axioms: `propext`, `Classical.choice`, `Quot.sound` for all three.
+The weakened action in each trace is in bold; *prefix* is `committed_run`. In
+`Survival.lean` no node is authoritative in the final state, so EligibleHoldsCommitted
+holds vacuously there and the theorem states the loss itself.

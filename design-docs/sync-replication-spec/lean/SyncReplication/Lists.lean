@@ -6,7 +6,7 @@ lemmas about `List.IsPrefix` (`<+:`) and `List.take`, and the link between a set
 cardinality and duplicate-free lists of its members (used to relate `Writable` to its
 earlier list form). -/
 
-namespace RestartProof
+namespace SyncReplication
 
 variable {α : Type}
 
@@ -65,4 +65,4 @@ theorem take_transfer {src mid dst : List α} {a b : Nat} (hab : a ≤ b) (ha : 
     rw [← prefix_take_eq h1 (k := a) (by simp; omega), List.take_take]; simp
   rw [e]; exact take_mono_prefix hab h2
 
-end RestartProof
+end SyncReplication

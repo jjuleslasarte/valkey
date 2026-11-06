@@ -1,5 +1,5 @@
-import RestartProof.Inv
-import RestartProof.Contracts
+import SyncReplication.Invariant
+import SyncReplication.Contracts
 
 /-!
 # Preservation: shard configuration (design §4 promotion and demotion; §6 Cluster V2)
@@ -8,7 +8,7 @@ Learn (a node adopts the latest configuration), MakeEligible (promotion step 4) 
 MakeIneligible (demotion).
 -/
 
-namespace RestartProof
+namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
@@ -22,11 +22,11 @@ theorem upd_eq_ite {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b :
 /-! ### Learn -/
 
 section learn
-variable {s : State Node} (h : Inv s) (n : Node) (hk : ¬ KnowsLatest s n)
+variable {s : State Node} (h : Invariant s) (n : Node) (hk : ¬ KnowsLatest s n)
 include h hk
 
 /-- `n`'s copy of the configuration becomes the latest one; no recorded incarnation changes. -/
-theorem config_learn : ConfigInv (learn s n) := by
+theorem config_learn : ConfigInvariant (learn s n) := by
   have hnp : n ≠ s.cfg.prim := by
     intro e; apply hk; unfold KnowsLatest; rw [e, h.primKnows]
   have hK := learn_known (s := s) (n := n)
@@ -47,7 +47,7 @@ theorem config_learn : ConfigInv (learn s n) := by
     · exact h.knownIncLe x y }
 
 /-- `n`, which is not the primary, drops its sync replica set; no log or acknowledgement moves. -/
-theorem repl_learn : ReplInv (learn s n) := by
+theorem repl_learn : ReplInvariant (learn s n) := by
   have hnp : n ≠ s.cfg.prim := by
     intro e; apply hk; unfold KnowsLatest; rw [e, h.primKnows]
   have hSn : (learn s n).sync n = fun _ => false := learn_sync_self hnp
@@ -94,7 +94,7 @@ theorem repl_learn : ReplInv (learn s n) := by
     rw [hS q hqn] at hs; exact h.syncCommit q r hq' hs }
 
 /-- Learning never makes a node primary, and eligibility does not change. -/
-theorem membership_learn : MembershipInv (learn s n) := by
+theorem membership_learn : MembershipInvariant (learn s n) := by
   have hnp : n ≠ s.cfg.prim := by
     intro e; apply hk; unfold KnowsLatest; rw [e, h.primKnows]
   have hK := learn_known (s := s) (n := n)
@@ -131,11 +131,11 @@ theorem membership_learn : MembershipInv (learn s n) := by
       · exact h.eligFol m he hf }
 
 /-- Learn changes no commit point, catch-up point or history. -/
-theorem commit_learn : CommitInv (learn s n) :=
-  (h.toCommitInv).frame rfl rfl rfl rfl rfl rfl rfl
+theorem commit_learn : CommitInvariant (learn s n) :=
+  (h.toCommitInvariant).frame rfl rfl rfl rfl rfl rfl rfl
 
 /-- A deposed primary stays fenced. If `n` leaves it with an acknowledgement below the old fence, that acknowledgement is the new fence. -/
-theorem failover_learn : FailoverInv (learn s n) := by
+theorem failover_learn : FailoverInvariant (learn s n) := by
   have hnp : n ≠ s.cfg.prim := by
     intro e; apply hk; unfold KnowsLatest; rw [e, h.primKnows]
   have hK := learn_known (s := s) (n := n)
@@ -199,12 +199,12 @@ theorem failover_learn : FailoverInv (learn s n) := by
 theorem ehc_learn : EligibleHoldsCommitted (learn s n) :=
   h.ehc
 
-theorem inv_learn : Inv (learn s n) where
-  toConfigInv := config_learn h n hk
-  toReplInv := repl_learn h n hk
-  toMembershipInv := membership_learn h n hk
-  toCommitInv := commit_learn h n hk
-  toFailoverInv := failover_learn h n hk
+theorem invariant_learn : Invariant (learn s n) where
+  toConfigInvariant := config_learn h n hk
+  toReplInvariant := repl_learn h n hk
+  toMembershipInvariant := membership_learn h n hk
+  toCommitInvariant := commit_learn h n hk
+  toFailoverInvariant := failover_learn h n hk
   ehc := ehc_learn h n hk
 
 end learn
@@ -212,12 +212,12 @@ end learn
 /-! ### MakeEligible / MakeIneligible -/
 
 section cas
-variable {s : State Node} (h : Inv s) {p r : Node} (hp : ThinksPrimary s p) (hkl : KnowsLatest s p)
+variable {s : State Node} (h : Invariant s) {p r : Node} (hp : ThinksPrimary s p) (hkl : KnowsLatest s p)
 include h hp hkl
 
 /-- The new version records `r` as eligible with its current incarnation, and the primary's copy is that version. -/
 theorem config_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
-    ConfigInv (makeElig s p r) := by
+    ConfigInvariant (makeElig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
   subst hpp
@@ -254,7 +254,7 @@ theorem config_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
 
 /-- Promotion step 4 moves no log, sync replica set or acknowledgement. -/
 theorem repl_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
-    ReplInv (makeElig s p r) := by
+    ReplInvariant (makeElig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
   subst hpp
@@ -275,7 +275,7 @@ theorem repl_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
 
 /-- `r` was already counted (step 2 comes before step 4), so every eligible replica is still counted. -/
 theorem membership_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
-    MembershipInv (makeElig s p r) := by
+    MembershipInvariant (makeElig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
   subst hpp
@@ -321,7 +321,7 @@ theorem membership_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false)
 
 /-- MakeEligible changes no commit point, catch-up point or history. -/
 theorem commit_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
-    CommitInv (makeElig s p r) := by
+    CommitInvariant (makeElig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
   subst hpp
@@ -348,7 +348,7 @@ theorem commit_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
 
 /-- Fences do not move. `r` holds a deposed primary's log up to its fence, because `r` acknowledged past the reconciliation point, which is past the fence. -/
 theorem failover_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
-    FailoverInv (makeElig s p r) := by
+    FailoverInvariant (makeElig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
   subst hpp
@@ -396,7 +396,7 @@ theorem failover_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
     show (makeElig s s.cfg.prim r).cfg.inc s.cfg.prim = s.inc s.cfg.prim
     rw [hI, if_neg (Ne.symm hrp)]; exact hpa }
 
-/-- `r` is the only node that can become authoritative, and it holds the history: it acknowledged past the reconciliation point, which covers the history (F1). -/
+/-- `r` is the only node that can become authoritative, and it holds the history: it acknowledged past the reconciliation point, which covers the history. -/
 theorem ehc_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
     EligibleHoldsCommitted (makeElig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
@@ -424,18 +424,18 @@ theorem ehc_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
     · exact hhist
     · exact h.ehc n hn
 
-theorem inv_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
-    Inv (makeElig s p r) where
-  toConfigInv := config_makeElig h hp hkl hs he
-  toReplInv := repl_makeElig h hp hkl hs he
-  toMembershipInv := membership_makeElig h hp hkl hs he
-  toCommitInv := commit_makeElig h hp hkl hs he
-  toFailoverInv := failover_makeElig h hp hkl hs he
+theorem invariant_makeElig (hs : s.sync p r = true) (he : s.cfg.elig r = false) :
+    Invariant (makeElig s p r) where
+  toConfigInvariant := config_makeElig h hp hkl hs he
+  toReplInvariant := repl_makeElig h hp hkl hs he
+  toMembershipInvariant := membership_makeElig h hp hkl hs he
+  toCommitInvariant := commit_makeElig h hp hkl hs he
+  toFailoverInvariant := failover_makeElig h hp hkl hs he
   ehc := ehc_makeElig h hp hkl hs he
 
 /-- The new version drops `r` from the eligible set; only the primary's copy changes. -/
 theorem config_makeInelig (_he : s.cfg.elig r = true) :
-    ConfigInv (makeInelig s p r) := by
+    ConfigInvariant (makeInelig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
   have hK := makeInelig_known (s := s) (r := r)
@@ -460,7 +460,7 @@ theorem config_makeInelig (_he : s.cfg.elig r = true) :
 
 /-- The primary stops counting `r`; no log or other acknowledgement moves. -/
 theorem repl_makeInelig (_he : s.cfg.elig r = true) :
-    ReplInv (makeInelig s p r) := by
+    ReplInvariant (makeInelig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
   have hKp := makeInelig_known_prim (s := s) (r := r) hkp
@@ -482,7 +482,7 @@ theorem repl_makeInelig (_he : s.cfg.elig r = true) :
 
 /-- `r` is ineligible before any write commits without it (demotion ordering rule). -/
 theorem membership_makeInelig (he : s.cfg.elig r = true) :
-    MembershipInv (makeInelig s p r) := by
+    MembershipInvariant (makeInelig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
   subst hpp
@@ -529,7 +529,7 @@ theorem membership_makeInelig (he : s.cfg.elig r = true) :
 
 /-- MakeIneligible changes no commit point, catch-up point, history or primary, and the
 commit facts only mention the current primary. -/
-theorem commit_makeInelig (_he : s.cfg.elig r = true) : CommitInv (makeInelig s p r) := by
+theorem commit_makeInelig (_he : s.cfg.elig r = true) : CommitInvariant (makeInelig s p r) := by
   obtain ⟨_, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
   exact { caLen := h.caLen, caHist := h.caHist, caEq := h.caEq, reconLen := h.reconLen,
@@ -537,7 +537,7 @@ theorem commit_makeInelig (_he : s.cfg.elig r = true) : CommitInv (makeInelig s 
 
 /-- Fences do not move, and no node becomes authoritative. -/
 theorem failover_makeInelig (_he : s.cfg.elig r = true) :
-    FailoverInv (makeInelig s p r) := by
+    FailoverInvariant (makeInelig s p r) := by
   obtain ⟨hkp, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hp hkp).2
   subst hpp
@@ -578,15 +578,15 @@ theorem ehc_makeInelig (_he : s.cfg.elig r = true) :
     fun _ => makeInelig_isAuthoritative
   exact fun n hn => h.ehc n (hauth n hn)
 
-theorem inv_makeInelig (he : s.cfg.elig r = true) :
-    Inv (makeInelig s p r) where
-  toConfigInv := config_makeInelig h hp hkl he
-  toReplInv := repl_makeInelig h hp hkl he
-  toMembershipInv := membership_makeInelig h hp hkl he
-  toCommitInv := commit_makeInelig h hp hkl he
-  toFailoverInv := failover_makeInelig h hp hkl he
+theorem invariant_makeInelig (he : s.cfg.elig r = true) :
+    Invariant (makeInelig s p r) where
+  toConfigInvariant := config_makeInelig h hp hkl he
+  toReplInvariant := repl_makeInelig h hp hkl he
+  toMembershipInvariant := membership_makeInelig h hp hkl he
+  toCommitInvariant := commit_makeInelig h hp hkl he
+  toFailoverInvariant := failover_makeInelig h hp hkl he
   ehc := ehc_makeInelig h hp hkl he
 
 end cas
 
-end RestartProof
+end SyncReplication
