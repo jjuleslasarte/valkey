@@ -4,7 +4,10 @@
 
 There is one inductive invariant proof, for CoreRestart (`RestartProof/Inv.lean`,
 `Preserve/*.lean`, `Preserve.lean`, `AckProof.lean`). The Core, CoreAck and CoreRecon
-results are corollaries, obtained by embedding each smaller model into the next:
+results are corollaries, obtained by embedding each smaller model into the next.
+The embeddings are simulations in CSLib's sense (`LTS.IsSimulation`, up to the
+label renamings `Action.toRecon` / `Action.toRestart`), and CSLib's `sim_trace`
+lifts them from steps to runs:
 
 ```
 Core  --toRecon-->  CoreRecon at MinSync 0  --emb-->  CoreRestart with no restart
@@ -20,8 +23,11 @@ CoreAck --atoRecon--> CoreRecon + replies   --aemb--> CoreRestart + replies
   CoreRecon step is a CoreRestart step (`step_emb`), with either RebuildSync value.
   `IsAuthoritative` becomes "eligible or primary", so CoreRestart's Safety and AckedHeld of the
   image are CoreRecon's (`safety_of_emb`).
-- `reach_toRecon`, `reach_emb`, `areach_toRecon`, `areach_emb` lift this to
-  reachability. `CoreProof.safety`, `AckProof.ackSafety`/`ackedHeld` and
+- `toRecon_isSimulation`, `emb_isSimulation`, `atoRecon_isSimulation`,
+  `aemb_isSimulation` package the step lemmas as CSLib simulations, and
+  `reach_toRecon`, `reach_emb`, `areach_toRecon`, `areach_emb` apply
+  `LTS.IsSimulation.sim_trace` to lift them to reachability.
+  `CoreProof.safety`, `AckProof.ackSafety`/`ackedHeld` and
   `ReconProof.safety`/`ackSafety`/`ackedHeld` are each a few lines on top of
   `RestartProof.safety`/`ackSafety`/`ackedHeld`.
 
@@ -149,14 +155,43 @@ docker build -t valkey-lean:24.04 -f ../tools/Dockerfile.lean ../tools   # once
 ../tools/lean.sh lake env lean Check.lean   # prints the axioms
 ```
 
-This uses Lean 4.35.0 and Mathlib `v4.35.0` (pinned in `lakefile.lean` and
-`lake-manifest.json`). Mathlib is used for list-prefix lemmas and for `Set.encard` in
-`Writable`. Since commit 5f88591 (the last core-only commit), every theorem
+This uses Lean 4.35.0, Mathlib `v4.35.0` and CSLib at `0b1e3680` (its last commit on
+Lean 4.35.0, built against the same Mathlib revision; all pinned in `lakefile.lean`
+and `lake-manifest.json`). Mathlib is used for list-prefix lemmas and for `Set.encard`
+in `Writable`. CSLib supplies the transition-system layer; see "CSLib" below. Since commit 5f88591 (the last core-only commit), every theorem
 statement is unchanged; see "Mathlib" below. `tools/lean.sh` runs the toolchain in
 an Ubuntu image that adds git and curl, which Lake and `cache get` need. If the
 container has no `git`, clone Mathlib and the packages listed in its
 `lake-manifest.json` into `.lake/packages/` on the host at the pinned revisions;
 Lake then uses those checkouts.
+
+## CSLib
+
+The models are labelled transition systems from CSLib
+(`Cslib.Foundations.Semantics.LTS`). Each `Step` constructor now carries the label of
+its action (`Action`, one constructor per action), `lts m rf rb : LTS (State Node)
+(Action Node)` packages the relation, and `Reachable` is `lts.CanReach init`. What
+this replaced:
+
+- The hand-written `Reachable` / `AReachable` inductives and the `ReachableBy`
+  helper in `RestartProof/Counterexample.lean`: now `LTS.CanReach` and `LTS.MTr`.
+- The induction over runs in `inv_reachable`, `ainv_reachable`, `reach_*` and
+  `areach_*`: now `LTS.mtrInv_of_trInv` (invariants) and
+  `LTS.IsSimulation.sim_trace` (embeddings). The project supplies only the one-step
+  facts, `inv_trInv` and the `*_isSimulation` theorems.
+- Counterexample runs built as chains of `Reachable.step`: now one `MTr` per run whose
+  label list is the trace, so the sequence of actions is in the theorem statement
+  (`noRebuild_run`, `noIncCheck_run`, `noSurvivor_run`, `noReconcile_run`,
+  `noReplyFence_run`).
+
+The 13 theorem statements are unchanged (checked with `.lake/verify.sh` against the
+b14b36c baseline: identical). The printed definitions of `Step`, `AStep` (one extra
+label index) and `Reachable`, `AReachable` (now `def`s) differ as expected. Axioms are
+unchanged. `noIncCheck_unsafe` and `noSurvivor_loses` now state reachability as
+`(ltsNoInc 1 true true).CanReach (init 0) s` instead of the local `ReachableBy`.
+
+Build time is unchanged (about 14 s warm, 1,061 jobs); CSLib's LTS modules add 10
+oleans on top of Mathlib's.
 
 ## Mathlib
 
@@ -352,7 +387,8 @@ the expensive mode because Lean gives no traces.
 
 - Counterexample traces. In Lean, a wrong invariant shows up only as an unprovable goal,
   and you must reconstruct the bad state yourself. The F1 run had to be written by hand
-  (TLC had found it earlier).
+  (TLC had found it earlier). Once written, a run is an `LTS.MTr` whose label list is
+  the trace, so Lean does state the trace; it just does not find it.
 - Zero proof effort for new configurations and bug switches.
 - Reachability and liveness checks. In Lean, non-vacuity is shown only by explicit runs.
 

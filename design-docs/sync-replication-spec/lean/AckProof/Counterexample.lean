@@ -4,6 +4,8 @@ import AckProof.Model
 14-step run on 3 nodes acknowledges a write that is not in the history. Same scenario
 as TLC's `CoreAck_noReplyFence` trace. n0 = initial primary. -/
 
+open Cslib
+
 namespace AckProof
 
 open CoreProof
@@ -27,25 +29,32 @@ def b12 : AState N := write b11 0                               -- n0 writes ter
 def b13 : AState N := ⟨commitNext b12.core 0, b12.held, b12.okd⟩   -- commits alone: hist = [5]
 def b14 : AState N := release b13 (0, 1, 1)                     -- old reply released OK
 
-theorem noReplyFence_reach : AReachable true false true (0 : N) b14 := by
-  have r0 : AReachable true false true (0 : N) b0 := AReachable.init
-  have r1 := r0.step (AStep.core b0 _ (Step.count b0.core 0 1 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)))
-  have r2 := r1.step (AStep.core b1 _ (Step.makeElig b1.core 0 1 (by decide) (by decide) (by decide) (by decide)))
-  have r3 := r2.step (AStep.write b2 0 (by decide) (by decide))
-  have r4 := r3.step (AStep.core b3 _ (Step.learn b3.core 1 (by decide)))
-  have r5 := r4.step (AStep.core b4 _ (Step.takeover b4.core 1 (by decide) (by decide) (by decide)))
-  have r6 := r5.step (AStep.core b5 _ (Step.learn b5.core 0 (by decide)))
-  have r7 := r6.step (AStep.core b6 _ (Step.resync b6.core 0 (by decide) (by decide) (by decide) (by decide) (by decide)))
-  have r8 := r7.step (AStep.core b7 _ (Step.count b7.core 1 0 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)))
-  have r9 := r8.step (AStep.core b8 _ (Step.makeElig b8.core 1 0 (by decide) (by decide) (by decide) (by decide)))
-  have r10 := r9.step (AStep.core b9 _ (Step.learn b9.core 0 (by decide)))
-  have r11 := r10.step (AStep.core b10 _ (Step.takeover b10.core 0 (by decide) (by decide) (by decide)))
-  have r12 := r11.step (AStep.write b11 0 (by decide) (by decide))
-  have r13 := r12.step (AStep.core b12 _ (Step.commit b12.core 0 (by decide) (by decide) (by decide)))
-  exact r13.step (AStep.release b13 (0, 1, 1) (by decide) (by decide) (fun hc => absurd hc (by decide)))
+/-- The F2 run with the reply fence off; the label list is its trace. -/
+theorem noReplyFence_run : (alts true false true).MTr b0
+    [.core (.count 0 1), .core (.makeElig 0 1), .write 0, .core (.learn 1), .core (.takeover 1),
+     .core (.learn 0), .core (.resync 0), .core (.count 1 0), .core (.makeElig 1 0),
+     .core (.learn 0), .core (.takeover 0), .write 0, .core (.commit 0), .release (0, 1, 1)] b14 :=
+  .stepL (AStep.core b0 _ _ (Step.count b0.core 0 1 (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide))) <|
+  .stepL (AStep.core b1 _ _ (Step.makeElig b1.core 0 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (AStep.write b2 0 (by decide) (by decide)) <|
+  .stepL (AStep.core b3 _ _ (Step.learn b3.core 1 (by decide))) <|
+  .stepL (AStep.core b4 _ _ (Step.takeover b4.core 1 (by decide) (by decide) (by decide))) <|
+  .stepL (AStep.core b5 _ _ (Step.learn b5.core 0 (by decide))) <|
+  .stepL (AStep.core b6 _ _ (Step.resync b6.core 0 (by decide) (by decide) (by decide) (by decide)
+    (by decide))) <|
+  .stepL (AStep.core b7 _ _ (Step.count b7.core 1 0 (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide))) <|
+  .stepL (AStep.core b8 _ _ (Step.makeElig b8.core 1 0 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (AStep.core b9 _ _ (Step.learn b9.core 0 (by decide))) <|
+  .stepL (AStep.core b10 _ _ (Step.takeover b10.core 0 (by decide) (by decide) (by decide))) <|
+  .stepL (AStep.write b11 0 (by decide) (by decide)) <|
+  .stepL (AStep.core b12 _ _ (Step.commit b12.core 0 (by decide) (by decide) (by decide))) <|
+  .stepL (AStep.release b13 (0, 1, 1) (by decide) (by decide) (fun hc => absurd hc (by decide))) <|
+  .refl
 
 theorem noReplyFence_unsafe : ∃ a, AReachable true false true (0 : N) a ∧ ¬ AckedDurable a := by
-  refine ⟨b14, noReplyFence_reach, ?_⟩
+  refine ⟨b14, ⟨_, noReplyFence_run⟩, ?_⟩
   intro hd
   have := (hd (1, 1) (by decide)).2.2
   exact absurd this (by decide)

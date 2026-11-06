@@ -18,11 +18,14 @@ One line per action, each pointing at the subsystem file that proves it:
 | RestartEmpty, RestartKeep | `Preserve/Restart.lean` |
 -/
 
+open Cslib
+
 namespace RestartProof
 
 variable {Node : Type} [DecidableEq Node]
 
-theorem inv_step {m : Nat} {s s' : State Node} (h : Inv s) (hs : Step m true true s s') : Inv s' := by
+theorem inv_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv s) (hs : Step m true true s μ s') :
+    Inv s' := by
   cases hs with
   | append p _ _ _ => exact inv_append h p
   | replicate r _ _ _ => exact inv_replicate h r
@@ -37,9 +40,14 @@ theorem inv_step {m : Nat} {s s' : State Node} (h : Inv s) (hs : Step m true tru
   | restartEmpty n hk hsv => exact inv_restartEmpty h n hk hsv
   | restartKeep n hk => exact inv_restartKeep h n hk
 
-theorem inv_reachable {m : Nat} {i : Node} {s : State Node} (h : Reachable m true true i s) : Inv s := by
-  induction h with
-  | init => exact inv_init i
-  | step _ hs ih => exact inv_step ih hs
+/-- `Inv` is a one-step invariant of the protocol, in CSLib's sense. -/
+theorem inv_trInv {m : Nat} : (lts m true true (Node := Node)).TrInv Inv :=
+  fun _ _ _ hs h => inv_step h hs
+
+/-- Hence it holds in every reachable state: a one-step invariant is a run invariant
+(`LTS.mtrInv_of_trInv`), and `init i` satisfies it. -/
+theorem inv_reachable {m : Nat} {i : Node} {s : State Node} (h : Reachable m true true i s) : Inv s :=
+  let ⟨_, run⟩ := h
+  LTS.mtrInv_of_trInv inv_trInv _ _ _ run (inv_init i)
 
 end RestartProof

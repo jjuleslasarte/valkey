@@ -29,7 +29,7 @@ theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
     ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
       (commitNext s p).hist <+: (commitNext s p).log e ∧ (commitNext s p).hist <+: (commitNext s p).log p := by
   have hi := inv_reachable h
-  have hs' := (safety (Reachable.step h (Step.commit s p hp hw hlen hcap))).1
+  have hs' := (safety (h.stepR (Step.commit s p hp hw hlen hcap))).1
   obtain ⟨r, h1, h2, h3⟩ : (syncEligible s p).Nonempty :=
     Set.one_le_encard_iff_nonempty.mp (le_trans (by exact_mod_cast hm) hw)
   subst hpp

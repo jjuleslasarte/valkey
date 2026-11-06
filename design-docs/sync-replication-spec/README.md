@@ -250,7 +250,9 @@ The proof has four models of increasing generality, each in its own directory.
 restarts and incarnation IDs. Only the most general, `RestartProof`, has an
 invariant proof. Each smaller model is mapped into the next by a function on
 states, and every step of the smaller model is shown to be a step of the larger
-one (a simulation):
+one. This is a *simulation* in CSLib's sense (`LTS.IsSimulation`, stated as
+`emb_isSimulation` and `toRecon_isSimulation`), and CSLib's `sim_trace` lifts it
+from single steps to whole runs:
 
 ```
 CoreProof  --toRecon-->  ReconProof at min-sync-replicas 0  --emb-->  RestartProof with no restarts
@@ -308,9 +310,10 @@ rate at most `ρ`). The main results:
 Every row has a Lean theorem. The TLA+ model checking that found these results
 is in Appendix B.
 
-Size: the `RestartProof` model is 429 lines (with the held-reply layer), the
-invariant and its lemmas 383, the per-action contracts 460, and the preservation
-proofs 1,895, so the proof is about six lines per line of model. Lean checks the
+Size: the `RestartProof` model is 475 lines (with the held-reply layer and the
+action labels), the invariant and its lemmas 383, the per-action contracts 460,
+and the preservation proofs 1,899, so the proof is about five lines per line of
+model. Lean checks the
 whole of `RestartProof` in about 13 seconds on a laptop-class machine.
 
 [lean/LEAN.md](lean/LEAN.md) has every theorem statement and each model's
@@ -393,13 +396,13 @@ Determine whether the `Count` and `Writable` incarnation checks are each needed.
 
 | Path | Contents | Lines |
 |---|---|---|
-| `lean/RestartProof/Model.lean`, `AckModel.lean` | The model: state, actions, steps, properties; the held-reply layer | 429 |
+| `lean/RestartProof/Model.lean`, `AckModel.lean` | The model: state, actions, steps, properties; the held-reply layer | 475 |
 | `lean/RestartProof/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 460 |
 | `lean/RestartProof/Inv.lean` | The invariant in five layers; the fence; frame lemmas | 383 |
-| `lean/RestartProof/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 1,895 |
+| `lean/RestartProof/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 1,899 |
 | `lean/RestartProof/Safety.lean`, `AckProof.lean`, `Lists.lean` | The main theorems; the held-reply invariant; list lemmas | 320 |
-| `lean/RestartProof/Counterexample.lean` | F5, incarnation-check and survival counterexamples | 167 |
-| `lean/ReconProof/`, `lean/CoreProof/`, `lean/AckProof/` | The smaller models, their embeddings into the next model, corollaries, F1 and F2 counterexamples | 1,030 |
+| `lean/RestartProof/Counterexample.lean` | F5, incarnation-check and survival counterexamples | 182 |
+| `lean/ReconProof/`, `lean/CoreProof/`, `lean/AckProof/` | The smaller models, their embeddings into the next model, corollaries, F1 and F2 counterexamples | 1,168 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
 | `lean/Check.lean` | Prints the axioms of every main theorem and counterexample | |
 
@@ -413,11 +416,15 @@ proved layer by layer), then `Safety.lean`. `Preserve.lean` is the one-line-per-
 action dispatch that ties preservation to the step relation.
 
 **Conventions.** Actions are functions `State → State` using structure update,
-so fields not mentioned are unchanged. Guards live in the `Step` constructors.
-`Reachable` is the inductive closure of `Step` from `init`. Names follow the
-design where it has one (`ThinksPrimary`, `KnowsLatest`, `IsAuthoritative`,
-`Writable`, `catchUpPoint`). A counterexample is a concrete run on `Fin 3` whose
-guards `decide` evaluates.
+so fields not mentioned are unchanged. Guards live in the `Step` constructors,
+and each step carries the label of the action that fired (`Action`), so a run
+is a list of actions. The protocol is packaged as a labelled transition system
+from CSLib (`lts : LTS (State Node) (Action Node)`), and `Reachable` is CSLib's
+`CanReach` from `init`: the existence of a run. Names follow the design where it
+has one (`ThinksPrimary`, `KnowsLatest`, `IsAuthoritative`, `Writable`,
+`catchUpPoint`). A counterexample is a concrete run on `Fin 3`, stated as a
+CSLib multi-step transition (`MTr`) whose label list is the trace, with every
+guard evaluated by `decide`.
 
 ## 8. Reproducing
 
@@ -447,6 +454,10 @@ Mathlib's prebuilt files once with `../tools/lean.sh lake exe cache get` (about
   Lean community. *Theorem Proving in Lean 4*.
   <https://lean-lang.org/theorem_proving_in_lean4/>. The reference for every
   Lean construct used here (Appendix A.7).
+- F. Montesi and contributors. *CSLib: the Lean library for Computer Science*.
+  <https://www.cslib.io>, <https://github.com/leanprover/cslib>, Apache 2.0.
+  Used for labelled transition systems, runs, invariants and simulations
+  (Appendix A.8).
 
 ---
 
@@ -553,7 +564,9 @@ From most to least trusted:
 - **Simulation / embedding.** A function from the states of a smaller model to
   the states of a larger one, with a proof that every step of the smaller model
   maps to a step of the larger. It transports theorems downward, so the three
-  smaller models here are corollaries of one proof (section 4.2).
+  smaller models here are corollaries of one proof (section 4.2). The proofs
+  use CSLib's definition (`LTS.IsSimulation`, Appendix A.8), so the notion is
+  the library's, not ours.
 - **Counterexample.** A concrete run of the model that ends in a state violating
   the property. In Lean it is a list of steps whose guards the tool evaluates.
 - **Vacuous.** True because there is nothing to check. "Every authoritative node
@@ -596,9 +609,9 @@ the book is the reference.
 
 | In this proof | What it is | TPIL |
 |---|---|---|
-| `inductive Step`, `inductive Reachable` | Propositions defined by their introduction rules. A `Step m rf rb s s'` can only be built from one of the listed constructors, so a proof of it is a record of which action fired and evidence that its guards held. `Reachable` is the same for "a finite sequence of steps from `init`". These are *inductively defined propositions*; because they are indexed by states they are also *inductive families*. | Ch. 7, Inductive Types (§7.3, §7.7) |
+| `inductive Action`, `inductive Step` | `Action` is an ordinary enumeration, one case per protocol action. `Step` is a proposition defined by its introduction rules: a `Step m rf rb s μ s'` can only be built from the constructor for action `μ`, so a proof of it is a record of which action fired and evidence that its guards held. `Step` is an *inductively defined proposition*; because it is indexed by states and a label it is also an *inductive family*. | Ch. 7, Inductive Types (§7.3, §7.7) |
 | `cases hs with \| append … \| replicate …` in `inv_step` | Case analysis on which constructor built the step. Lean checks that every constructor is handled. This is the proof-side counterpart of `Step`'s definition. | Ch. 7 (§7.6, Tactics for Inductive Types) |
-| `induction h` in `inv_reachable` | The induction that turns "`Inv` holds initially and every step keeps it" into "`Inv` holds in every reachable state". | Ch. 7, Ch. 8 |
+| `inv_trInv`, `LTS.mtrInv_of_trInv` in `inv_reachable` | "`Inv` holds initially and every step keeps it" implies "`Inv` holds in every reachable state". The induction over the run is CSLib's lemma (Appendix A.8); the proof here only supplies the one-step fact. | Ch. 7, Ch. 8 |
 | `structure ConfigInv … `, `structure Inv … extends …` | Record types whose fields are propositions. `Inv` extends five sub-records, so each conjunct has a name (`h.knownEq`), can be cited alone, and the five layers can be proved separately and assembled with `where`. | Ch. 9, Structures and Records |
 | `theorem inv_takeover : Inv … where toConfigInv := …` | A proof written as a term, field by field, rather than as a tactic script. TPIL contrasts term-style and tactic-style proofs and notes that tactic proofs are harder to read because the reader must predict the effect of each step; where a proof is an assembly of named parts we write it as a term. | Ch. 3, Ch. 5 (introduction) |
 | `by … · … · …`, `show …`, `have …`, `refine ⟨…, ?_⟩`, `exact …` | Tactic proofs structured so each sub-goal is a bullet (`·`) that must be closed in place, with `show` stating the goal being proved. TPIL recommends this structure for readability and robustness, and recommends `exact` over `apply` where the term should close the goal exactly, because a failure then points at the real problem. | Ch. 5, Tactics (§5.4, Structuring Tactic Proofs) |
@@ -617,6 +630,30 @@ statements, `Model.lean`, and the docstrings in `Inv.lean` are written to be
 read without it.
 
 ---
+
+### A.8 CSLib: the transition-system vocabulary comes from a library
+
+The notions of run, reachability, invariant and simulation are not defined in
+this project. They are imported from CSLib, the Lean library for computer
+science (Fabrizio Montesi and contributors, Apache 2.0,
+<https://www.cslib.io>, modules `Cslib.Foundations.Semantics.LTS.*`), pinned in
+`lakefile.lean` to a revision built on the same Lean and Mathlib versions as
+this project. What this buys a reviewer is that the words below have one
+published, checked definition each, which can be compared with textbook ones,
+and that the glue lemmas are the library's rather than ours.
+
+| CSLib | What it is | Where this proof uses it |
+|---|---|---|
+| `LTS State Label` | A *labelled transition system*: a relation `Tr : State → Label → State → Prop`. The whole protocol is one value of this type, `lts m rf rb`, whose relation is `Step m rf rb`. | `*/Model.lean`, `*/AckModel.lean` |
+| `MTr s μs s'` | A *run*: a finite sequence of transitions from `s` to `s'` whose labels are the list `μs`. Built from `refl` (the empty run) and `stepL` (one transition in front of a run). | Every counterexample is an `MTr` from `init 0`, and its label list is the trace in the statement. |
+| `CanReach s s'` | *Reachability*: some run leads from `s` to `s'`. `Reachable m rf rb i s` is defined as `(lts m rf rb).CanReach (init i) s`. | The hypothesis of every safety theorem |
+| `TrInv p`, `MTrInv p`, `mtrInv_of_trInv` | A *one-step invariant* (every transition preserves `p`), a *run invariant* (every run preserves `p`), and the lemma that the first implies the second. The library does the induction over the run. | `inv_reachable`, `ainv_reachable` |
+| `IsSimulation lts₁ lts₂ r` | A *simulation*: whenever `r` relates `s₁` to `s₂`, every transition of `lts₁` from `s₁` is matched by one of `lts₂` from `s₂` with the same label, and `r` relates the results. `sim_trace` lifts this to whole runs. | `toRecon_isSimulation`, `emb_isSimulation`, and the `a`-prefixed ones for the acknowledgement layer, with `r s t := t = emb s` |
+| `mapLabel f` | The same transition system with its labels renamed through `f`. The smaller models have fewer actions than CoreRestart, so the simulation is up to the renaming `Action.toRestart` / `Action.toRecon`. | `*/Embed.lean`, `AckProof/Proof.lean`, `ReconProof/AckProof.lean` |
+
+Nothing about the protocol comes from CSLib; the model, invariant and
+preservation proofs are entirely this project's. CSLib's `#print axioms` for
+the lemmas used shows the same three standard axioms as the rest of the proof.
 
 ## Appendix B: The TLA+ models and what they add
 

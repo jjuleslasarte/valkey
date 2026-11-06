@@ -1,8 +1,12 @@
+import Cslib.Foundations.Semantics.LTS.Basic
+
 /-! Transition-system encoding of `spec/Core.tla`.
 
 Sets of nodes are `Node → Bool`; functions are updated with `upd`.
 There are no `MaxLen` / `MaxVer` bounds (they only bound model checking):
 `Len(log[p]) < MaxLen` and `CanCas` are dropped. -/
+
+open Cslib
 
 namespace CoreProof
 
@@ -110,34 +114,44 @@ def resync (s : State Node) (r : Node) : State Node :=
            acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r 0),
            commit := upd s.commit r (min (s.commit r) (s.commit (primaryOf s r))) }
 
+/-- The actions of Core, one per `Step` constructor. -/
+inductive Action (Node : Type)
+  | append (p : Node) | replicate (r : Node) | ack (r : Node) | commit (p : Node)
+  | count (p r : Node) | makeElig (p r : Node) | makeInelig (p r : Node)
+  | earlyUncount (p r : Node) | learn (n : Node) | takeover (n : Node) | resync (r : Node)
+
 /-- `Next`, one constructor per action, guards as in Core.tla.
 `rf` = ReconcileFirst, `ed` = EarlyDrop. -/
-inductive Step (rf ed : Bool) : State Node → State Node → Prop
-  | append (s p) : ThinksPrimary s p → Reconciled rf s p → Step rf ed s (appendWrite s p)
+inductive Step (rf ed : Bool) : State Node → Action Node → State Node → Prop
+  | append (s p) : ThinksPrimary s p → Reconciled rf s p → Step rf ed s (.append p) (appendWrite s p)
   | replicate (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      (s.log r).length < (s.log (primaryOf s r)).length → Step rf ed s (replicate s r)
+      (s.log r).length < (s.log (primaryOf s r)).length → Step rf ed s (.replicate r) (replicate s r)
   | ack (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      s.acked (primaryOf s r) r < (s.log r).length → Step rf ed s (ack s r)
+      s.acked (primaryOf s r) r < (s.log r).length → Step rf ed s (.ack r) (ack s r)
   | commit (s p) : ThinksPrimary s p → s.commit p < (s.log p).length →
-      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step rf ed s (commitNext s p)
+      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step rf ed s (.commit p) (commitNext s p)
   | count (s p r) : ThinksPrimary s p → Reconciled rf s p → r ≠ p → primaryOf s r = p → s.sync p r = false →
-      s.commit p ≤ s.acked p r → Step rf ed s (count s p r)
+      s.commit p ≤ s.acked p r → Step rf ed s (.count p r) (count s p r)
   | makeElig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.elig r = false →
-      Step rf ed s (makeElig s p r)
+      Step rf ed s (.makeElig p r) (makeElig s p r)
   | makeInelig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.cfg.elig r = true →
-      Step rf ed s (makeInelig s p r)
+      Step rf ed s (.makeInelig p r) (makeInelig s p r)
   | earlyUncount (s p r) : ed = true → ThinksPrimary s p → s.sync p r = true →
-      Step rf ed s (earlyUncount s p r)
-  | learn (s n) : ¬ KnowsLatest s n → Step rf ed s (learn s n)
+      Step rf ed s (.earlyUncount p r) (earlyUncount s p r)
+  | learn (s n) : ¬ KnowsLatest s n → Step rf ed s (.learn n) (learn s n)
   | takeover (s n) : KnowsLatest s n → s.cfg.elig n = true → n ≠ s.cfg.prim →
-      Step rf ed s (takeover s n)
+      Step rf ed s (.takeover n) (takeover s n)
   | resync (s r) : primaryOf s r ≠ r → ¬ (s.log r <+: s.log (primaryOf s r)) →
       s.sync (primaryOf s r) r = false → (s.known (primaryOf s r)).elig r = false →
-      Reconciled rf s (primaryOf s r) → Step rf ed s (resync s r)
+      Reconciled rf s (primaryOf s r) → Step rf ed s (.resync r) (resync s r)
 
-inductive Reachable (rf ed : Bool) (i : Node) : State Node → Prop
-  | init : Reachable rf ed i (init i)
-  | step {s s'} : Reachable rf ed i s → Step rf ed s s' → Reachable rf ed i s'
+/-- The protocol as a labelled transition system (CSLib's `LTS`). -/
+def lts (rf ed : Bool) : LTS (State Node) (Action Node) where
+  Tr := Step rf ed
+
+/-- The states reachable from `init i` by any finite run. -/
+def Reachable (rf ed : Bool) (i : Node) (s : State Node) : Prop :=
+  (lts rf ed).CanReach (init i) s
 
 /-! ### Properties -/
 

@@ -1,4 +1,7 @@
 import RestartProof.Lists
+import Cslib.Foundations.Semantics.LTS.Basic
+
+open Cslib
 
 /-!
 # CoreRestart: the replication model
@@ -278,55 +281,79 @@ def restartKeep (rb : Bool) (s : State Node) (n : Node) : State Node :=
              (if rb = true ∧ (s.known n).prim = n ∧ (s.known n).inc n = s.inc n
               then rebuiltSync s n else fun _ => false) }
 
+/-- The actions of CoreRestart's replication part, one per `Step` constructor. A run of
+the protocol is a list of actions, so a counterexample's trace can be read off its
+statement. -/
+inductive Action (Node : Type)
+  | append (p : Node) | replicate (r : Node) | ack (r : Node) | commit (p : Node)
+  | count (p r : Node) | makeElig (p r : Node) | makeInelig (p r : Node) | learn (n : Node)
+  | takeover (n : Node) | resync (r : Node) | restartEmpty (n : Node) | restartKeep (n : Node)
+
 /-- `Next` of CoreRestart (replication part). `m` = MinSync, `rf` = ReconcileFirst,
 `rb` = RebuildSync. Each constructor is one action: its arguments after the state
-are the guard, and its result is the post-state. -/
-inductive Step (m : Nat) (rf rb : Bool) : State Node → State Node → Prop
+are the guard, and its result is the action's label and the post-state. -/
+inductive Step (m : Nat) (rf rb : Bool) : State Node → Action Node → State Node → Prop
   /-- A node that thinks it is primary, has enough sync replicas and has reconciled
   may append a write. -/
-  | append (s p) : ThinksPrimary s p → Writable m s p → Reconciled rf s p → Step m rf rb s (appendWrite s p)
+  | append (s p) : ThinksPrimary s p → Writable m s p → Reconciled rf s p → Step m rf rb s (.append p) (appendWrite s p)
   /-- A replica whose log is a strict prefix of its primary's may copy the next entry. -/
   | replicate (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      (s.log r).length < (s.log (primaryOf s r)).length → Step m rf rb s (replicate s r)
+      (s.log r).length < (s.log (primaryOf s r)).length → Step m rf rb s (.replicate r) (replicate s r)
   /-- A replica whose log is a prefix of its primary's may acknowledge new entries. -/
   | ack (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      s.acked (primaryOf s r) r < (s.log r).length → Step m rf rb s (ack s r)
+      s.acked (primaryOf s r) r < (s.log r).length → Step m rf rb s (.ack r) (ack s r)
   /-- A writable primary may commit its next entry once every sync member has
   acknowledged it. -/
   | commit (s p) : ThinksPrimary s p → Writable m s p → s.commit p < (s.log p).length →
-      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m rf rb s (commitNext s p)
+      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m rf rb s (.commit p) (commitNext s p)
   /-- A primary may count one of its replicas once that replica has acknowledged up
   to the catch-up point, unless it is eligible with a stale recorded incarnation. -/
   | count (s p r) : ThinksPrimary s p → r ≠ p → primaryOf s r = p →
       ((s.known p).elig r = true → (s.known p).inc r = s.inc r) → s.sync p r = false →
-      catchUpPoint rf s p ≤ s.acked p r → Step m rf rb s (count s p r)
+      catchUpPoint rf s p ≤ s.acked p r → Step m rf rb s (.count p r) (count s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
   | makeElig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.elig r = false →
-      Step m rf rb s (makeElig s p r)
+      Step m rf rb s (.makeElig p r) (makeElig s p r)
   /-- A primary that knows the latest configuration may make a replica ineligible. -/
   | makeInelig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.cfg.elig r = true →
-      Step m rf rb s (makeInelig s p r)
+      Step m rf rb s (.makeInelig p r) (makeInelig s p r)
   /-- A node with a stale configuration may learn the latest one. -/
-  | learn (s n) : ¬ KnowsLatest s n → Step m rf rb s (learn s n)
+  | learn (s n) : ¬ KnowsLatest s n → Step m rf rb s (.learn n) (learn s n)
   /-- An eligible replica that knows the latest configuration, with a matching
   recorded incarnation, may take over from the current primary. -/
   | takeover (s n) : KnowsLatest s n → s.cfg.elig n = true → n ≠ s.cfg.prim →
-      s.cfg.inc n = s.inc n → Step m rf rb s (takeover s n)
+      s.cfg.inc n = s.inc n → Step m rf rb s (.takeover n) (takeover s n)
   /-- A diverged replica may resync once its primary has neither counted it nor made
   it eligible. -/
   | resync (s r) : primaryOf s r ≠ r → ¬ (s.log r <+: s.log (primaryOf s r)) →
       s.sync (primaryOf s r) r = false → (s.known (primaryOf s r)).elig r = false →
-      Step m rf rb s (resync rf s r)
+      Step m rf rb s (.resync r) (resync rf s r)
   /-- A node that knows the latest configuration may restart empty while some other
   authoritative node keeps its data (the survival assumption). -/
-  | restartEmpty (s n) : KnowsLatest s n → (∃ m, m ≠ n ∧ IsAuthoritative s m) → Step m rf rb s (restartEmpty s n)
+  | restartEmpty (s n) : KnowsLatest s n → (∃ m, m ≠ n ∧ IsAuthoritative s m) → Step m rf rb s (.restartEmpty n) (restartEmpty s n)
   /-- A node that knows the latest configuration may restart and keep its data. -/
-  | restartKeep (s n) : KnowsLatest s n → Step m rf rb s (restartKeep rb s n)
+  | restartKeep (s n) : KnowsLatest s n → Step m rf rb s (.restartKeep n) (restartKeep rb s n)
 
-/-- The states reachable from `init i` by any finite sequence of steps. -/
-inductive Reachable (m : Nat) (rf rb : Bool) (i : Node) : State Node → Prop
-  | init : Reachable m rf rb i (init i)
-  | step {s s'} : Reachable m rf rb i s → Step m rf rb s s' → Reachable m rf rb i s'
+/-- The protocol as a labelled transition system (CSLib's `LTS`): `Step` is its
+transition relation, so CSLib's runs (`MTr`), reachability (`CanReach`), invariants
+(`TrInv`, `MTrInv`) and simulations apply to it. -/
+def lts (m : Nat) (rf rb : Bool) : LTS (State Node) (Action Node) where
+  Tr := Step m rf rb
+
+@[simp] theorem lts_tr {m : Nat} {rf rb : Bool} {s s' : State Node} {μ : Action Node} :
+    (lts m rf rb).Tr s μ s' ↔ Step m rf rb s μ s' := Iff.rfl
+
+/-- The states reachable from `init i` by any finite run. -/
+def Reachable (m : Nat) (rf rb : Bool) (i : Node) (s : State Node) : Prop :=
+  (lts m rf rb).CanReach (init i) s
+
+theorem Reachable.init {m : Nat} {rf rb : Bool} (i : Node) : Reachable m rf rb i (init i) :=
+  LTS.CanReach.refl (lts m rf rb) _
+
+/-- One more step keeps a state reachable. -/
+theorem Reachable.stepR {m : Nat} {rf rb : Bool} {i : Node} {s s' : State Node} {μ : Action Node}
+    (h : Reachable m rf rb i s) (hs : Step m rf rb s μ s') : Reachable m rf rb i s' :=
+  let ⟨_, run⟩ := h; ⟨_, LTS.MTr.stepR (lts m rf rb) run hs⟩
 
 /-! ### Properties -/
 

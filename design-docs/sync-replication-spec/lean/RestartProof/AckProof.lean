@@ -5,6 +5,8 @@ MinSync (ReconcileFirst = TRUE, NoReplyFence = FALSE, RebuildSync = TRUE), with 
 restarts with and without data under the survival assumption. Adapted from
 `ReconProof.AckProof`. -/
 
+open Cslib
+
 namespace RestartProof
 
 
@@ -40,7 +42,8 @@ theorem ainv_init (i : Node) : AInv (ainit i) where
   acked := by intro x hx; simp [ainit] at hx
 
 /-- What a Core step does to the parts the reply invariants read. -/
-theorem step_facts {s s' : State Node} (h : Inv s) (ht : TermLe s) {m : Nat} (hs : Step m true true s s') :
+theorem step_facts {s s' : State Node} (h : Inv s) (ht : TermLe s) {m : Nat} {μ : Action Node}
+    (hs : Step m true true s μ s') :
     s.hist <+: s'.hist ∧ s.cfg.ver ≤ s'.cfg.ver ∧ TermLe s' ∧
     ∀ x t, t ≤ s.cfg.ver → ThinksPrimary s' x → s'.term x = t →
       ThinksPrimary s x ∧ s.term x = t ∧ s.log x <+: s'.log x := by
@@ -123,7 +126,8 @@ theorem step_facts {s s' : State Node} (h : Inv s) (ht : TermLe s) {m : Nat} (hs
   | restartKeep n _ =>
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
 
-theorem ainv_core {a : AState Node} {c : State Node} (h : AInv a) {m : Nat} (hs : Step m true true a.core c) :
+theorem ainv_core {a : AState Node} {c : State Node} (h : AInv a) {m : Nat} {μ : Action Node}
+    (hs : Step m true true a.core μ c) :
     AInv ⟨c, a.held, a.okd⟩ := by
   obtain ⟨hh, hv, ht', hx⟩ := step_facts h.core h.term hs
   refine ⟨inv_step h.core hs, ht', ?_, ?_⟩
@@ -176,9 +180,9 @@ theorem ainv_drop {c : State Node} {held : List (Held Node)} {okd : List (Nat ×
   ⟨h.core, h.term, fun y hy => h.held y (List.mem_filter.mp hy).1, h.acked⟩
 
 theorem ainv_step {a a' : AState Node} (h : AInv a) {m : Nat}
-    (hs : AStep m true false true a a') : AInv a' := by
+    {μ : AAction Node} (hs : AStep m true false true a μ a') : AInv a' := by
   cases hs with
-  | core c hc => exact ainv_core h hc
+  | core _ c hc => exact ainv_core h hc
   | write p _ _ _ => exact ainv_write h p
   | release x hm hc hf => exact ainv_release h x hm hc (hf rfl)
   | abort x _ _ => exact ainv_abort h x
@@ -188,10 +192,9 @@ theorem ainv_step {a a' : AState Node} (h : AInv a) {m : Nat}
     exact ainv_drop (ainv_core (c := restartKeep true a.core n) (m := m) h (Step.restartKeep _ n hk)) n
 
 theorem ainv_reachable {i : Node} {a : AState Node} {m : Nat} (h : AReachable m true false true i a) :
-    AInv a := by
-  induction h with
-  | init => exact ainv_init i
-  | step _ hs ih => exact ainv_step ih hs
+    AInv a :=
+  let ⟨_, run⟩ := h
+  LTS.mtrInv_of_trInv (p := AInv) (fun _ _ _ hs h => ainv_step h hs) _ _ _ run (ainv_init i)
 
 /-- No acknowledged write is lost, for any number of nodes, log length, configuration
 changes and restarts, and EVERY min-sync-replicas value `m`; with reconciliation

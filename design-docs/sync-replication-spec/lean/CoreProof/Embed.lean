@@ -1,5 +1,7 @@
 import CoreProof.Model
 import ReconProof.Model
+import Cslib.Foundations.Semantics.LTS.Simulation
+import Cslib.Foundations.Semantics.LTS.MapHom
 
 /-! Core's rule is CoreRecon's strict rule at MinSync 0, and every strict step is an
 A1 step. `CoreProof.State` and `ReconProof.State` have the same fields, so `toRecon`
@@ -15,6 +17,8 @@ is the identity field by field, and:
 So with ReconcileFirst = TRUE and EarlyDrop = FALSE, every Core step is a CoreRecon
 step at MinSync 0 (`step_toRecon`), every Core reachable state is a CoreRecon
 reachable state (`reach_toRecon`), and Safety reads the same (`safety_of_toRecon`). -/
+
+open Cslib
 
 namespace CoreProof
 
@@ -102,10 +106,19 @@ end
 
 /-! ### Steps, reachability and Safety -/
 
+/-- Each Core action as a CoreRecon action. EarlyUncount has no counterpart; it is
+disabled in the embedded instance (EarlyDrop = FALSE), so its image is never used and
+is set to `learn p` arbitrarily. -/
+def Action.toRecon : Action Node → ReconProof.Action Node
+  | .append p => .append p | .replicate r => .replicate r | .ack r => .ack r
+  | .commit p => .commit p | .count p r => .count p r | .makeElig p r => .makeElig p r
+  | .makeInelig p r => .makeInelig p r | .earlyUncount p _ => .learn p | .learn n => .learn n
+  | .takeover n => .takeover n | .resync r => .resync r
+
 /-- Every Core step (ReconcileFirst = TRUE, EarlyDrop = FALSE) is a CoreRecon step
-at MinSync 0 under the A1 rule. -/
-theorem step_toRecon {s s' : State Node} (h : Step true false s s') :
-    ReconProof.Step 0 true (toRecon s) (toRecon s') := by
+at MinSync 0 under the A1 rule, with the action of the same name. -/
+theorem step_toRecon {s s' : State Node} {μ : Action Node} (h : Step true false s μ s') :
+    ReconProof.Step 0 true (toRecon s) μ.toRecon (toRecon s') := by
   cases h with
   | append p hp hr =>
     rw [toRecon_appendWrite]; exact .append _ p hp (writable_zero _ p) hr
@@ -123,11 +136,17 @@ theorem step_toRecon {s s' : State Node} (h : Step true false s s') :
   | takeover n hk h1 h2 => rw [toRecon_takeover]; exact .takeover _ n hk h1 h2
   | resync r h1 h2 h3 h4 hr => rw [toRecon_resync s hr]; exact .resync _ r h1 h2 h3 h4
 
+/-- `toRecon` is a simulation of Core by CoreRecon, in CSLib's sense. -/
+theorem toRecon_isSimulation :
+    (lts true false).IsSimulation ((ReconProof.lts 0 true).mapLabel Action.toRecon)
+      (fun s t => t = toRecon (Node := Node) s) :=
+  fun _ _ ht _ s' hs => ⟨toRecon s', ht ▸ LTS.mapLabel_tr.2 (step_toRecon hs), rfl⟩
+
 theorem reach_toRecon {i : Node} {s : State Node} (h : Reachable true false i s) :
-    ReconProof.Reachable 0 true i (toRecon s) := by
-  induction h with
-  | init => rw [toRecon_init]; exact .init
-  | step _ hs ih => exact .step ih (step_toRecon hs)
+    ReconProof.Reachable 0 true i (toRecon s) :=
+  let ⟨μs, run⟩ := h
+  let ⟨_, run', ht⟩ := toRecon_isSimulation.sim_trace (toRecon_init i).symm μs s run
+  ⟨μs.map Action.toRecon, ht ▸ LTS.mapLabel_mTr.1 run'⟩
 
 theorem safety_of_toRecon {s : State Node} (h : ReconProof.Safety (toRecon s)) : Safety s := h
 

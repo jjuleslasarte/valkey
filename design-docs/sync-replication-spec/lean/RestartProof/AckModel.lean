@@ -15,6 +15,8 @@ CoreRestart.tla always records a reply on append and drops them on restart, so t
 model has more behaviours than the TLA+ one; a safety theorem for it covers
 CoreRestart.tla. `MaxLen` / `MaxVer` / `MaxRestarts` are dropped. -/
 
+open Cslib
+
 namespace RestartProof
 
 
@@ -50,24 +52,41 @@ def abort (a : AState Node) (h : Held Node) : AState Node :=
 def dropHeld (held : List (Held Node)) (n : Node) : List (Held Node) :=
   held.filter (fun x => x.1 != n)
 
-/-- `m` = MinSync, `rf` = ReconcileFirst, `nf` = NoReplyFence, `rb` = RebuildSync. -/
-inductive AStep (m : Nat) (rf nf rb : Bool) : AState Node → AState Node → Prop
-  | core (a : AState Node) (c : State Node) : Step m rf rb a.core c →
-      AStep m rf nf rb a ⟨c, a.held, a.okd⟩
-  | write (a : AState Node) (p : Node) : ThinksPrimary a.core p → Writable m a.core p →
-      Reconciled rf a.core p → AStep m rf nf rb a (write a p)
-  | release (a : AState Node) (h : Held Node) : h ∈ a.held → h.2.1 ≤ a.core.commit h.1 →
-      (nf = false → fenced a.core h) → AStep m rf nf rb a (release a h)
-  | abort (a : AState Node) (h : Held Node) : h ∈ a.held → ¬ fenced a.core h →
-      AStep m rf nf rb a (abort a h)
-  | restartE (a : AState Node) (n : Node) : KnowsLatest a.core n → (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
-      AStep m rf nf rb a ⟨restartEmpty a.core n, dropHeld a.held n, a.okd⟩
-  | restartK (a : AState Node) (n : Node) : KnowsLatest a.core n →
-      AStep m rf nf rb a ⟨restartKeep rb a.core n, dropHeld a.held n, a.okd⟩
+/-- The actions of the acknowledgement layer: a replication action, or one of the layer's
+own actions on held replies. -/
+inductive AAction (Node : Type)
+  | core (μ : Action Node) | write (p : Node) | release (h : Held Node) | abort (h : Held Node)
+  | restartE (n : Node) | restartK (n : Node)
 
-inductive AReachable (m : Nat) (rf nf rb : Bool) (i : Node) : AState Node → Prop
-  | init : AReachable m rf nf rb i (ainit i)
-  | step {a a'} : AReachable m rf nf rb i a → AStep m rf nf rb a a' → AReachable m rf nf rb i a'
+/-- `m` = MinSync, `rf` = ReconcileFirst, `nf` = NoReplyFence, `rb` = RebuildSync. -/
+inductive AStep (m : Nat) (rf nf rb : Bool) : AState Node → AAction Node → AState Node → Prop
+  | core (a : AState Node) (μ : Action Node) (c : State Node) : Step m rf rb a.core μ c →
+      AStep m rf nf rb a (.core μ) ⟨c, a.held, a.okd⟩
+  | write (a : AState Node) (p : Node) : ThinksPrimary a.core p → Writable m a.core p →
+      Reconciled rf a.core p → AStep m rf nf rb a (.write p) (write a p)
+  | release (a : AState Node) (h : Held Node) : h ∈ a.held → h.2.1 ≤ a.core.commit h.1 →
+      (nf = false → fenced a.core h) → AStep m rf nf rb a (.release h) (release a h)
+  | abort (a : AState Node) (h : Held Node) : h ∈ a.held → ¬ fenced a.core h →
+      AStep m rf nf rb a (.abort h) (abort a h)
+  | restartE (a : AState Node) (n : Node) : KnowsLatest a.core n → (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      AStep m rf nf rb a (.restartE n) ⟨restartEmpty a.core n, dropHeld a.held n, a.okd⟩
+  | restartK (a : AState Node) (n : Node) : KnowsLatest a.core n →
+      AStep m rf nf rb a (.restartK n) ⟨restartKeep rb a.core n, dropHeld a.held n, a.okd⟩
+
+/-- The acknowledgement layer as a labelled transition system. -/
+def alts (m : Nat) (rf nf rb : Bool) : LTS (AState Node) (AAction Node) where
+  Tr := AStep m rf nf rb
+
+/-- The layer states reachable from `ainit i` by any finite run. -/
+def AReachable (m : Nat) (rf nf rb : Bool) (i : Node) (a : AState Node) : Prop :=
+  (alts m rf nf rb).CanReach (ainit i) a
+
+theorem AReachable.init {m : Nat} {rf nf rb : Bool} (i : Node) : AReachable m rf nf rb i (ainit i) :=
+  LTS.CanReach.refl (alts m rf nf rb) _
+
+theorem AReachable.stepR {m : Nat} {rf nf rb : Bool} {i : Node} {a a' : AState Node} {μ : AAction Node}
+    (h : AReachable m rf nf rb i a) (hs : AStep m rf nf rb a μ a') : AReachable m rf nf rb i a' :=
+  let ⟨_, run⟩ := h; ⟨_, LTS.MTr.stepR (alts m rf nf rb) run hs⟩
 
 /-- AckedDurable: `Len(hist) >= o /\ hist[o] = v` (TLA `hist[o]` is `getD (o-1)`). -/
 def AckedDurable (a : AState Node) : Prop :=

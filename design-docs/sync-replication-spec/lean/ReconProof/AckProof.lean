@@ -1,12 +1,16 @@
 import ReconProof.AckModel
 import ReconProof.Safety
 import RestartProof.AckProof
+import Cslib.Foundations.Semantics.LTS.Simulation
+import Cslib.Foundations.Semantics.LTS.MapHom
 
 /-! No acknowledged write is lost in CoreRecon, for every MinSync (ReconcileFirst =
 TRUE, NoReplyFence = FALSE). Derived from `RestartProof.ackSafety`: a CoreRecon
 state with held replies is a CoreRestart state with no restart (`aemb`), every
 CoreRecon step is a CoreRestart step (`astep_emb`), and the properties read the
 same on the image. -/
+
+open Cslib
 
 namespace ReconProof
 
@@ -19,20 +23,31 @@ theorem fenced_emb {s : State Node} {h : Held Node} :
     RestartProof.fenced (emb s) h ↔ fenced s h :=
   ⟨fun ⟨h1, h2⟩ => ⟨thinksPrimary_emb.1 h1, h2⟩, fun ⟨h1, h2⟩ => ⟨thinksPrimary_emb.2 h1, h2⟩⟩
 
-theorem astep_emb {m : Nat} {rf nf rb : Bool} {a a' : AState Node} (h : AStep m rf nf a a') :
-    RestartProof.AStep m rf nf rb (aemb a) (aemb a') := by
+/-- Each layer action is the CoreRestart layer action of the same name. -/
+def AAction.toRestart : AAction Node → RestartProof.AAction Node
+  | .core μ => .core μ.toRestart | .write p => .write p | .release h => .release h
+  | .abort h => .abort h
+
+theorem astep_emb {m : Nat} {rf nf rb : Bool} {a a' : AState Node} {μ : AAction Node}
+    (h : AStep m rf nf a μ a') : RestartProof.AStep m rf nf rb (aemb a) μ.toRestart (aemb a') := by
   cases h with
-  | core c hc => exact .core (aemb a) (emb c) (step_emb hc)
+  | core _ c hc => exact .core (aemb a) _ (emb c) (step_emb hc)
   | write p hp hw hr => exact .write (aemb a) p (thinksPrimary_emb.2 hp) (writable_emb hw) hr
   | release x hm hc hf =>
     exact .release (aemb a) x hm hc (fun e => fenced_emb.2 (hf e))
   | abort x hm hf => exact .abort (aemb a) x hm (fun e => hf (fenced_emb.1 e))
 
+/-- `aemb` is a simulation of CoreRecon's acknowledgement layer by CoreRestart's. -/
+theorem aemb_isSimulation {m : Nat} {rf nf rb : Bool} :
+    (alts m rf nf).IsSimulation ((RestartProof.alts m rf nf rb).mapLabel AAction.toRestart)
+      (fun a b => b = aemb (Node := Node) a) :=
+  fun _ _ hb _ a' hs => ⟨aemb a', hb ▸ LTS.mapLabel_tr.2 (astep_emb hs), rfl⟩
+
 theorem areach_emb {m : Nat} {rf nf rb : Bool} {i : Node} {a : AState Node}
-    (h : AReachable m rf nf i a) : RestartProof.AReachable m rf nf rb i (aemb a) := by
-  induction h with
-  | init => exact .init
-  | step _ hs ih => exact .step ih (astep_emb hs)
+    (h : AReachable m rf nf i a) : RestartProof.AReachable m rf nf rb i (aemb a) :=
+  let ⟨μs, run⟩ := h
+  let ⟨_, run', hb⟩ := aemb_isSimulation.sim_trace rfl μs a run
+  ⟨μs.map AAction.toRestart, hb ▸ LTS.mapLabel_mTr.1 run'⟩
 
 /-- No acknowledged write is lost, for any number of nodes, log length and
 configuration changes, and EVERY min-sync-replicas value `m`; with reconciliation

@@ -3,6 +3,8 @@ import CoreProof.Model
 /-! F1 regression: with ReconcileFirst = FALSE, a concrete 11-step run on 3 nodes
 reaches a state violating EligibleHoldsCommitted. n0 = initial primary. -/
 
+open Cslib
+
 namespace CoreProof
 
 abbrev N := Fin 3
@@ -27,22 +29,25 @@ def c11 := makeElig c10 1 2     -- n2 eligible with an empty log
 
 theorem noRec (s : State N) (p : N) : Reconciled false s p := fun h => absurd h (by decide)
 
-theorem noReconcile_reach : Reachable false false (0 : N) c11 := by
-  have r0 : Reachable false false (0 : N) c0 := Reachable.init
-  have r1 := r0.step (Step.count c0 0 1 (by decide) (noRec _ _) (by decide) (by decide) (by decide) (by decide))
-  have r2 := r1.step (Step.makeElig c1 0 1 (by decide) (by decide) (by decide) (by decide))
-  have r3 := r2.step (Step.append c2 0 (by decide) (noRec _ _))
-  have r4 := r3.step (Step.learn c3 1 (by decide))
-  have r5 := r4.step (Step.replicate c4 1 (by decide) (by decide) (by decide))
-  have r6 := r5.step (Step.ack c5 1 (by decide) (by decide) (by decide))
-  have r7 := r6.step (Step.commit c6 0 (by decide) (by decide) (by decide))
-  have r8 := r7.step (Step.takeover c7 1 (by decide) (by decide) (by decide))
-  have r9 := r8.step (Step.learn c8 2 (by decide))
-  have r10 := r9.step (Step.count c9 1 2 (by decide) (noRec _ _) (by decide) (by decide) (by decide) (by decide))
-  exact r10.step (Step.makeElig c10 1 2 (by decide) (by decide) (by decide) (by decide))
+/-- The F1 run with ReconcileFirst off; the label list is its trace. -/
+theorem noReconcile_run : (lts false false).MTr c0
+    [.count 0 1, .makeElig 0 1, .append 0, .learn 1, .replicate 1, .ack 1, .commit 0,
+     .takeover 1, .learn 2, .count 1 2, .makeElig 1 2] c11 :=
+  .stepL (Step.count c0 0 1 (by decide) (noRec _ _) (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (Step.makeElig c1 0 1 (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (Step.append c2 0 (by decide) (noRec _ _)) <|
+  .stepL (Step.learn c3 1 (by decide)) <|
+  .stepL (Step.replicate c4 1 (by decide) (by decide) (by decide)) <|
+  .stepL (Step.ack c5 1 (by decide) (by decide) (by decide)) <|
+  .stepL (Step.commit c6 0 (by decide) (by decide) (by decide)) <|
+  .stepL (Step.takeover c7 1 (by decide) (by decide) (by decide)) <|
+  .stepL (Step.learn c8 2 (by decide)) <|
+  .stepL (Step.count c9 1 2 (by decide) (noRec _ _) (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (Step.makeElig c10 1 2 (by decide) (by decide) (by decide) (by decide)) <|
+  .refl
 
 theorem noReconcile_unsafe : ∃ s, Reachable false false (0 : N) s ∧ ¬ Safety s := by
-  refine ⟨c11, noReconcile_reach, ?_⟩
+  refine ⟨c11, ⟨_, noReconcile_run⟩, ?_⟩
   intro ⟨hehc, _⟩
   have := hehc 2 (Or.inl (by decide))
   exact absurd this (by decide)

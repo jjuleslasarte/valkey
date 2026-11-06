@@ -1,4 +1,5 @@
 import RestartProof.Lists
+import Cslib.Foundations.Semantics.LTS.Basic
 
 /-! Transition-system encoding of the replication part of `spec/CoreRecon.tla`
 (StrictRecon = FALSE, EarlyDrop = FALSE).
@@ -15,6 +16,8 @@ Same state and post-states as `CoreProof` except:
 Sets of nodes are `Node → Bool`; functions are updated with `upd`.
 There are no `MaxLen` / `MaxVer` bounds (they only bound model checking):
 `Len(log[p]) < MaxLen` and `CanCas` are dropped. -/
+
+open Cslib
 
 namespace ReconProof
 
@@ -141,32 +144,42 @@ def resync (rf : Bool) (s : State Node) (r : Node) : State Node :=
            acked := upd s.acked (primaryOf s r) (upd (s.acked (primaryOf s r)) r 0),
            commit := upd s.commit r (min (s.commit r) (s.commit (primaryOf s r))) }
 
+/-- The actions of CoreRecon's replication part, one per `Step` constructor. -/
+inductive Action (Node : Type)
+  | append (p : Node) | replicate (r : Node) | ack (r : Node) | commit (p : Node)
+  | count (p r : Node) | makeElig (p r : Node) | makeInelig (p r : Node) | learn (n : Node)
+  | takeover (n : Node) | resync (r : Node)
+
 /-- `Next` of CoreRecon (replication part), one constructor per action.
 `m` = MinSync, `rf` = ReconcileFirst. -/
-inductive Step (m : Nat) (rf : Bool) : State Node → State Node → Prop
-  | append (s p) : ThinksPrimary s p → Writable m s p → Reconciled rf s p → Step m rf s (appendWrite s p)
+inductive Step (m : Nat) (rf : Bool) : State Node → Action Node → State Node → Prop
+  | append (s p) : ThinksPrimary s p → Writable m s p → Reconciled rf s p → Step m rf s (.append p) (appendWrite s p)
   | replicate (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      (s.log r).length < (s.log (primaryOf s r)).length → Step m rf s (replicate s r)
+      (s.log r).length < (s.log (primaryOf s r)).length → Step m rf s (.replicate r) (replicate s r)
   | ack (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      s.acked (primaryOf s r) r < (s.log r).length → Step m rf s (ack s r)
+      s.acked (primaryOf s r) r < (s.log r).length → Step m rf s (.ack r) (ack s r)
   | commit (s p) : ThinksPrimary s p → Writable m s p → s.commit p < (s.log p).length →
-      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m rf s (commitNext s p)
+      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m rf s (.commit p) (commitNext s p)
   | count (s p r) : ThinksPrimary s p → r ≠ p → primaryOf s r = p → s.sync p r = false →
-      catchUpPoint rf s p ≤ s.acked p r → Step m rf s (count s p r)
+      catchUpPoint rf s p ≤ s.acked p r → Step m rf s (.count p r) (count s p r)
   | makeElig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.elig r = false →
-      Step m rf s (makeElig s p r)
+      Step m rf s (.makeElig p r) (makeElig s p r)
   | makeInelig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.cfg.elig r = true →
-      Step m rf s (makeInelig s p r)
-  | learn (s n) : ¬ KnowsLatest s n → Step m rf s (learn s n)
+      Step m rf s (.makeInelig p r) (makeInelig s p r)
+  | learn (s n) : ¬ KnowsLatest s n → Step m rf s (.learn n) (learn s n)
   | takeover (s n) : KnowsLatest s n → s.cfg.elig n = true → n ≠ s.cfg.prim →
-      Step m rf s (takeover s n)
+      Step m rf s (.takeover n) (takeover s n)
   | resync (s r) : primaryOf s r ≠ r → ¬ (s.log r <+: s.log (primaryOf s r)) →
       s.sync (primaryOf s r) r = false → (s.known (primaryOf s r)).elig r = false →
-      Step m rf s (resync rf s r)
+      Step m rf s (.resync r) (resync rf s r)
 
-inductive Reachable (m : Nat) (rf : Bool) (i : Node) : State Node → Prop
-  | init : Reachable m rf i (init i)
-  | step {s s'} : Reachable m rf i s → Step m rf s s' → Reachable m rf i s'
+/-- The protocol as a labelled transition system (CSLib's `LTS`). -/
+def lts (m : Nat) (rf : Bool) : LTS (State Node) (Action Node) where
+  Tr := Step m rf
+
+/-- The states reachable from `init i` by any finite run. -/
+def Reachable (m : Nat) (rf : Bool) (i : Node) (s : State Node) : Prop :=
+  (lts m rf).CanReach (init i) s
 
 /-! ### Properties -/
 

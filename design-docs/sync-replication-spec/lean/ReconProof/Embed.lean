@@ -1,5 +1,7 @@
 import ReconProof.Model
 import RestartProof.Model
+import Cslib.Foundations.Semantics.LTS.Simulation
+import Cslib.Foundations.Semantics.LTS.MapHom
 
 /-! Embedding of CoreRecon (`ReconProof`) into CoreRestart (`RestartProof`).
 
@@ -11,6 +13,8 @@ So every CoreRecon step is a CoreRestart step (`step_emb`), every CoreRecon reac
 state maps to a CoreRestart reachable state (`reach_emb`), and CoreRestart's Safety of
 the image is CoreRecon's Safety (`safety_of_emb`). The restart actions are simply
 never used. -/
+
+open Cslib
 
 namespace ReconProof
 
@@ -95,9 +99,17 @@ end
 
 /-! ### Steps, reachability and Safety -/
 
-/-- Every CoreRecon step is a CoreRestart step (for either RebuildSync value). -/
-theorem step_emb {m : Nat} {rf rb : Bool} {s s' : State Node} (h : Step m rf s s') :
-    RestartProof.Step m rf rb (emb s) (emb s') := by
+/-- Each CoreRecon action is the CoreRestart action of the same name. -/
+def Action.toRestart : Action Node → RestartProof.Action Node
+  | .append p => .append p | .replicate r => .replicate r | .ack r => .ack r
+  | .commit p => .commit p | .count p r => .count p r | .makeElig p r => .makeElig p r
+  | .makeInelig p r => .makeInelig p r | .learn n => .learn n | .takeover n => .takeover n
+  | .resync r => .resync r
+
+/-- Every CoreRecon step is a CoreRestart step with the same action (for either
+RebuildSync value). -/
+theorem step_emb {m : Nat} {rf rb : Bool} {s s' : State Node} {μ : Action Node} (h : Step m rf s μ s') :
+    RestartProof.Step m rf rb (emb s) μ.toRestart (emb s') := by
   cases h with
   | append p hp hw hr =>
     rw [emb_appendWrite]; exact .append _ p (thinksPrimary_emb.2 hp) (writable_emb hw) hr
@@ -115,11 +127,20 @@ theorem step_emb {m : Nat} {rf rb : Bool} {s s' : State Node} (h : Step m rf s s
   | takeover n hk h1 h2 => rw [emb_takeover]; exact .takeover _ n hk h1 h2 rfl
   | resync r h1 h2 h3 h4 => rw [emb_resync]; exact .resync _ r h1 h2 h3 h4
 
+/-- `emb` is a simulation of CoreRecon by CoreRestart, in CSLib's sense: the relation
+"t is the image of s" is preserved by every step, with actions mapped by `toRestart`. -/
+theorem emb_isSimulation {m : Nat} {rf rb : Bool} :
+    (lts m rf).IsSimulation ((RestartProof.lts m rf rb).mapLabel Action.toRestart)
+      (fun s t => t = emb (Node := Node) s) :=
+  fun _ _ ht _ s' hs => ⟨emb s', ht ▸ LTS.mapLabel_tr.2 (step_emb hs), rfl⟩
+
+/-- Hence every reachable CoreRecon state's image is a reachable CoreRestart state
+(`LTS.IsSimulation.sim_trace`). -/
 theorem reach_emb {m : Nat} {rf rb : Bool} {i : Node} {s : State Node}
-    (h : Reachable m rf i s) : RestartProof.Reachable m rf rb i (emb s) := by
-  induction h with
-  | init => rw [emb_init]; exact .init
-  | step _ hs ih => exact .step ih (step_emb hs)
+    (h : Reachable m rf i s) : RestartProof.Reachable m rf rb i (emb s) :=
+  let ⟨μs, run⟩ := h
+  let ⟨_, run', ht⟩ := emb_isSimulation.sim_trace (emb_init i).symm μs s run
+  ⟨μs.map Action.toRestart, ht ▸ LTS.mapLabel_mTr.1 run'⟩
 
 /-- With no restart every node's incarnation matches, so `IsAuthoritative` is "eligible or
 primary" and CoreRestart's Safety is CoreRecon's. -/
