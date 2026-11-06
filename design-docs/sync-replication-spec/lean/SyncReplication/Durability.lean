@@ -66,7 +66,7 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermLe s) {m : Na
     split
     · exact List.prefix_append _ _
     · exact List.prefix_refl _
-  | count p r _ _ _ _ _ _ =>
+  | count p r _ _ _ _ _ =>
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
   | makeElig p r hp hk _ _ =>
     refine ⟨List.prefix_refl _, Nat.le_succ _, fun n => Nat.le_succ_of_le (ht n), ?_⟩

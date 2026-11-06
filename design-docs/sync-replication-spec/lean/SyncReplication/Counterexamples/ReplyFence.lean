@@ -51,7 +51,7 @@ theorem noReplyFence_run : (altsNoFence 0).MTr b0
      .core (.learn 0), .core (.resync 0), .core (.count 1 0), .core (.makeElig 1 0),
      .core (.learn 0), .core (.takeover 0), .write 0, .core (.commit 0), .release (0, 1, 1)] b14 :=
   .stepL (.step (AStep.core b0 _ _ (Step.count b0.core 0 1 (by decide) (by decide) (by decide)
-    (by decide) (by decide) (by decide)) rfl)) <|
+    (by decide) (by decide)) rfl)) <|
   .stepL (.step (AStep.core b1 _ _ (Step.makeElig b1.core 0 1 (by decide) (by decide) (by decide)
     (by decide)) rfl)) <|
   .stepL (.step (AStep.write b2 0 (by decide) (writable_zero _ _) (by decide))) <|
@@ -62,7 +62,7 @@ theorem noReplyFence_run : (altsNoFence 0).MTr b0
   .stepL (.step (AStep.core b6 _ _ (Step.resync b6.core 0 (by decide) (by decide) (by decide)
     (by decide)) rfl)) <|
   .stepL (.step (AStep.core b7 _ _ (Step.count b7.core 1 0 (by decide) (by decide) (by decide)
-    (by decide) (by decide) (by decide)) rfl)) <|
+    (by decide) (by decide)) rfl)) <|
   .stepL (.step (AStep.core b8 _ _ (Step.makeElig b8.core 1 0 (by decide) (by decide) (by decide)
     (by decide)) rfl)) <|
   .stepL (.step (AStep.core b9 _ _ (Step.learn b9.core 0 (by decide)) rfl)) <|

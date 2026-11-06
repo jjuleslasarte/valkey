@@ -71,8 +71,7 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   replica is caught up when it follows the primary and has acknowledged up to the
   primary's catch-up point: the committed offset, or, for a primary that has not yet
   committed the log it holds (a new primary, or one that restarted with its data),
-  the end of that log. A primary does not count an eligible replica whose recorded
-  incarnation does not match.
+  the end of that log.
 - **Demotion flow.** The primary commits the replica as ineligible and stops counting
   it, in one step.
 - **Failover.** An eligible replica that knows the latest configuration takes over
@@ -286,7 +285,7 @@ What these say about the design's own wording is in Appendix B.
 | Properties 3 and 4 (no acknowledged write lost) | `SyncReplication.ackSafety`, `ackedHeld` |
 | Property 5 (two copies with `min-sync-replicas ≥ 1`) | `SyncReplication.commit_two_copies` |
 | Lease margin and durations | `Lease/` |
-| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses` |
+| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses` |
 
 Size: the model is 535 lines (422 for the protocol, 113 for the held-reply layer),
 the invariant and its lemmas 444, the per-action contracts 607, and the preservation
@@ -355,9 +354,9 @@ encoding.
   restart with data and is lost with a new incarnation; the model assumes the
   implementation persists it with the data it covers. A stale file is modelled as a
   prefix of the log; a file that is not a prefix (a diverged tail) is not modelled.
-- **The incarnation checks** in `ThinksPrimary`, `Count` and `Writable` are in the
-  model as guards. The design states only the takeover compare-and-set. Appendix B
-  shows the first is needed; the other two are assumed.
+- **The incarnation checks** in `ThinksPrimary` and `Writable` are in the model as
+  guards. The design states only the takeover compare-and-set. Appendix B shows both
+  are needed: the first for safety, the second for the two-copies property.
 
 ### What the model is checked against
 
@@ -376,8 +375,8 @@ finite case corresponds to a real cluster.
 
 ### Future work
 
-Reads: add the lease protocol to the model and prove a no-stale-read property.
-Determine whether the `Count` and `Writable` incarnation checks are each needed.
+Reads: add the lease protocol to the model and prove a no-stale-read property. The
+early removal of a counted, not-yet-eligible replica (section 5).
 
 ## 6. How the proof is organized in code
 
@@ -390,7 +389,7 @@ Determine whether the `Count` and `Writable` incarnation checks are each needed.
 | `lean/SyncReplication/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,468 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 246 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation | 489 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation | 572 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
 | `lean/Check.lean` | Prints the axioms of every theorem | |
@@ -689,10 +688,22 @@ so n0 keeps acting as primary. It counts n2, whose log is empty, and makes it
 eligible. n2 is now authoritative without the committed write. Rule: a node acts as
 primary only if its configuration records its current incarnation (`ThinksPrimary`
 in the model). Counterexample: `noIncCheck_unsafe` (9 steps); the run drops the check
-from Count and MakeEligible only. The model also checks incarnations in two other places: a primary does not
-count an eligible replica whose recorded incarnation does not match (`Count`), and
-only matching replicas count toward `min-sync-replicas` (`Writable`). The proof uses
-both, but no counterexample shows that either is needed on its own.
+from Count and MakeEligible only.
+
+**`min-sync-replicas` counts only matching incarnations**
+(`Counterexamples/MinSyncIncarnation.lean`). The design says a node that restarts
+without data rejoins as ineligible, but the configuration keeps listing it as eligible
+until the primary demotes it. If `min-sync-replicas` counted it in the meantime, a
+primary could satisfy the minimum with a replica that cannot take over. Scenario: a
+write commits on n0 and n1; n1 restarts empty (n0 survives), copies the log back,
+acknowledges and is counted again; n0 writes and n1 acknowledges. n0 may now commit
+with n1 as its only sync member, and after the commit n0 is the only authoritative
+node. Safety is not affected (n1 does hold the data); the two-copies property is.
+Rule: a sync replica counts toward `min-sync-replicas` only if it is eligible with the
+incarnation the configuration records for it (`Writable` in the model).
+Counterexample: `noIncWritable_oneCopy` (14 steps). The model does not check the
+incarnation when counting a replica into the sync replica set: the proof never needed
+it, so the guard was dropped.
 
 **F13: a stale restore must not keep the incarnation**
 (`Counterexamples/StaleRestore.lean`). The design changes the incarnation only on a
@@ -758,10 +769,10 @@ every "needed" result has a Lean counterexample. What TLA+ still contributes:
 - **Forced failover and the lease fence on acknowledgements** (findings F7 and F8)
   are explored in `spec/Shard.tla` and `spec/Leases.tla`. The Lean model has no forced
   failover.
-- **The Count and Writable incarnation checks.** TLC's `CoreRestart_noIncMin1`
-  disables all three incarnation checks at once and finds a loss. The Lean
-  counterexample isolates the `ThinksPrimary` check. Neither tool shows that the
-  other two are each needed.
+- TLC's `CoreRestart_noIncMin1` disables the `ThinksPrimary`, `Count` and `Writable`
+  incarnation checks at once and finds a loss. The Lean counterexamples isolate them:
+  `ThinksPrimary` is needed for safety, `Writable` for the two-copies property, and
+  `Count`'s check is not needed, so the Lean model no longer has it.
 - **The weaker stale-restore rules** (Appendix B, F13) were ruled out by TLC
   configurations, not by Lean counterexamples.
 
@@ -782,7 +793,7 @@ relation instead.
 | F1 | `CoreRecon_noReconcileMin0`/`Min1`, `CoreRestart_noReconcileMin1` | `noReconcile_unsafe` |
 | F2 | `CoreAck_noReplyFence`, `CoreRestart_noReplyFenceMin1` | `noReplyFence_unsafe` |
 | F5 | `CoreRestart_noRebuildMin1` (10 states), `_noRebuildMin1Loss` (22) | `noRebuild_unsafe` |
-| Incarnation checks | `CoreRestart_noIncMin1` (all three off) | `noIncCheck_unsafe` (`ThinksPrimary` check only) |
+| Incarnation checks | `CoreRestart_noIncMin1` (all three off) | `noIncCheck_unsafe` (`ThinksPrimary`), `noIncWritable_oneCopy` (`Writable`) |
 | Survival | `CoreRestart_noSurvivorMin0`/`Min1` | `noSurvivor_loses` |
 | F13 | `CoreRestart_staleKeepMin0` (5 states), `_staleKeepMin1` (9), `_staleKeepMin1Loss` (11); weaker rules `_staleCommitMin1`, `_staleAckOnlyMin0`/`Min1` | `staleRestoreKeepsInc_unsafe` |
 | Safe runs | `CoreRestart_safeMin0`/`_safeMin1` (120.6 M and 78.8 M states), `CoreRestart_twoCopiesMin1` | subsumed by `safety`, `ackSafety`, `commit_two_copies` |

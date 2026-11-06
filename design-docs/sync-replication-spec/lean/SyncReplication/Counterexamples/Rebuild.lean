@@ -46,16 +46,14 @@ def d9 := commitNext d8 0          -- n0 commits with n2's ack only; n1 lacks th
 theorem noRebuild_run : (ltsNoRebuild 1).MTr d0
     [.count 0 1, .makeElig 0 1, .append 0, .restartKeep 0, .replicate 2, .ack 2,
      .count 0 2, .makeElig 0 2, .commit 0] d9 :=
-  .stepL (.step (Step.count d0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by decide))) <|
+  .stepL (.step (Step.count d0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeElig d1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append d2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide))) <|
   .stepL (StepNoRebuild.restartKeep d3 0 (by decide)) <|
   .stepL (.step (Step.replicate d4 2 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.ack d5 2 (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.count d6 0 2 (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by decide))) <|
+  .stepL (.step (Step.count d6 0 2 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeElig d7 0 2 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.commit d8 0 (by decide) (writable_one (r := 2) (by decide) (by decide)
     (by decide)) (by decide) (by decide))) <|

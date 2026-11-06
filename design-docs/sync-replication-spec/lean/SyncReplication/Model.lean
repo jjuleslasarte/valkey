@@ -44,8 +44,7 @@ shows what each of these rules prevents.
 - A node is authoritative if the latest configuration lists it as primary or eligible
   with its current incarnation: `IsAuthoritative s n` is
   `(cfg.elig n ∨ n = cfg.prim) ∧ cfg.inc n = inc n`.
-- Writable counts eligible sync members with a matching incarnation; Count does not
-  count an eligible replica whose incarnation does not match; Takeover checks the new
+- Writable counts eligible sync members with a matching incarnation; Takeover checks the new
   primary's incarnation and counts only the matching eligible replicas; MakeEligible
   records the replica's incarnation.
 - Every restart requires KnowsLatest: a node syncs the Cluster V2 log before it
@@ -344,9 +343,8 @@ inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
   | commit (s p) : ThinksPrimary s p → Writable m s p → s.commit p < (s.log p).length →
       (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m s (.commit p) (commitNext s p)
   /-- A primary may count one of its replicas once that replica has acknowledged up
-  to the catch-up point, unless it is eligible with a stale recorded incarnation. -/
-  | count (s p r) : ThinksPrimary s p → r ≠ p → primaryOf s r = p →
-      ((s.known p).elig r = true → (s.known p).inc r = s.inc r) → s.sync p r = false →
+  to the catch-up point. -/
+  | count (s p r) : ThinksPrimary s p → r ≠ p → primaryOf s r = p → s.sync p r = false →
       catchUpPoint s p ≤ s.acked p r → Step m s (.count p r) (count s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
   | makeElig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.elig r = false →

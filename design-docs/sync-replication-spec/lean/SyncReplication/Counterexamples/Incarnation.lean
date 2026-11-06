@@ -23,8 +23,8 @@ primary does not check that its own configuration records its current incarnatio
 inductive StepNoInc (m : Nat) : State N → Action N → State N → Prop
   | step {s μ s'} : Step m s μ s' → StepNoInc m s μ s'
   | count (s : State N) (p r : N) : (s.known p).prim = p → r ≠ p → primaryOf s r = p →
-      ((s.known p).elig r = true → (s.known p).inc r = s.inc r) → s.sync p r = false →
-      catchUpPoint s p ≤ s.acked p r → StepNoInc m s (.count p r) (count s p r)
+      s.sync p r = false → catchUpPoint s p ≤ s.acked p r →
+      StepNoInc m s (.count p r) (count s p r)
   | makeElig (s : State N) (p r : N) : (s.known p).prim = p → KnowsLatest s p →
       s.sync p r = true → s.cfg.elig r = false → StepNoInc m s (.makeElig p r) (makeElig s p r)
 
@@ -43,8 +43,7 @@ theorem noIncCheck_run : (ltsNoInc 1).MTr c0
      .restartEmpty 0, .count 0 2, .makeElig 0 2] e9 :=
   LTS.MTr.comp (ltsNoInc 1) (mtr_of_step StepNoInc.step committed_run) <|
   .stepL (.step (Step.restartEmpty c6 0 (by decide) ⟨1, by decide, by decide⟩)) <|
-  .stepL (StepNoInc.count e7 0 2 (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by decide)) <|
+  .stepL (StepNoInc.count e7 0 2 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (StepNoInc.makeElig e8 0 2 (by decide) (by decide) (by decide) (by decide)) <|
   .refl
 

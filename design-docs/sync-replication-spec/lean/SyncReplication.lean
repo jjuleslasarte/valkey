@@ -6,3 +6,4 @@ import SyncReplication.Counterexamples.Rebuild
 import SyncReplication.Counterexamples.Incarnation
 import SyncReplication.Counterexamples.Survival
 import SyncReplication.Counterexamples.StaleRestore
+import SyncReplication.Counterexamples.MinSyncIncarnation

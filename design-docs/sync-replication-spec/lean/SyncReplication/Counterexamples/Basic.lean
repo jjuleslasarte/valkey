@@ -64,8 +64,7 @@ def c6 := commitNext c5 0          -- committed on n0 and n1
 /-- The shared prefix, at min-sync-replicas = 1. -/
 theorem committed_run : (lts 1).MTr c0
     [.count 0 1, .makeElig 0 1, .append 0, .replicate 1, .ack 1, .commit 0] c6 :=
-  .stepL (Step.count c0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by decide)) <|
+  .stepL (Step.count c0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.makeElig c1 0 1 (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.append c2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide)) <|

@@ -24,8 +24,8 @@ namespace SyncReplication
 inductive StepNoReconcile (m : Nat) : State N → Action N → State N → Prop
   | step {s μ s'} : Step m s μ s' → StepNoReconcile m s μ s'
   | count (s : State N) (p r : N) : ThinksPrimary s p → r ≠ p → primaryOf s r = p →
-      ((s.known p).elig r = true → (s.known p).inc r = s.inc r) → s.sync p r = false →
-      s.commit p ≤ s.acked p r → StepNoReconcile m s (.count p r) (count s p r)
+      s.sync p r = false → s.commit p ≤ s.acked p r →
+      StepNoReconcile m s (.count p r) (count s p r)
 
 /-- The weakened protocol as a transition system. -/
 def ltsNoReconcile (m : Nat) : LTS (State N) (Action N) where
@@ -48,8 +48,7 @@ def r11 := makeElig r10 1 2        -- n2 eligible with an empty log
 theorem noReconcile_run : (ltsNoReconcile 1).MTr r0
     [.count 0 1, .makeElig 0 1, .append 0, .learn 1, .replicate 1, .ack 1, .commit 0,
      .takeover 1, .learn 2, .count 1 2, .makeElig 1 2] r11 :=
-  .stepL (.step (Step.count r0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by decide))) <|
+  .stepL (.step (Step.count r0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeElig r1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append r2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide))) <|
@@ -60,8 +59,7 @@ theorem noReconcile_run : (ltsNoReconcile 1).MTr r0
     (by decide)) (by decide) (by decide))) <|
   .stepL (.step (Step.takeover r7 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.learn r8 2 (by decide))) <|
-  .stepL (StepNoReconcile.count r9 1 2 (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by decide)) <|
+  .stepL (StepNoReconcile.count r9 1 2 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (.step (Step.makeElig r10 1 2 (by decide) (by decide) (by decide) (by decide))) <|
   .refl
 

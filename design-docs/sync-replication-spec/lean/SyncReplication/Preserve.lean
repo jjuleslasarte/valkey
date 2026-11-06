@@ -31,7 +31,7 @@ theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv
   | replicate r _ _ _ => exact invariant_replicate h r
   | ack r hne hpre hlt => exact invariant_ack h r hne hpre hlt
   | commit p hp _ hlen hcap => exact invariant_commit h p hp hlen hcap
-  | count p r hp hrp hf _ _ hle => exact invariant_count h p r hp hrp hf hle
+  | count p r hp hrp hf _ hle => exact invariant_count h p r hp hrp hf hle
   | makeElig p r hp hk hsy he => exact invariant_makeElig h hp hk hsy he
   | makeInelig p r hp hk he => exact invariant_makeInelig h hp hk he
   | learn n hk => exact invariant_learn h n hk
