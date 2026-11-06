@@ -373,6 +373,29 @@ renewing its lease. Proposed: stop echoing a replica's acks when its
 demotion starts, keep counting them, and wait out the lease from the last
 echoed ack before proposing the CAS. Not yet model-checked.
 
+## Leases: the read guarantee holds, and each lease rule is needed
+
+**Status:** proven in Lean (`SyncReplication.noStaleRead`, on the Lean branch): with
+the two leases of section 5 in the model in real time, and the clock-drift margin
+at least twice the drift bound, whenever a node may serve a linearizable read its
+log is exactly the committed history. For every min-sync value, any number of
+nodes, with restarts. This is the first evidence that the lease rules are
+sufficient: the TLC safe runs of `Leases.tla` never finished.
+
+Four runs show that each rule is needed (`SyncReplication.noWaitPrim_stale`,
+`noWaitRead_stale`, `grantAny_stale`, `smallMargin_stale`, matching TLC's
+`Leases_noWaitPrim`, `_noWaitRead`, `_noEchoSync`, `_smallMargin`): the takeover
+wait, the demotion wait, granting read leases only to eligible sync members
+(F10, tightened from "sync set" to "eligible with a matching incarnation"), and
+the margin bound.
+
+Two rules the model adds to the doc, both used by the proof: a restarted
+primary waits one read lease plus the margin before demoting anyone (the doc's
+restart rule covers takeover and reads, not demotion; a restarted primary has
+forgotten when it last heard from each replica); and read leases go only to
+eligible sync members with a matching incarnation. **Proposed doc change:**
+state both.
+
 ## F11. The doc's drift-margin wording is unsafe if read literally
 
 **Status:** raised independently by all 3 step 4 reviewers.
