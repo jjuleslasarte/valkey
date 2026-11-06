@@ -186,6 +186,12 @@ def commitNext (s : State Node) (p : Node) : State Node :=
 def count (s : State Node) (p r : Node) : State Node :=
   { s with sync := upd s.sync p (upd (s.sync p) r true) }
 
+/-- Uncount(p, r): `p` removes `r` from its sync set again, before `r` has become
+eligible ("if the replica falls behind or fails before step 4, the primary simply
+removes it from the commit calculation", design §4). -/
+def uncount (s : State Node) (p r : Node) : State Node :=
+  { s with sync := upd s.sync p (upd (s.sync p) r false) }
+
 /-- MakeEligible's configuration: next version, `r` eligible, `r`'s current
 incarnation recorded. -/
 def makeEligCfg (s : State Node) (r : Node) : Cfg Node :=
@@ -315,7 +321,8 @@ the protocol is a list of actions, so a counterexample's trace can be read off i
 statement. `restartPartial n k` labels both outcomes of a stale restore. -/
 inductive Action (Node : Type)
   | append (p : Node) | replicate (r : Node) | ack (r : Node) | commit (p : Node)
-  | count (p r : Node) | makeElig (p r : Node) | makeInelig (p r : Node) | learn (n : Node)
+  | count (p r : Node) | uncount (p r : Node) | makeElig (p r : Node) | makeInelig (p r : Node)
+  | learn (n : Node)
   | takeover (n : Node) | resync (r : Node) | restartEmpty (n : Node) | restartKeep (n : Node)
   | restartPartial (n : Node) (k : Nat)
 
@@ -346,6 +353,12 @@ inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
   to the catch-up point. -/
   | count (s p r) : ThinksPrimary s p → r ≠ p → primaryOf s r = p → s.sync p r = false →
       catchUpPoint s p ≤ s.acked p r → Step m s (.count p r) (count s p r)
+  /-- A primary that knows the latest configuration may drop a counted replica that is
+  not yet eligible (design §4: "if the replica falls behind or fails before step 4, the
+  primary simply removes it from the commit calculation"). A deposed primary may not:
+  the member it would drop may be the one whose frozen acknowledgement fences it. -/
+  | uncount (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true →
+      s.cfg.elig r = false → Step m s (.uncount p r) (uncount s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
   | makeElig (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.elig r = false →
       Step m s (.makeElig p r) (makeElig s p r)

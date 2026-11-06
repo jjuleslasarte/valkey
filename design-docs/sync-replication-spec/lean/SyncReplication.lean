@@ -7,3 +7,4 @@ import SyncReplication.Counterexamples.Incarnation
 import SyncReplication.Counterexamples.Survival
 import SyncReplication.Counterexamples.StaleRestore
 import SyncReplication.Counterexamples.MinSyncIncarnation
+import SyncReplication.Counterexamples.Uncount

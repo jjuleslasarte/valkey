@@ -97,6 +97,7 @@ theorem staleRestoreKeepsInc_loses  : ∃ s, (ltsStaleKeep 1).CanReach (init 0) 
     s.hist ≠ [] ∧ ∀ n, ¬ s.hist <+: s.log n
 theorem noSurvivor_loses          : ∃ s, (ltsNoSurv 1).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ (∀ n, ¬ s.hist <+: s.log n) ∧ (∀ n, ¬ IsAuthoritative s n)
+theorem uncountElig_unsafe        : ∃ s, (ltsUncountElig 1).CanReach (init 0) s ∧ ¬ Safety s
 theorem noIncWritable_oneCopy     : ∃ s, (ltsNoIncWritable 1).CanReach (init 0) s ∧
     ThinksPrimary s 0 ∧ 0 = s.cfg.prim ∧ WritableNoInc 1 s 0 ∧ s.commit 0 < (s.log 0).length ∧
     (∀ r, s.sync 0 r = true → s.commit 0 < s.acked 0 r) ∧
@@ -158,6 +159,7 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 | `ack r` | `r` does not consider itself primary; its log is a prefix of its primary's and longer than its recorded ack | primary records `acked p r := (log r).length`; `ackHigh r` raised to it |
 | `commit p` | `p` thinks it is primary, is writable, has an uncommitted entry, and every sync member has acknowledged past `commit p` | `commit p + 1`; `hist` extended if this offset is new; `ackHigh p` raised to the new commit point |
 | `count p r` | `p` thinks it is primary; `r ≠ p` follows `p`, is not counted, and has acknowledged `catchUpPoint s p` | `sync p r := true` |
+| `uncount p r` | `p` thinks it is primary and knows the latest configuration; `r` is counted and not eligible in `cfg` | `sync p r := false` |
 | `makeElig p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new version with `r` eligible and `inc r` recorded; `known p` updated |
 | `makeInelig p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `known p` updated; `sync p r := false` |
 | `learn n` | `n` does not know the latest configuration | `known n := cfg`; `sync n` emptied unless `n` is primary there |
@@ -224,7 +226,7 @@ the action is not unfolded in a preservation proof.
 ### Preservation (`Preserve/`, `Preserve.lean`)
 
 One file per subsystem of the design: `Replication.lean` (AppendWrite, Replicate, Ack,
-Resync), `Commit.lean` (Commit, Count), `Config.lean` (Learn, MakeEligible,
+Resync), `Commit.lean` (Commit, Count, Uncount), `Config.lean` (Learn, MakeEligible,
 MakeIneligible), `Failover.lean` (Takeover), `Restart.lean` (RestartEmpty,
 RestartKeep, RestartPartial). Every action with a non-trivial proof is proved one
 layer at a time, `config_X`, `repl_X`, `membership_X`, `commit_X`, `failover_X`,
@@ -297,6 +299,7 @@ and the robustness notes there:
 'SyncReplication.staleRestoreKeepsInc_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.staleRestoreKeepsInc_loses' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.noIncWritable_oneCopy' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.uncountElig_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
 ```
 
 These are Lean's standard axioms. There is no `sorryAx`. `Classical.choice` enters
@@ -307,22 +310,22 @@ type; `Quot.sound` through function extensionality.
 
 | File | Lines |
 |---|---|
-| `SyncReplication/Model.lean` | 422 |
+| `SyncReplication/Model.lean` | 433 |
 | `SyncReplication/Replies.lean` | 113 |
 | `SyncReplication/Invariant.lean` | 444 |
-| `SyncReplication/Contracts.lean` | 607 |
+| `SyncReplication/Contracts.lean` | 616 |
 | `SyncReplication/Preserve/Replication.lean` | 343 |
-| `SyncReplication/Preserve/Commit.lean` | 324 |
+| `SyncReplication/Preserve/Commit.lean` | 421 |
 | `SyncReplication/Preserve/Config.lean` | 592 |
 | `SyncReplication/Preserve/Failover.lean` | 295 |
 | `SyncReplication/Preserve/Restart.lean` | 859 |
 | `SyncReplication/Preserve.lean` | 55 |
 | `SyncReplication/Safety.lean` | 43 |
-| `SyncReplication/Durability.lean` | 246 |
-| `SyncReplication/Counterexamples/` (8 files) | 572 |
+| `SyncReplication/Durability.lean` | 248 |
+| `SyncReplication/Counterexamples/` (9 files) | 641 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 5,360 |
+| total | 5,562 |
 
 `lake build` of the whole tree takes about 15 seconds warm on a laptop-class
 machine (1,030 jobs including Mathlib's and CSLib's prebuilt modules).
@@ -435,6 +438,7 @@ history is `[1]`, on n0 and n1).
 | `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeElig 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeElig 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].prim = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeElig 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
+| `Uncount.lean` | `StepUncountElig` | Uncount of an eligible counted replica | count 0 1, makeElig 0 1, count 0 2, makeElig 0 2, append 0, replicate 2, ack 2, **uncount 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, count 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
 | `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |
 

@@ -72,6 +72,10 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   primary's catch-up point: the committed offset, or, for a primary that has not yet
   committed the log it holds (a new primary, or one that restarted with its data),
   the end of that log.
+- **Early removal.** Between steps 2 and 4, the primary may drop the counted replica
+  again if it falls behind or fails (design §4). Only the current primary does this,
+  and only for a replica that is not yet eligible; once a replica is eligible it
+  leaves the sync replica set through demotion alone.
 - **Demotion flow.** The primary commits the replica as ineligible and stops counting
   it, in one step.
 - **Failover.** An eligible replica that knows the latest configuration takes over
@@ -215,7 +219,7 @@ and demotion.
   it and has acknowledged at least the catch-up point.
 - `eligFol`: an eligible replica that follows an old primary is still eligible in that
   primary's configuration. This is why a full resync never truncates an eligible
-  replica.
+  replica, and why early removal never drops one.
 
 **Commit** (`CommitInvariant`, design §2 and §5). Committed prefixes agree with the
 committed history.
@@ -285,11 +289,11 @@ What these say about the design's own wording is in Appendix B.
 | Properties 3 and 4 (no acknowledged write lost) | `SyncReplication.ackSafety`, `ackedHeld` |
 | Property 5 (two copies with `min-sync-replicas ≥ 1`) | `SyncReplication.commit_two_copies` |
 | Lease margin and durations | `Lease/` |
-| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses` |
+| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses` |
 
-Size: the model is 535 lines (422 for the protocol, 113 for the held-reply layer),
-the invariant and its lemmas 444, the per-action contracts 607, and the preservation
-proofs 2,468, so the proof is about six lines per line of model. Lean checks the
+Size: the model is 546 lines (433 for the protocol, 113 for the held-reply layer),
+the invariant and its lemmas 444, the per-action contracts 616, and the preservation
+proofs 2,566, so the proof is about six lines per line of model. Lean checks the
 whole of `SyncReplication` in about 15 seconds on a laptop-class machine.
 
 [lean/LEAN.md](lean/LEAN.md) has every theorem statement and the details of the
@@ -324,11 +328,6 @@ encoding.
 - **Replica committed offsets.** Only a primary advances its committed offset;
   `REPLCONF COMMIT` is not modelled. Property 2 therefore constrains committed
   offsets a node reached while it was primary.
-- **Removing a counted replica before it is eligible.** Design §4 lets the primary
-  drop a replica that falls behind between steps 2 and 4 from the commit calculation.
-  The model has no such action: a counted replica leaves the sync replica set only by
-  demotion, by the primary learning a new configuration or restarting, or by its own
-  restart. The model has fewer behaviours here than the design.
 - **The Cluster V2 bus is assumed correct** and modelled as a compare-and-set register
   (section 1).
 - **Messages are abstracted** (section 1). An acknowledgement carries the replica's
@@ -350,7 +349,12 @@ encoding.
   the node to re-commit what it holds before serving (its catch-up point is set to
   the end of its log), and so does a takeover; the design does not specify this. A takeover also starts the new
   primary's sync replica set as the eligible replicas with matching incarnations,
-  which the design implies through its ordering rules but does not state. (d) The acknowledgement high-water mark `ackHigh` survives a
+  which the design implies through its ordering rules but does not state. (e) Early
+  removal of a counted replica (design §4) is allowed only to a primary that knows the
+  latest configuration. A deposed primary that has not learned of the takeover may
+  not drop a member: the member it would drop could be the one whose frozen
+  acknowledgement fences it. The design does not say this; it describes early removal
+  from the live primary's point of view. (d) The acknowledgement high-water mark `ackHigh` survives a
   restart with data and is lost with a new incarnation; the model assumes the
   implementation persists it with the data it covers. A stale file is modelled as a
   prefix of the log; a file that is not a prefix (a diverged tail) is not modelled.
@@ -375,21 +379,20 @@ finite case corresponds to a real cluster.
 
 ### Future work
 
-Reads: add the lease protocol to the model and prove a no-stale-read property. The
-early removal of a counted, not-yet-eligible replica (section 5).
+Reads: add the lease protocol to the model and prove a no-stale-read property.
 
 ## 6. How the proof is organized in code
 
 | Path | Contents | Lines |
 |---|---|---|
-| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 422 |
+| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 433 |
 | `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 113 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 444 |
-| `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 607 |
-| `lean/SyncReplication/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,468 |
+| `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
+| `lean/SyncReplication/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,566 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
-| `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 246 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation | 572 |
+| `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 248 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation | 641 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
 | `lean/Check.lean` | Prints the axioms of every theorem | |
@@ -723,6 +726,18 @@ follow fsync. Two weaker rules were checked by TLC and fail: the node's own comm
 offset (a replica's is 0) and the acknowledgements it sent as a replica (a primary's
 commits are not among them; the initial primary has sent none). Counterexample:
 `staleRestoreKeepsInc_unsafe` (8 steps) and `staleRestoreKeepsInc_loses` (9).
+
+**Early removal only before eligibility** (`Counterexamples/Uncount.lean`). Design §4
+says a primary may drop a counted replica that falls behind or fails "before step 4".
+The qualifier is load-bearing. Scenario: n0 promotes n1 and n2 and writes; n2
+acknowledges; n0 drops n1 from its sync replica set and commits with n2's
+acknowledgement only. n1 is eligible and authoritative without the committed write.
+Rule: a replica that is already eligible leaves the sync replica set only through
+demotion. This is the design's own second ordering rule; the entry records that early
+removal must respect it. Counterexample: `uncountElig_unsafe` (9 steps,
+`min-sync-replicas = 1`). The model also restricts early removal to a primary that
+knows the latest configuration (section 5); no counterexample shows that restriction
+is needed, and the proof uses it.
 
 **Survival condition** (`Counterexamples/Survival.lean`). This is an assumption the
 design already makes, recorded here because the guarantee depends on it. Without it,

@@ -247,6 +247,15 @@ theorem count_sync (p r q x : Node) : (count s p r).sync q x = (s.sync q x || (q
     · simp [count, upd, hx]
   · simp [count, upd, hq]
 
+/-- Uncount changes only `p`'s sync replica set, where `r` is no longer counted. -/
+theorem uncount_sync (p r q x : Node) :
+    (uncount s p r).sync q x = (s.sync q x && !(q = p ∧ x = r)) := by
+  by_cases hq : q = p
+  · subst hq; by_cases hx : x = r
+    · subst hx; simp [uncount, upd]
+    · simp [uncount, upd, hx]
+  · simp [uncount, upd, hq]
+
 /-- The high-water mark only grows: Ack raises the replica's to its log length. -/
 theorem ack_ackHigh_le (r x : Node) : s.ackHigh x ≤ (ack s r).ackHigh x := by
   show s.ackHigh x ≤ upd s.ackHigh r (max (s.ackHigh r) (s.log r).length) x

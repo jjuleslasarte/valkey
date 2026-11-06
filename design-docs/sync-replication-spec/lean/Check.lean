@@ -11,3 +11,4 @@ import SyncReplication
 #print axioms SyncReplication.staleRestoreKeepsInc_unsafe
 #print axioms SyncReplication.staleRestoreKeepsInc_loses
 #print axioms SyncReplication.noIncWritable_oneCopy
+#print axioms SyncReplication.uncountElig_unsafe

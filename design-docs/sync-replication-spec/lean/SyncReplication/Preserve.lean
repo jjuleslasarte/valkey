@@ -12,7 +12,7 @@ One line per action, each pointing at the subsystem file that proves it:
 | Action | File |
 |---|---|
 | AppendWrite, Replicate, Ack, Resync | `Preserve/Replication.lean` |
-| Commit, Count | `Preserve/Commit.lean` |
+| Commit, Count, Uncount | `Preserve/Commit.lean` |
 | Learn, MakeEligible, MakeIneligible | `Preserve/Config.lean` |
 | Takeover | `Preserve/Failover.lean` |
 | RestartEmpty, RestartKeep, RestartPartial | `Preserve/Restart.lean` |
@@ -32,6 +32,7 @@ theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv
   | ack r hne hpre hlt => exact invariant_ack h r hne hpre hlt
   | commit p hp _ hlen hcap => exact invariant_commit h p hp hlen hcap
   | count p r hp hrp hf _ hle => exact invariant_count h p r hp hrp hf hle
+  | uncount p r hp hk hs he => exact invariant_uncount h p r hp hk hs he
   | makeElig p r hp hk hsy he => exact invariant_makeElig h hp hk hsy he
   | makeInelig p r hp hk he => exact invariant_makeInelig h hp hk he
   | learn n hk => exact invariant_learn h n hk

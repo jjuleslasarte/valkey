@@ -321,4 +321,101 @@ theorem invariant_count : Invariant (count s p r) where
 
 end count
 
+section uncount
+
+variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p) (hkl : KnowsLatest s p)
+  (hs : s.sync p r = true) (he : s.cfg.elig r = false)
+
+include h hp hkl hs he
+
+/-- `p` knows the latest configuration, so it is the current primary. -/
+theorem uncount_prim : p = s.cfg.prim := by
+  have hkn : s.known p = s.cfg := h.knownEq p hkl
+  have := hp.1; rw [hkn] at this; exact this.symm
+
+/-- Uncount changes no configuration. -/
+theorem config_uncount : ConfigInvariant (uncount s p r) :=
+  (h.toConfigInvariant).frame rfl rfl rfl
+
+/-- Removing a sync replica only weakens the commit rule's obligation. -/
+theorem repl_uncount : ReplInvariant (uncount s p r) := by
+  have hS := uncount_sync (s := s) p r
+  exact {
+  noSelfSync := by intro q; show (uncount s p r).sync q q = false; rw [hS, h.noSelfSync q]; simp
+  ackedPrim := h.ackedPrim
+  ackedLe := h.ackedLe
+  ackHolds := h.ackHolds
+  ackedHigh := h.ackedHigh
+  syncCommit := by
+    intro q x hq hx
+    change (uncount s p r).sync q x = true at hx
+    rw [hS] at hx; simp at hx
+    exact h.syncCommit q x hq hx.1 }
+
+/-- `r` was not eligible in `p`'s configuration, so no eligible replica stops being
+counted. -/
+theorem membership_uncount : MembershipInvariant (uncount s p r) := by
+  have hS := uncount_sync (s := s) p r
+  exact {
+  eligSync := by
+    intro q x hq hex hi
+    change (s.known q).elig x = true at hex
+    change (s.known q).inc x = s.inc x at hi
+    show (uncount s p r).sync q x = true
+    rw [hS]; simp only [Bool.and_eq_true, h.eligSync q x hq hex hi, Bool.not_eq_true', decide_eq_false_iff_not, true_and]
+    rintro ⟨e1, e2⟩; subst e1; subst e2
+    rw [h.knownEq _ hkl] at hex; rw [hex] at he; exact absurd he (by decide)
+  syncNew := by
+    intro x hx hex
+    change (uncount s p r).sync s.cfg.prim x = true at hx
+    rw [hS] at hx; simp at hx
+    exact h.syncNew x hx.1 hex
+  eligFol := h.eligFol }
+
+/-- Uncount changes no commit point, catch-up point or history. -/
+theorem commit_uncount : CommitInvariant (uncount s p r) :=
+  (h.toCommitInvariant).frame rfl rfl rfl rfl rfl rfl rfl
+
+/-- Only the current primary drops members, and the current primary is not deposed, so
+every fence is untouched. -/
+theorem failover_uncount : FailoverInvariant (uncount s p r) := by
+  have hS := uncount_sync (s := s) p r
+  exact {
+  stale := by
+    intro q hq hv
+    have hv' : (s.known q).ver < s.cfg.ver := hv
+    have hF := h.stale q hq hv'
+    obtain ⟨w, ⟨hw1, hw2⟩, hwF⟩ := hF.attained
+    have hwr : ¬ (q = p ∧ w = r) := by
+      rintro ⟨e1, _⟩; subst e1
+      exact absurd hv' (by unfold KnowsLatest at hkl; omega)
+    refine Fenced.of_left (w := w) ⟨by rw [hS, hw1]; simp only [Bool.true_and, Bool.not_eq_true', decide_eq_false_iff_not]; exact hwr, hw2⟩ ?_ ?_ ?_ ?_
+    · intro hpa; show s.acked q w ≤ s.recon s.cfg.prim; rw [hwF]; exact hF.reconLe hpa
+    · intro hpa; show (s.log q).take (s.acked q w) <+: s.log s.cfg.prim; rw [hwF]; exact hF.primHolds hpa
+    · intro hpa; show s.acked q w ≤ s.ackHigh s.cfg.prim; rw [hwF]; exact hF.primAck hpa
+    · intro m hm hi
+      show ((s.log q).take (s.acked q w) <+: s.log m ∧ s.acked q w ≤ s.ackHigh m) ∨
+        ((uncount s p r).sync q m = true ∧ (s.known m).prim = q)
+      rw [hwF]
+      rcases hF.eligHolds m hm hi with d | ⟨d1, d2⟩
+      · exact Or.inl d
+      · right; refine ⟨?_, d2⟩
+        rw [hS, d1]; simp only [Bool.true_and, Bool.not_eq_true', decide_eq_false_iff_not]
+        rintro ⟨e1, _⟩; subst e1
+        exact absurd hv' (by unfold KnowsLatest at hkl; omega)
+  authEx := h.authEx }
+
+/-- Uncount moves no log. -/
+theorem ehc_uncount : EligibleHoldsCommitted (uncount s p r) := h.ehc
+
+theorem invariant_uncount : Invariant (uncount s p r) where
+  toConfigInvariant := config_uncount h p r hp hkl hs he
+  toReplInvariant := repl_uncount h p r hp hkl hs he
+  toMembershipInvariant := membership_uncount h p r hp hkl hs he
+  toCommitInvariant := commit_uncount h p r hp hkl hs he
+  toFailoverInvariant := failover_uncount h p r hp hkl hs he
+  ehc := ehc_uncount h p r hp hkl hs he
+
+end uncount
+
 end SyncReplication
