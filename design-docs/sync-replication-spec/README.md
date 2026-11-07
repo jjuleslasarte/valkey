@@ -372,8 +372,11 @@ What these say about the design's own wording is in Appendix B.
 | Properties 1 and 2 under the lease layer | `SyncReplication.lease_safety` |
 | Lease margin and durations | `Lease/` |
 | Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `grantNoInc_stale`, `smallMargin_stale` |
+| Property 6 is not vacuous: the primary holding its lease from an eligible replica may serve a read | `SyncReplication.primCanRead_reachable` |
+| Property 6 is not vacuous: a replica holding a read lease may serve a read | `SyncReplication.replCanRead_reachable` |
+| A new primary may demote a replica it promoted itself without the post-takeover wait | `SyncReplication.demoteNew_reachable` |
 
-Size: the model is 878 lines (451 for the protocol, 113 for the held-reply layer,
+Size: the model is 899 lines (456 for the protocol, 129 for the held-reply layer,
 314 for the lease layer), the invariants and their lemmas 1,499 (444 for replication,
 1,055 for leases, which includes their preservation), the per-action contracts 616,
 and the replication preservation proofs 2,566. Lean checks the whole of
@@ -508,14 +511,15 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 | `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 314 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 444 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
-| `lean/SyncReplication/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,566 |
+| `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,566 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 249 |
 | `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,055 |
 | `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation; reachability witnesses for the read rule and the narrowed demotion wait | 1,054 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
-| `lean/Check.lean` | Prints the axioms of every theorem | |
+| `lean/Check.lean` | Prints the axioms of the 24 `SyncReplication` theorems | |
+| `lean/LeaseCheck.lean` | Prints the axioms of the 12 `Lease` theorems | |
 
 Lean 4.35 with Mathlib `v4.35.0`, used for list-prefix lemmas and for `Set.encard`
 in `Writable`, and CSLib for the transition-system vocabulary (Appendix A.8).
@@ -543,7 +547,8 @@ trace, with every guard evaluated by `decide`.
 ```
 cd lean
 ../tools/lean.sh lake build                 # builds every proof
-../tools/lean.sh lake env lean Check.lean   # prints the axioms of every theorem
+../tools/lean.sh lake env lean Check.lean        # axioms of the 24 SyncReplication theorems
+../tools/lean.sh lake env lean LeaseCheck.lean   # axioms of the 12 Lease theorems
 ```
 
 `tools/lean.sh` runs the Lean toolchain in a container. Unpack the toolchain into

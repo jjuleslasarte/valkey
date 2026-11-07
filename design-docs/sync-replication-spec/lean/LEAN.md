@@ -26,8 +26,8 @@ lean/
                                 MinSyncIncarnation, Survival, StaleRestore, Leases
     Lists.lean                  list-prefix lemmas
   Lease/                        Additive, Rate, Durations
-  Check.lean                    #print axioms for every theorem
-  LeaseCheck.lean               the same for Lease/
+  Check.lean                    #print axioms for the 24 SyncReplication theorems
+  LeaseCheck.lean               the same for the 12 Lease/ theorems
 ```
 
 Dependency order: `Lists` → `Model` → `Replies`, `Invariant` → `Contracts` →
@@ -142,6 +142,26 @@ theorem noIncWritable_oneCopy     : ∃ s, (ltsNoIncWritable 1).CanReach (init 0
 
 The last one mirrors `commit_two_copies` with `Writable` replaced by `WritableNoInc`
 (no incarnation condition): its hypotheses hold and its conclusion fails.
+
+### Reachability witnesses (`Counterexamples/Leases.lean`)
+
+Runs of the protocol itself, no rule removed, with `P0` (primary lease 5, read lease 2,
+drift 1, margin 2), the parameters the lease counterexamples also use.
+
+```lean
+theorem primCanRead_reachable : ∃ a, LeaseReachable 0 P0 0 a ∧ PrimCanRead P0 a 0 ∧ (a.core.known 0).eligible 1 = true
+theorem replCanRead_reachable : ∃ a, LeaseReachable 0 P0 0 a ∧ ReplCanRead P0 a 1
+theorem demoteNew_reachable   : ∃ a,
+    LeaseReachable 0 P0 0 a ∧ a.core.cfg.primary = 1 ∧ a.core.cfg.eligible 2 = false ∧ a.primarySince 1 = some a.now
+```
+
+- `primCanRead_reachable`: the primary may serve a linearizable read while it holds its
+  lease from an eligible replica, so the primary half of `noStaleRead` is not vacuous.
+- `replCanRead_reachable`: after one echoed acknowledgement a replica holds a valid read
+  lease and may serve a read, so the replica half is not vacuous.
+- `demoteNew_reachable`: a new primary demotes a replica it promoted itself with no
+  time passed since its takeover, so the post-takeover demotion wait applies only to replicas
+  of the replaced configuration, as the design says.
 
 ### Lease timing (`Lease/`)
 
@@ -452,7 +472,7 @@ type; `Quot.sound` through function extensionality.
 | total | 7,371 (plus the two root imports, 15 lines) |
 
 `lake build` of the whole tree takes about 20 seconds warm on a laptop-class
-machine (1,030 jobs including Mathlib's and CSLib's prebuilt modules).
+machine (1,035 jobs including Mathlib's and CSLib's prebuilt modules).
 
 ## Reproduce
 
