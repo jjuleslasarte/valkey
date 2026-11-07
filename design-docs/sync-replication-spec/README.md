@@ -459,9 +459,7 @@ encoding.
   has also forgotten which configuration it took over from. (b) Read leases are
   granted only to sync members that are eligible with a matching incarnation. The
   design says "sync replica". Appendix B shows that all three parts are needed, the
-  incarnation match only when the read lease may outlast the primary lease, which the
-  design's "Lease durations" rule forbids; whether it is needed under that rule is
-  open. (c) In the other direction, the design's restart rule delays reads for
+  incarnation match within the design's duration rule. (c) In the other direction, the design's restart rule delays reads for
   one lease after a restart; the model only clears the restarted node's leases, so it
   may read as soon as it holds a new one. The proof shows that suffices, so the read
   half of the restart rule is not needed for safety.
@@ -881,14 +879,13 @@ run ending in a stale linearizable read at `min-sync-replicas = 0`:
   steps): a counted replica that is not yet eligible can be dropped by early removal
   with no wait, then serve a stale read on its lease. The design says "sync replica";
   these two runs are the reason to read that as the eligible members. *And only to
-  ones with a matching incarnation* (`grantNoInc_stale`, 20 steps): a replica that
+  ones with a matching incarnation* (`grantNoInc_stale`, 21 steps): a replica that
   restarted empty stays listed as eligible and may be counted again, but a new primary
   never counts or waits for it; granted a read lease, it serves a stale read once the
-  new primary commits. This run needs the read lease to outlast the primary lease
-  (read lease 10, primary lease 5), which the design's "Lease durations" rule forbids.
-  Under that rule, whether the incarnation match is needed is open: removing it breaks
-  the proof at the step "a valid read lease makes its holder authoritative", and no
-  run under the rule has been found.
+  new primary commits. The run is within the design's "Lease durations" rule (primary
+  lease 6, read lease 3, drift 1, margin 2). The rule does not help because the gap
+  between the latest grant the old primary may make and the earliest takeover is only
+  `margin - 2 · drift`, zero at the margin bound, whatever the primary lease is.
 - *The margin is at least twice the drift* (`smallMargin_stale`, 12 steps): with
   margin 1 and drift 1 and every rule kept, the taker's wait ends while the deposed
   primary, its clock a drift slow, still believes its lease valid.
