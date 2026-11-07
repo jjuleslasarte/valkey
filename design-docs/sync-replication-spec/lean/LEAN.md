@@ -331,9 +331,16 @@ current primary; `lease_over_of_guards` turns the two demotion waits into "the r
 lease is not valid"; `margin ≥ 2 · drift` is consumed in exactly those two lemmas.
 `primCanRead_reachable` and `replCanRead_reachable` (`Counterexamples/Leases.lean`)
 show the read rule's premises are reachable, so `noStaleRead` is not vacuous.
-Preservation is one theorem per action in the same file, with
-`leaseInvariant_withCore`, `_recvData_noEcho`, `_recvAck` and `_restart` as the shared
-frames.
+Preservation is one theorem per action in the same file. Frame lemmas carry the
+conjuncts an action does not touch: `leaseInvariant_frame` (a replication step that
+moves no lease state: data messages, resync, the plain actions), `deposed_frame` and
+`deposed_cfgBump` (the deposed primary's witness survives a replication step, or a
+configuration change by the current primary), `cleared_rows` (a node's lease rows are
+cleared: takeover, restart), `committedView_reset` (a node's view starts over: resync,
+restart), `primaryTraffic_bump` (a node's traffic timer restarts). The per-action
+proofs are then the conjuncts the action moves: the read-lease renewal in
+`leaseInvariant_heartbeatGrant`, the new witness and the bound on existing read leases
+in `_takeover`, the two demotion waits in `_demote`.
 
 ### Durability (`Durability.lean`)
 
@@ -418,8 +425,8 @@ type; `Quot.sound` through function extensionality.
 | File | Lines |
 |---|---|
 | `SyncReplication/Model.lean` | 451 |
-| `SyncReplication/Leases.lean` | 337 |
-| `SyncReplication/LeaseInvariant.lean` | 1,145 |
+| `SyncReplication/Leases.lean` | 314 |
+| `SyncReplication/LeaseInvariant.lean` | 1,055 |
 | `SyncReplication/Replies.lean` | 113 |
 | `SyncReplication/Invariant.lean` | 444 |
 | `SyncReplication/Contracts.lean` | 616 |
@@ -434,7 +441,7 @@ type; `Quot.sound` through function extensionality.
 | `SyncReplication/Counterexamples/` (10 files) | 1,048 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 7,456 (plus the two root imports, 15 lines) |
+| total | 7,343 (plus the two root imports, 15 lines) |
 
 `lake build` of the whole tree takes about 20 seconds warm on a laptop-class
 machine (1,030 jobs including Mathlib's and CSLib's prebuilt modules).

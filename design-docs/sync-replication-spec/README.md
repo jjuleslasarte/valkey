@@ -369,9 +369,9 @@ What these say about the design's own wording is in Appendix B.
 | Lease margin and durations | `Lease/` |
 | Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `grantNoInc_stale`, `smallMargin_stale` |
 
-Size: the model is 901 lines (451 for the protocol, 113 for the held-reply layer,
-337 for the lease layer), the invariants and their lemmas 1,589 (444 for replication,
-1,145 for leases, which includes their preservation), the per-action contracts 616,
+Size: the model is 878 lines (451 for the protocol, 113 for the held-reply layer,
+314 for the lease layer), the invariants and their lemmas 1,499 (444 for replication,
+1,055 for leases, which includes their preservation), the per-action contracts 616,
 and the replication preservation proofs 2,566. Lean checks the whole of
 `SyncReplication` in about 20 seconds on a laptop-class machine.
 
@@ -501,13 +501,13 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 |---|---|---|
 | `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 451 |
 | `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 113 |
-| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 337 |
+| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 314 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 444 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
 | `lean/SyncReplication/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,566 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 248 |
-| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,145 |
+| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,055 |
 | `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation; reachability witnesses for the read rule and the narrowed demotion wait | 1,048 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |

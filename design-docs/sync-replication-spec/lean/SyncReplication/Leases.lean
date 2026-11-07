@@ -4,38 +4,17 @@ import SyncReplication.Safety
 # Leases and linearizable reads
 
 The replication model (`SyncReplication.Step`) plus the two leases of design §5, in
-real time, and the rule for when a node may serve a linearizable read.
-
-## In prose
-
-Leases ride on replication traffic. A **primary lease** is held by the primary from
-each eligible replica: it runs from when the primary sent the data an acknowledgement
-confirms, and the replica promises not to take over until one lease duration after it
-last received traffic from the primary. A **read lease** is held by a sync replica
-from the primary: it runs from when the replica sent the acknowledgement that a
-`REPLCONF COMMIT` echoes, and the primary promises not to commit without that replica
-until one lease duration after it last received an acknowledgement from it.
-
-A primary may serve a linearizable read while it holds a valid primary lease from
-every eligible replica it knows of and has nothing uncommitted. A sync replica may
-serve one while it holds a valid read lease and has nothing uncommitted.
-
-The theorem (`SyncReplication.noStaleRead`, in `LeaseInvariant.lean`): whenever a
-node may serve a linearizable read, its log is exactly the committed history. It
-needs the clock-drift margin to be at least twice the drift bound.
-
-## Time and clocks
-
-`now` is real time in ticks. Nodes read local monotonic clocks; over one lease
-interval the local elapsed time differs from the real one by at most `drift`. Each
-side takes its worst case: a holder believes its lease valid while
-`now - start < dur - margin + drift` (its clock may run slow), a grantor's promise is
-over once `now - recv ≥ dur - drift` (its clock may run fast). `margin` is the
-clock-drift margin the design subtracts; `Lease/Additive.lean` proves these two
-worst cases are the right reading of the design's drift model.
+real time, and the rule for when a node may serve a linearizable read. The protocol
+as modelled is described in prose in the README (§1, "Leases" and "Linearizable
+reads"); the timing rules and the drift model in README §3.2 and `Lease/Additive.lean`.
+The theorem, `SyncReplication.noStaleRead`, is in `LeaseInvariant.lean`.
 
 ## Encoding choices
 
+- `now` is real time in ticks. A holder believes its lease valid while
+  `now - start < dur - margin + drift` (its clock may run slow, `HolderValid`); a
+  grantor's promise is over once `now - recv ≥ dur - drift` (its clock may run fast,
+  `GrantorOver`). `None` as a lease start means "no lease".
 - Messages are instant, as in the replication model. A lease's start is therefore
   the real time of the event it is measured from, which is the tightest case for a
   lease argument: delivery delay only widens the gap between the holder's expiry and
@@ -45,16 +24,13 @@ worst cases are the right reading of the design's drift model.
   echo rides on a separate `heartbeat`. Since a heartbeat may follow any data
   message immediately, this reaches the same states as putting the echo on both.
 - Lease state is in memory: every restart clears the node's leases and committed view
-  and restarts its takeover timer and its demotion timer. The design's restart rule ("a
-  node that restarts waits one full lease duration before it attempts a takeover or
-  serves reads under a lease") is applied to takeover, and to demotion too (see
-  `primarySince`); for reads the model only clears the leases, so a restarted node may
-  read as soon as it holds a new one. The proof shows that suffices.
+  and restarts its takeover timer and its demotion timer (`primarySince`). For reads
+  the model only clears the leases, so a restarted node may read as soon as it holds
+  a new one; the proof shows that suffices.
 - After a takeover, the one-read-lease-plus-margin wait blocks demotion only of
   replicas of the configuration the takeover replaced (`oldEligible`), as the design
   says. After a restart it blocks demotion of every replica: the node has forgotten
   which configuration it took over from.
-- `None` as a lease start means "no lease".
 -/
 
 open Cslib
