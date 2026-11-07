@@ -371,10 +371,11 @@ What these say about the design's own wording is in Appendix B.
 | Property 6 (no stale linearizable read, `margin ≥ 2 · drift`) | `SyncReplication.noStaleRead` |
 | Properties 1 and 2 under the lease layer | `SyncReplication.lease_safety` |
 | Lease margin and durations | `Lease/` |
-| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `grantNoInc_stale`, `smallMargin_stale` |
+| Each rule in Appendix B with a counterexample is needed (`uncountDeposed_unsafe`: only in the latest-configuration reading) | `SyncReplication.noReconcile_unsafe`, `noCatchUp_unsafe`, `resyncEligible_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `uncountDeposed_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `grantNoInc_stale`, `smallMargin_stale`, `restartKeepsReadLease_stale`, `restartNoDemotionWait_stale`, `takeoverNoDemotionWait_stale`, `grantWithoutPrimaryLease_stale` |
 | Property 6 is not vacuous: the primary holding its lease from an eligible replica may serve a read | `SyncReplication.primCanRead_reachable` |
 | Property 6 is not vacuous: a replica holding a read lease may serve a read | `SyncReplication.replCanRead_reachable` |
 | A new primary may demote a replica it promoted itself without the post-takeover wait | `SyncReplication.demoteNew_reachable` |
+| Resync's guard that the replica is not counted excludes a reachable state (no counterexample without it) | `SyncReplication.countedDiverged_reachable` |
 
 Size: the model is 899 lines (456 for the protocol, 129 for the held-reply layer,
 314 for the lease layer), the invariants and their lemmas 1,499 (444 for replication,
@@ -453,7 +454,9 @@ encoding.
   latest configuration. A deposed primary that has not learned of the takeover may
   not drop a member: the member it would drop could be the one whose frozen
   acknowledgement fences it. The design does not say this; it describes early removal
-  from the live primary's point of view. (f) The acknowledgement high-water mark
+  from the live primary's point of view. Appendix B shows the restriction is needed
+  only when the eligibility check reads the latest configuration; with the check in
+  the primary's own configuration, no run shows it is needed. (f) The acknowledgement high-water mark
   `ackHigh` survives a restart with data and is lost with a new incarnation; the model
   assumes the implementation persists it with the data it covers. A stale file is
   modelled as a prefix of the log; a file that is not a prefix (a diverged tail) is not
@@ -463,7 +466,8 @@ encoding.
   replicas of the configuration it replaced. The design's restart rule covers takeover
   and serving reads; the model applies it to demotion too, because a restarted primary
   has forgotten when it last heard from each replica, and to every replica, because it
-  has also forgotten which configuration it took over from. (b) Read leases are
+  has also forgotten which configuration it took over from. Appendix B shows the wait
+  is needed. (b) Read leases are
   granted only to sync members that are eligible with a matching incarnation. The
   design says "sync replica". Appendix B shows that all three parts are needed, the
   incarnation match within the design's duration rule. (c) In the other direction, the design's restart rule delays reads for
@@ -515,10 +519,10 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 249 |
 | `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,055 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation; reachability witnesses for the read rule and the narrowed demotion wait | 1,054 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,684 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
-| `lean/Check.lean` | Prints the axioms of the 24 `SyncReplication` theorems | |
+| `lean/Check.lean` | Prints the axioms of the 32 `SyncReplication` theorems | |
 | `lean/LeaseCheck.lean` | Prints the axioms of the 12 `Lease` theorems | |
 
 Lean 4.35 with Mathlib `v4.35.0`, used for list-prefix lemmas and for `Set.encard`
@@ -547,7 +551,7 @@ trace, with every guard evaluated by `decide`.
 ```
 cd lean
 ../tools/lean.sh lake build                 # builds every proof
-../tools/lean.sh lake env lean Check.lean        # axioms of the 24 SyncReplication theorems
+../tools/lean.sh lake env lean Check.lean        # axioms of the 32 SyncReplication theorems
 ../tools/lean.sh lake env lean LeaseCheck.lean   # axioms of the 12 Lease theorems
 ```
 
@@ -770,7 +774,9 @@ branch, which also records the findings that are explored in TLA+ only.
 Each item has a Lean counterexample (`lean/SyncReplication/Counterexamples/`): a run
 of the model with the rule removed, every guard checked by `decide`, ending in a
 state that violates the guarantee, or, for the survival condition and the F13 loss
-run, a state where no node's log holds the committed history. The weakened step relation is named in the
+run, a state where no node's log holds the committed history. The entries headed
+"not shown needed" are the exceptions: the proof uses those rules, and no run without
+them is known. The weakened step relation is named in the
 theorem (`StepNoReconcile`, `ReplyStepNoFence`, ...), so the statement says exactly which
 rule the run does without.
 
@@ -861,8 +867,8 @@ Rule: a replica that is already eligible leaves the sync replica set only throug
 demotion. This is the design's own second ordering rule; the entry records that early
 removal must respect it. Counterexample: `uncountElig_unsafe` (9 steps,
 `min-sync-replicas = 1`). The model also restricts early removal to a primary that
-knows the latest configuration (section 5); no counterexample shows that restriction
-is needed, and the proof uses it.
+knows the latest configuration (section 5); below, that restriction is not shown
+needed in the design's reading.
 
 **Survival condition** (`Counterexamples/Survival.lean`). This is an assumption the
 design already makes, recorded here because the guarantee depends on it. Without it,
@@ -872,6 +878,76 @@ node is authoritative. Because no node is authoritative, property 1 holds only
 vacuously in that state, so the theorem states the loss directly: the committed
 history is non-empty and no node's log holds it. Counterexample: `noSurvivor_loses`
 (9 steps). The design calls this case correlated data loss.
+
+**Replication rules the proof uses, each shown needed.** These rules are in the design
+or in the model as described in section 1; each entry deletes one and gives the run
+that breaks property 1 without it.
+- *Count waits for the catch-up point* (`Counterexamples/CatchUp.lean`): a primary
+  counts a replica only once it has acknowledged up to the primary's catch-up point,
+  which is the design's committed offset (promotion step 1) once the primary has
+  reconciled. Scenario: a write commits on n0 and n1; n0 counts n2, which has
+  acknowledged nothing, and makes it eligible. n2 is authoritative with an empty log.
+  The design's own guard forbids the Count, so the run is about the design's half of
+  the rule. Counterexample: `noCatchUp_unsafe` (8 steps, `min-sync-replicas = 1`).
+  F1's run is a second one, for the reconciliation half: Count measured against the
+  primary's own commit point is a special case of Count with no guard
+  (`stepNoCatchUp_of_stepNoReconcile`).
+- *Resync only a replica that is not eligible* (`Counterexamples/ResyncEligible.lean`):
+  a primary that restarts from a stale persistence file can hold less than an
+  eligible replica that still follows it. Scenario: a write commits on n0 and n1; n0
+  restarts from a file holding none of its log and takes a new incarnation (n1
+  survives); n1's log is no longer a prefix of n0's and n0 no longer counts it, so
+  without the guard n1 resyncs to the empty log. n1 is still eligible with its
+  recorded incarnation: authoritative without the write. Counterexample:
+  `resyncEligible_unsafe` (8 steps, `min-sync-replicas = 1`). The guard is the design's
+  ("replicas that are still eligible but ahead of the new primary" are demoted before a
+  full resync, §5). In the run the resync source n0 no longer thinks it is primary
+  (its recorded incarnation is stale), and the model's Resync does not ask that of the
+  source. So the run shows that Resync needs some guard here; whether the eligibility
+  guard is still needed once Resync also requires a source that thinks it is primary is
+  not shown.
+
+**Replication rules the proof uses, not shown needed.**
+- *Early removal only by a primary that knows the latest configuration*
+  (`Counterexamples/UncountDeposed.lean`). Uncount checks that the replica is not
+  eligible in the latest configuration, and `KnowsLatest` makes that the primary's own.
+  With `KnowsLatest` deleted and the check left in the latest configuration
+  (`StepUncountDeposed`) a run breaks property 1: n0 promotes n1; n1 takes over, which
+  drops it from the eligible set; n0, deposed, drops n1 from its sync replica set,
+  writes and commits alone, and n1, the current primary, lacks the write
+  (`uncountDeposed_unsafe`, 7 steps, `min-sync-replicas = 0`). That run reads a
+  configuration n0 has not seen: in n0's own configuration n1 is eligible, and the
+  design already forbids dropping an eligible replica. So it shows only that the two
+  guards go together. The design's reading, the check in the primary's own
+  configuration with no `KnowsLatest`, has no counterexample; the proof uses
+  `KnowsLatest` there too (to show the uncounting node is the current primary, and in
+  the deposed-primary case of the fence).
+- *Resync only a replica its primary has not counted*
+  (`Counterexamples/ResyncCounted.lean`). The preservation proof uses the guard:
+  Resync resets the primary's record of the replica's acknowledgement to 0, and the
+  invariant bounds the primary's commit point and catch-up obligations by its counted
+  members' acknowledgements. The state the guard excludes is reachable:
+  `countedDiverged_reachable` (5 steps, `min-sync-replicas = 0`) has n0 count n1 (a
+  sync replica, so it may receive uncommitted writes, as the design allows), n0 write,
+  n1 copy the write, n0 restart from a file holding none of its log (keeping its
+  incarnation, as it has acknowledged nothing; n1 is not eligible, so its rebuilt sync
+  replica set is empty), and n0 count n1 again at catch-up point 0, so n1 is counted
+  and its log `[1]` is not a prefix of n0's empty log. No counterexample was found. In
+  that state n0's record of n1's acknowledgement is already 0, so the forbidden Resync
+  changes no acknowledgement and n0's commit point, bounded by it, is 0. The expected
+  reason, not proven: a primary records an acknowledgement only while the replica's
+  log is a prefix of its own. The actions that can end that while the replica stays
+  counted are the primary's restarts, which truncate or empty its log, and each resets
+  its acknowledgement table. The primary's own Resync also replaces its log, but needs
+  it to follow another node, and a node follows another only after Learn, which
+  empties its sync replica set. Takeover changes no log; it gives the new primary a
+  fresh table. So a counted replica that has diverged would always have
+  acknowledgement 0, and the guard would be redundant. Proving that would add a
+  conjunct to the invariant. A bounded TLC check of `CoreRestart` with the guard
+  removed (a scratch copy, not in `spec/`) reached about 108 million distinct states
+  with no violation before it was stopped unfinished; the same setup with the eligible
+  guard removed instead found the `EligibleHoldsCommitted` violation, so the check
+  could detect a Resync defect.
 
 **The lease rules, each needed** (`Counterexamples/Leases.lean`). Property 6 holds
 with the design's lease rules; removing any one of these loses it, each shown by a
@@ -898,11 +974,35 @@ run ending in a stale linearizable read at `min-sync-replicas = 0`:
 - *The margin is at least twice the drift* (`smallMargin_stale`, 12 steps): with
   margin 1 and drift 1 and every rule kept, the taker's wait ends while the deposed
   primary, its clock a drift slow, still believes its lease valid.
-The extra wait after a takeover (one read lease plus the margin before demoting a
-replica of the replaced configuration) is used by the proof; no run shows it is needed
-on its own. That the design's narrower form is what the model has, so that a new
-primary may demote a replica it promoted itself inside the window, is checked by
-`demoteNew_reachable`.
+- *A restart clears the node's read lease* (`Counterexamples/RestartReadLease.lean`,
+  `restartKeepsReadLease_stale`, 11 steps): a replica that holds a read lease and
+  restarts empty, keeping the lease, comes back with an empty log and committed view
+  0, so nothing is uncommitted and it serves a read of an empty log while the history
+  is `[1]`.
+- *A restarted primary waits one read lease plus the margin before demoting*
+  (`Counterexamples/RestartDemotionWait.lean`, `restartNoDemotionWait_stale`, 10
+  steps): a restart loses the primary's record of when it last heard from each
+  replica, so the read-lease wait is vacuous. Without the restart wait, n0 restarts
+  with its data while n1 holds a read lease from it, demotes n1 at once, and commits
+  a write alone; n1 serves a read that misses it.
+- *After a takeover, the new primary waits one read lease plus the margin before
+  demoting a replica of the replaced configuration*
+  (`Counterexamples/TakeoverDemotionWait.lean`, `takeoverNoDemotionWait_stale`, 22
+  steps, within the duration rule at `P3`): the new primary has no acknowledgement
+  from anyone, so the read-lease wait is vacuous. n0 grants n2 a read lease at the
+  last tick it holds its lease from n1; one tick later n1 takes over, demotes n2 at
+  once and commits a write alone; n2 serves a read that misses it. With a read lease
+  of 2 (`P0`) the lease has expired by the earliest takeover, so the run needs
+  `readDur ≥ 3`, as for `grantNoInc_stale`.
+- *Only a primary holding its primary lease grants read leases*
+  (`Counterexamples/GrantPrimaryLease.lean`, `grantWithoutPrimaryLease_stale`, 18
+  steps): n0 promotes n1 and n2; n1 waits out n0's lease, takes over, waits out the
+  post-takeover window, demotes n2 and commits a write alone. n0 and n2 have not
+  learned of it, so n2 still follows n0 and n0 still thinks it is primary; n2
+  acknowledges and n0, holding no valid lease, echoes it. n2 serves a read of an empty log.
+That the design's narrower form of the post-takeover wait is what the model has, so
+that a new primary may demote a replica it promoted itself inside the window, is
+checked by `demoteNew_reachable`.
 
 **F11: the clock-drift margin** (`Lease/`). The design says "Both sides use monotonic
 clocks and subtract a clock-drift margin". Read literally, with both sides

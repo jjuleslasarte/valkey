@@ -12,6 +12,10 @@ import SyncReplication
 #print axioms SyncReplication.staleRestoreKeepsInc_loses
 #print axioms SyncReplication.noIncWritable_oneCopy
 #print axioms SyncReplication.uncountElig_unsafe
+#print axioms SyncReplication.noCatchUp_unsafe
+#print axioms SyncReplication.resyncEligible_unsafe
+#print axioms SyncReplication.uncountDeposed_unsafe
+#print axioms SyncReplication.countedDiverged_reachable
 #print axioms SyncReplication.noStaleRead
 #print axioms SyncReplication.lease_safety
 #print axioms SyncReplication.noWaitPrim_stale
@@ -23,3 +27,7 @@ import SyncReplication
 #print axioms SyncReplication.grantSync_stale
 #print axioms SyncReplication.grantNoInc_stale
 #print axioms SyncReplication.demoteNew_reachable
+#print axioms SyncReplication.restartKeepsReadLease_stale
+#print axioms SyncReplication.restartNoDemotionWait_stale
+#print axioms SyncReplication.takeoverNoDemotionWait_stale
+#print axioms SyncReplication.grantWithoutPrimaryLease_stale

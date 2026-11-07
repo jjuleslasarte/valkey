@@ -22,11 +22,14 @@ lean/
     Safety.lean                 safety, commit_two_copies
     Durability.lean             ReplyInvariant; ackSafety, ackedHeld
     LeaseInvariant.lean         LeaseInvariant and its preservation; noStaleRead, lease_safety
-    Counterexamples/            Basic, Reconcile, ReplyFence, Rebuild, Uncount, Incarnation,
-                                MinSyncIncarnation, Survival, StaleRestore, Leases
+    Counterexamples/            Basic, Reconcile, CatchUp, ResyncEligible, ResyncCounted, UncountDeposed,
+                                ReplyFence, Rebuild, Uncount,
+                                Incarnation, MinSyncIncarnation, Survival, StaleRestore, Leases,
+                                RestartReadLease, RestartDemotionWait, TakeoverDemotionWait,
+                                GrantPrimaryLease
     Lists.lean                  list-prefix lemmas
   Lease/                        Additive, Rate, Durations
-  Check.lean                    #print axioms for the 24 SyncReplication theorems
+  Check.lean                    #print axioms for the 32 SyncReplication theorems
   LeaseCheck.lean               the same for the 12 Lease/ theorems
 ```
 
@@ -115,10 +118,13 @@ NoStaleRead P a       :=  (∀ p, PrimCanRead P a p → a.core.log p = a.core.hi
 ### Counterexamples (`Counterexamples/`)
 
 Each states a reachable state of a *weakened* protocol (the model's `Step` plus one
-action with a rule removed) that violates the guarantee; see the appendix.
+action with a rule removed) that violates the guarantee; see the appendix. The
+reachability witnesses below are runs of the model itself, with no rule removed.
 
 ```lean
 theorem noReconcile_unsafe        : ∃ s, (ltsNoReconcile 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noCatchUp_unsafe          : ∃ s, (ltsNoCatchUp 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem resyncEligible_unsafe     : ∃ s, (ltsResyncEligible 1).CanReach (init 0) s ∧ ¬ Safety s
 theorem noReplyFence_unsafe       : ∃ a, (replyLTSNoFence 0).CanReach (replyInit 0) a ∧ ¬ AckedDurable a
 theorem noRebuild_unsafe          : ∃ s, (ltsNoRebuild 1).CanReach (init 0) s ∧ ¬ Safety s
 theorem noIncCheck_unsafe         : ∃ s, (ltsNoInc 1).CanReach (init 0) s ∧ ¬ Safety s
@@ -128,12 +134,21 @@ theorem staleRestoreKeepsInc_loses  : ∃ s, (ltsStaleKeep 1).CanReach (init 0) 
 theorem noSurvivor_loses          : ∃ s, (ltsNoSurv 1).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ (∀ n, ¬ s.hist <+: s.log n) ∧ (∀ n, ¬ IsAuthoritative s n)
 theorem uncountElig_unsafe        : ∃ s, (ltsUncountElig 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem uncountDeposed_unsafe     : ∃ s, (ltsUncountDeposed 0).CanReach (init 0) s ∧ ¬ Safety s
 theorem noWaitPrim_stale  : ∃ a, (leaseLTSNoWaitPrim 0 P0).CanReach (leaseInit 0) a ∧ PrimCanRead P0 a 0 ∧ a.core.log 0 ≠ a.core.hist
 theorem noWaitRead_stale  : ∃ a, (leaseLTSNoWaitRead 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
 theorem grantAny_stale    : ∃ a, (leaseLTSGrantAny 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
 theorem grantSync_stale   : ∃ a, (leaseLTSGrantSync 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
 theorem grantNoInc_stale  : ∃ a, (leaseLTSGrantNoInc 0 P3).CanReach (leaseInit 0) a ∧ ReplCanRead P3 a 1 ∧ a.core.log 1 ≠ a.core.hist
 theorem smallMargin_stale : ∃ a, LeaseReachable 0 P1 0 a ∧ PrimCanRead P1 a 0 ∧ a.core.log 0 ≠ a.core.hist
+theorem restartKeepsReadLease_stale : ∃ a, (leaseLTSRestartKeepsReadLease 0 P0).CanReach (leaseInit 0) a ∧
+    ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
+theorem restartNoDemotionWait_stale : ∃ a, (leaseLTSRestartNoDemotionWait 0 P0).CanReach (leaseInit 0) a ∧
+    ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
+theorem takeoverNoDemotionWait_stale : ∃ a, (leaseLTSTakeoverNoDemotionWait 0 P3).CanReach (leaseInit 0) a ∧
+    ReplCanRead P3 a 2 ∧ a.core.log 2 ≠ a.core.hist
+theorem grantWithoutPrimaryLease_stale : ∃ a, (leaseLTSGrantWithoutPrimaryLease 0 P0).CanReach (leaseInit 0) a ∧
+    ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
 theorem noIncWritable_oneCopy     : ∃ s, (ltsNoIncWritable 1).CanReach (init 0) s ∧
     ThinksPrimary s 0 ∧ 0 = s.cfg.primary ∧ WritableNoInc 1 s 0 ∧ s.commit 0 < (s.log 0).length ∧
     (∀ r, s.sync 0 r = true → s.commit 0 < s.acked 0 r) ∧
@@ -162,6 +177,22 @@ theorem demoteNew_reachable   : ∃ a,
 - `demoteNew_reachable`: a new primary demotes a replica it promoted itself with no
   time passed since its takeover, so the post-takeover demotion wait applies only to replicas
   of the replaced configuration, as the design says.
+
+### Reachability witness for a rule with no counterexample (`Counterexamples/ResyncCounted.lean`)
+
+A run of the protocol itself, at `min-sync-replicas = 0`.
+
+```lean
+theorem countedDiverged_reachable : ∃ s, Reachable 0 0 s ∧ s.sync 0 1 = true ∧
+    primaryOf s 1 = 0 ∧ ¬ (s.log 1 <+: s.log 0) ∧ s.acked 0 1 = 0
+```
+
+- `countedDiverged_reachable`: count 0 1, append 0, replicate 1 (n1 is a sync replica,
+  so it may receive the uncommitted write), restartPartial 0 0 (n0 keeps its
+  incarnation; its rebuilt sync replica set is empty), count 0 1. n0 counts n1 while n1's log has diverged from n0's, so
+  Resync's guard that the replica is not counted excludes a reachable state. No run
+  shows the guard is needed; in the witness n0's record of n1's acknowledgement is 0,
+  so the excluded Resync would change no acknowledgement (README Appendix B).
 
 ### Lease timing (`Lease/`)
 
@@ -431,6 +462,10 @@ and the robustness notes there:
 'SyncReplication.staleRestoreKeepsInc_loses' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.noIncWritable_oneCopy' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.uncountElig_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.noCatchUp_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.resyncEligible_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.uncountDeposed_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.countedDiverged_reachable' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.noStaleRead' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.lease_safety' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.noWaitPrim_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
@@ -442,6 +477,10 @@ and the robustness notes there:
 'SyncReplication.grantSync_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.grantNoInc_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.demoteNew_reachable' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.restartKeepsReadLease_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.restartNoDemotionWait_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.takeoverNoDemotionWait_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.grantWithoutPrimaryLease_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
 ```
 
 These are Lean's standard axioms. There is no `sorryAx`. `Classical.choice` enters
@@ -466,13 +505,13 @@ type; `Quot.sound` through function extensionality.
 | `SyncReplication/Preserve.lean` | 56 |
 | `SyncReplication/Safety.lean` | 43 |
 | `SyncReplication/Durability.lean` | 249 |
-| `SyncReplication/Counterexamples/` (10 files) | 1,054 |
+| `SyncReplication/Counterexamples/` (18 files) | 1,684 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 7,371 (plus the two root imports, 15 lines) |
+| total | 8,001 (plus the two root imports, 23 lines) |
 
 `lake build` of the whole tree takes about 20 seconds warm on a laptop-class
-machine (1,035 jobs including Mathlib's and CSLib's prebuilt modules).
+machine (1,043 jobs including Mathlib's and CSLib's prebuilt modules).
 
 ## Reproduce
 
@@ -578,15 +617,26 @@ history is `[1]`, on n0 and n1).
 | File | Weakened relation | Rule removed | Trace | Violates |
 |---|---|---|---|---|
 | `Reconcile.lean` | `StepNoReconcile` | Count measures catch-up against the primary's own commit point | count 0 1, makeEligible 0 1, append 0, learn 1, replicate 1, ack 1, commit 0, takeover 1, learn 2, **count 1 2**, makeEligible 1 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `CatchUp.lean` | `StepNoCatchUp` | Count with no catch-up guard; `StepNoReconcile` is a special case (`stepNoCatchUp_of_stepNoReconcile`), so F1's run is a second one | *prefix*, **count 0 2**, makeEligible 0 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `ResyncEligible.lean` | `StepResyncEligible` | Resync of a replica its primary lists as eligible | *prefix*, restartPartial 0 0 (new incarnation), **resync 1** | EligibleHoldsCommitted: n1 authoritative with an empty log |
 | `ReplyFence.lean` | `ReplyStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | count 0 1, makeEligible 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, count 1 0, makeEligible 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[5]` |
 | `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
 | `Leases.lean` | `LeaseStepNoWaitPrim`, `LeaseStepNoWaitRead`, `LeaseStepGrantAny`, `LeaseStepGrantSync`, `LeaseStepGrantNoInc` (with `P3`: primary lease 6, read lease 3, within the duration rule), and `leaseLTS` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the sync set; echo to a counted but ineligible member, then early removal; echo to a restarted-empty eligible member, then a takeover that never counts it; margin 1 with drift 1 | shared prefix count 0 1, makeEligible 0 1, learn 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `leaseInit`) heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
+| `RestartReadLease.lean` | `LeaseStepRestartKeepsReadLease` | RestartEmpty keeps the restarted node's read lease | shared lease prefix, append 0, replicate 1, ack 1, commit 0, heartbeat 1 (grant), **restartEmpty 1** | `ReplCanRead` holds for n1 with an empty log, history `[1]` |
+| `RestartDemotionWait.lean` | `LeaseStepRestartNoDemotionWait` | RestartKeep arms no demotion wait (`oldEligible n := fun _ => false`) | shared lease prefix, heartbeat 1 (grant), **restartKeep 0**, demote 0 1, append 0, commit 0 | `ReplCanRead` holds for n1 without the write |
+| `TakeoverDemotionWait.lean` | `LeaseStepTakeoverNoDemotionWait` (with `P3`) | Takeover arms no demotion wait (`oldEligible n := fun _ => false`) | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, learn 1, learn 2, heartbeat 1, ack 1, heartbeat 2, ack 2, tick ×4, heartbeat 2, ack 2, heartbeat 2 (grant), tick, **takeover 1**, demote 1 2, append 1, commit 1 | `ReplCanRead` holds for n2 without the write |
+| `GrantPrimaryLease.lean` | `LeaseStepGrantWithoutPrimaryLease` | Echo without `PrimLeaseValid` (the rest of `MayGrant` kept) | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, learn 1, tick ×4, takeover 1, tick ×3, demote 1 2, append 1, commit 1, ack 2, **heartbeat 2 (grant)** by the deposed n0 | `ReplCanRead` holds for n2 without the write |
 | `Uncount.lean` | `StepUncountElig` | Uncount of an eligible counted replica | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **uncount 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
+| `UncountDeposed.lean` | `StepUncountDeposed` | Uncount without `KnowsLatest`, its eligibility check still read in the latest configuration, which the deposed primary has not seen (`min-sync-replicas = 0`) | count 0 1, makeEligible 0 1, learn 1, takeover 1, **uncount 0 1**, append 0, commit 0 | EligibleHoldsCommitted: n1, the current primary, without the write |
 | `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, count 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
 | `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |
 
 The weakened action in each trace is in bold; *prefix* is `committed_run`. In
 `Survival.lean` no node is authoritative in the final state, so EligibleHoldsCommitted
 holds vacuously there and the theorem states the loss itself.
+
+`ResyncCounted.lean` has no weakened relation: no run shows Resync's guard that the
+replica is not counted is needed. It holds `countedDiverged_reachable`, a run of the
+model itself reaching the state the guard excludes (see the theorem list above).

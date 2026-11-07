@@ -8,5 +8,13 @@ import SyncReplication.Counterexamples.Survival
 import SyncReplication.Counterexamples.StaleRestore
 import SyncReplication.Counterexamples.MinSyncIncarnation
 import SyncReplication.Counterexamples.Uncount
+import SyncReplication.Counterexamples.CatchUp
+import SyncReplication.Counterexamples.ResyncEligible
+import SyncReplication.Counterexamples.UncountDeposed
+import SyncReplication.Counterexamples.ResyncCounted
 import SyncReplication.LeaseInvariant
 import SyncReplication.Counterexamples.Leases
+import SyncReplication.Counterexamples.RestartReadLease
+import SyncReplication.Counterexamples.RestartDemotionWait
+import SyncReplication.Counterexamples.TakeoverDemotionWait
+import SyncReplication.Counterexamples.GrantPrimaryLease
