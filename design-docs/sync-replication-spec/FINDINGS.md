@@ -1,9 +1,8 @@
 # Findings on the design doc
 
 Source: [Valkey Durability: Synchronous Replication Architecture](https://docs.google.com/document/d/15-VWM9KR2dfG4Y05RVF3tOnaVoYgKhmiFQ8jJZtxirg/edit?tab=t.0#heading=h.2sacx7to1xu)
-(`design-docs/sync-replication.md` in
-[valkey#5286](https://github.com/valkey-io/valkey/pull/5286)). F1-F12 were
-independently reviewed by three reviewers.
+(local copy: `design-doc.txt`). F1-F12 were reviewed by a three-model panel
+(gpt-5.6-terra, kimi-k3, grok-4.7).
 
 The findings come from bounded model checking. Each TLC result is a named
 configuration in `spec/`; `spec/expected.tsv` records its expected outcome and
@@ -16,13 +15,6 @@ F1, F2, F5, the incarnation check, and the lease timing (F11, F12). For F1, F2,
 F5, the incarnation check and the survival condition there is also a Lean
 counterexample: a run of the model with that item removed, every step checked
 by Lean. Bounds are stated with each result.
-
-Lean theorem names (`SyncReplication.safety`, `noRebuild_unsafe`, ...) refer to
-the Lean proof branch (`sync-repl-lean`,
-`design-docs/sync-replication-spec/lean/SyncReplication/`). This branch's
-`lean/` is an older snapshot of the same proofs under the `RestartProof`,
-`ReconProof`, `CoreProof` and `AckProof` namespaces, without the restart
-counterexamples.
 
 ## F1. Promotion after takeover can lose an acknowledged write
 
@@ -191,6 +183,78 @@ counterexample to a flaw in my model (reconciliation bypassed
 min-sync-replicas); that flaw was fixed and the invariant still broke.
 CoreRestart (commit 370ca9d) then found the loss above.
 
+## F13. A restart from a stale persistence file must not keep the incarnation
+
+**Status:** found from a CodeRabbit comment on [valkey#5286](https://github.com/valkey-io/valkey/pull/5286)
+(thread on line 335, "Restarted nodes rejoin as ineligible"). Confirmed by TLC
+and Lean: with the doc as written, a committed and acknowledged write can be
+lost. Not yet reviewed by the panel.
+
+A replica acknowledges a write once it has applied it in memory. Without
+`appendfsync always` it can crash and restart from an RDB or AOF that predates
+writes it already acknowledged. Section 6 changes the incarnation only on a
+restart *without* data, so this node keeps its incarnation and its eligibility,
+the takeover check lets it through, and the primary still counts the stale
+acknowledgement.
+
+**Counterexample** (Lean `SyncReplication.staleRestoreKeepsInc_unsafe`, 8 steps,
+min-sync = 1, every other fix on; TLC `CoreRestart_staleKeepMin1`, 9 states):
+1. n0 is primary. It counts n1 and makes it eligible.
+2. n0 writes; n1 replicates and acknowledges; n0 commits (the write is
+   committed on n0 and n1).
+3. n1 learns the latest configuration, then restarts from a file holding none
+   of its log (`k = 0`). It keeps its incarnation.
+4. n1 is eligible and authoritative without the committed write.
+
+**Loss** (`CoreRestart_staleKeepMin1Loss`, 11 states, two restarts): after step
+2 n0 releases the reply (the client has OK), n1 restarts as above, then n0
+restarts empty. The survival guard holds, because n1 is still authoritative, but
+n1 does not hold the write: no authoritative node does, and `AckedDurable` is
+violated. `CoreRestart_staleKeepMin1Ack` shows the acknowledged write missing
+from an authoritative node one step earlier.
+
+**The smallest trace** (`CoreRestart_staleKeepMin0`, 5 states, min-sync = 0) is
+the primary itself: n0 writes twice, commits one, restarts from a file holding
+nothing, and is still primary without the committed write.
+
+**Proposed doc change (proven safe):** a node keeps its incarnation across a
+restart only if the data it restores covers every offset it has acknowledged,
+as a replica to its primary or as a primary to its clients (its commit point);
+otherwise it takes a new incarnation and rejoins as after a restart without
+data. The implementation must therefore persist the highest acknowledged offset
+together with the data it covers, or acknowledge only after fsync.
+
+**Weaker rules checked and rejected by TLC** (`StaleRestore` constant in
+`spec/CoreRestart.tla`):
+
+| Rule | What it bounds | Result |
+|---|---|---|
+| `keepInc` (the doc) | nothing | `staleKeepMin0`, `Min1`, `Min1Ack`, `Min1Loss` violated |
+| `commit` | the committed offset the node knows | `staleCommitMin1` violated: a replica's own commit point is 0 |
+| `ackOnly` | acknowledgements sent as a replica | `staleAckOnlyMin0`, `Min1` violated: a primary's commits are not acknowledgements it sent, so the initial primary may restore anything |
+| `ackHigh` | acknowledgements sent as a replica and commits made as a primary | `safeMin0`, `safeMin1`, `twoCopiesMin1` pass |
+
+So `k >= ackHigh[n]` is not stronger than needed in either direction TLC can
+see: dropping the commit side loses the primary case, and the committed offset
+alone says nothing for replicas.
+
+**Proof status:** `SyncReplication.safety`, `ackSafety`, `ackedHeld` and
+`commit_two_copies` now include the action (`Step.restartPartialKeep` under the
+rule, `Step.restartPartialFresh` otherwise). The invariant gained a per-node
+high-water mark `ackHigh` with three facts: a primary's record of a replica's
+acknowledgement is within the replica's mark (`ackedHigh`), every authoritative
+node's mark covers the committed history (`histAck`), and every deposed
+primary's fence is within the mark of the current primary and of every
+authoritative replica (`DeposedFenced.primAck`, `DeposedFenced.eligHolds`). With those, a
+node that keeps a prefix covering its mark still holds everything the proof
+needs it to hold.
+
+**Model note:** the kept prefix after a new incarnation is a starting point for
+resync; the proof never used that a restarted-empty node's log is empty, so the
+two cases share their proofs. The acknowledgement layer now routes every restart
+through its own actions, which drop the node's held replies, as `held' =
+DropHeld(n)` does in the TLA+; before, it also allowed a restart that kept them.
+
 ## Incarnation check on primaryship
 
 **Status:** found while modelling restarts (CoreRestart). Not yet reviewed by
@@ -266,7 +330,7 @@ incarnation, so the shard stays unavailable) is not proven.
 
 ## F6. Re-promotion after a restart: not a doc gap if demotion is atomic
 
-**Status:** withdrawn as a doc gap. The reviewers split 2/3 the other way. The
+**Status:** withdrawn as a doc gap. The panel split 2/3 the other way. The
 counterexample needed the demotion CAS and "stop counting" to be two
 separate steps, so that a replica could be made eligible again in between.
 Section 4 demotion step 3 says the primary removes the replica "once the
@@ -292,7 +356,7 @@ The write is in no authoritative copy, and the loss is not operator-visible.
 The doc says only that the old primary "may serve stale reads", and that
 committed writes the target lacks are lost.
 
-**Proposed doc change (revised, review round 5):** replica fencing alone
+**Proposed doc change (revised, round 5 review):** replica fencing alone
 can't stop the old primary, which already holds the ack it needs, and a
 fixed lease wait isn't enough because replicas that haven't learned of the
 change keep renewing its lease. Both are needed: a lease gate on commits
@@ -459,7 +523,7 @@ from sending data to receiving its ACK and B everything from the end of the
 wait to the demotion committing (timers, scheduling, Raft). This is the
 additive clock model only; a rate-bounded version is not derived. A
 condition with one drift term also fails, so both are needed (witness from
-review round 5: D=2, M=4, ReadDur=2, B=1, Δ=0, PrimDur=10; not yet a Lean
+round 5 review: D=2, M=4, ReadDur=2, B=1, Δ=0, PrimDur=10; not yet a Lean
 example).
 
 This is an availability issue, not a safety one: if the condition fails,
