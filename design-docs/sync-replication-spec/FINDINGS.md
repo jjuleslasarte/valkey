@@ -76,7 +76,8 @@ after a takeover that leaves no sync replica: `CoreRecon_strictReachLoneReconMin
 explores the full state space without ever reconciling such a primary,
 while `CoreRecon_ReachLoneReconMin1` (the fix) reconciles it in 12 states.
 Lean counterexample without the fix: `SyncReplication.noReconcile_unsafe`
-(11 steps).
+(11 steps). The same run shows that Count's catch-up guard cannot simply be
+dropped: `SyncReplication.noCatchUp_unsafe` deletes it outright.
 
 ## F2. Held replies must be fenced by primaryship, not only by offset
 
@@ -304,7 +305,10 @@ TLC `Core_earlyDrop`, `CoreRecon_earlyDropMin1`, `CoreRestart_earlyDropMin1`).
 The model also allows early removal only to a primary that knows the latest
 configuration: a deposed primary that drops the member whose frozen
 acknowledgement fences it could commit past what the new configuration holds.
-No counterexample shows the second condition is needed; the proof uses it.
+The second condition is needed too (`SyncReplication.uncountDeposed_unsafe`,
+7 steps, min-sync = 0): Takeover drops the new primary from the eligible set,
+so the deposed primary sees it as a counted, not-yet-eligible replica, drops
+it, and commits a write the new primary does not hold.
 **Proposed doc change:** state that early removal applies to replicas not yet
 committed as eligible, and that a primary performs it only while it holds the
 latest shard configuration.
@@ -452,8 +456,26 @@ first three and the last match TLC's `Leases_noWaitPrim`, `_noWaitRead`,
 `_noEchoSync`, `_smallMargin`): the takeover wait, the demotion wait, granting
 read leases only to sync members (F10) and only to eligible ones (a counted,
 not-yet-eligible member can be dropped by early removal without a wait), and
-the margin bound. The proof also requires a matching incarnation; no run shows
-that part is needed.
+the margin bound. The proof also requires a matching incarnation; that part is
+shown needed by a sixth run, `grantNoInc_stale` (below).
+
+Further runs settle lease rules the proof uses. A restart must clear the
+restarted node's read lease, which is how the model reads "Lease state is kept
+in memory" (section 5): a replica that restarts empty and keeps its lease
+serves a read of an empty log (`restartKeepsReadLease_stale`). The demotion
+wait after a restart is needed: a primary that restarts while a replica holds a
+read lease from it, demotes the replica at once and commits alone lets the
+replica serve a stale read (`restartNoDemotionWait_stale`). So is the doc's
+wait after a takeover before demoting a replica of the old configuration: the
+old primary grants a read lease at the last moment it may, the new primary
+takes over one tick later, demotes that replica at once and commits alone
+(`takeoverNoDemotionWait_stale`, within the "Lease durations" rule at primary
+lease 6, read lease 3, drift 1, margin 2; with read lease 2 the lease has
+expired by the earliest takeover). And a deposed primary must stop granting
+("Leases across a failover"): if `PrimLeaseValid` is dropped from the grant
+rule, a deposed primary that has not learned of the takeover echoes an
+acknowledgement to a replica still following it, after the new primary has
+committed without that replica (`grantWithoutPrimaryLease_stale`).
 
 Rules the model adds to or narrows from the doc, all used by the proof: a
 restarted primary waits one read lease plus the margin before demoting anyone
@@ -470,8 +492,8 @@ modelled: planned demotion (the
 replica drops its lease on request). One observation: the model does not delay
 reads after a restart, only clears the restarted node's leases, and the proof
 still goes through, so the read half of the doc's restart rule is not needed
-for safety. **Proposed doc change:** state the demotion wait after restart and
-the eligible-only grant.
+for safety. **Proposed doc change:** state the demotion wait after restart (shown needed
+above) and the eligible-only grant.
 
 ## F11. The doc's drift-margin wording is unsafe if read literally
 
@@ -539,7 +561,9 @@ The review showed that is only half supported:
 - **Shown:** takeover waits for the primary lease (`noWaitPrim`). Demotion
   waits for the read lease (`noWaitRead`). The drift margin covers both
   clocks (`smallMargin`); this is a condition of the clock model, see F11.
-- **Not shown:** `noWaitOld`, `noStopGrant` and `noReset`. Their first
+- **Not shown by TLC:** `noWaitOld`, `noStopGrant` and `noReset` (the Lean
+  runs `takeoverNoDemotionWait_stale` and `restartNoDemotionWait_stale` now
+  show the post-takeover and restart demotion waits needed). Their first
   traces never took the disabled action (they were the F10 echo bug). Rerun
   with F10 fixed: no stale read found in one hour for `noWaitOld` and
   `noStopGrant`, and in 10 minutes for `noReset` (its one-hour run was
