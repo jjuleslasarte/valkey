@@ -398,9 +398,11 @@ primary has forgotten when it last heard from each replica, and which
 configuration it took over from, so the wait covers every replica, where after
 a takeover it covers only replicas of the replaced configuration as the doc
 says); and read leases go only to eligible sync members with a matching
-incarnation. The incarnation part is shown needed only when the read lease may
-outlast the primary lease (`grantNoInc_stale`), which the "Lease durations"
-rule forbids; under that rule it is open. Not modelled: planned demotion (the
+incarnation. The incarnation part is shown needed within the "Lease durations"
+rule (`grantNoInc_stale`, primary lease 6, read lease 3, drift 1, margin 2): the
+gap between the old primary's last possible grant and the earliest takeover is
+only `margin - 2 * drift`, so the rule does not protect against it. Not
+modelled: planned demotion (the
 replica drops its lease on request). One observation: the model does not delay
 reads after a restart, only clears the restarted node's leases, and the proof
 still goes through, so the read half of the doc's restart rule is not needed
