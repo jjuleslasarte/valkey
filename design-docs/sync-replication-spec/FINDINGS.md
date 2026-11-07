@@ -76,8 +76,11 @@ after a takeover that leaves no sync replica: `CoreRecon_strictReachLoneReconMin
 explores the full state space without ever reconciling such a primary,
 while `CoreRecon_ReachLoneReconMin1` (the fix) reconciles it in 12 states.
 Lean counterexample without the fix: `SyncReplication.noReconcile_unsafe`
-(11 steps). The same run shows that Count's catch-up guard cannot simply be
-dropped: `SyncReplication.noCatchUp_unsafe` deletes it outright.
+(11 steps). Count's catch-up guard cannot simply be dropped either:
+`SyncReplication.noCatchUp_unsafe` deletes it and, after a write commits on n0
+and n1, has n0 count and promote n2, which has acknowledged nothing (8 steps).
+That Count is one the doc's own step 1 already forbids; F1 is about the case
+the doc's guard lets through.
 
 ## F2. Held replies must be fenced by primaryship, not only by offset
 
@@ -305,13 +308,19 @@ TLC `Core_earlyDrop`, `CoreRecon_earlyDropMin1`, `CoreRestart_earlyDropMin1`).
 The model also allows early removal only to a primary that knows the latest
 configuration: a deposed primary that drops the member whose frozen
 acknowledgement fences it could commit past what the new configuration holds.
-The second condition is needed too (`SyncReplication.uncountDeposed_unsafe`,
-7 steps, min-sync = 0): Takeover drops the new primary from the eligible set,
-so the deposed primary sees it as a counted, not-yet-eligible replica, drops
-it, and commits a write the new primary does not hold.
+The second condition is not shown needed. `SyncReplication.uncountDeposed_unsafe`
+(7 steps, min-sync = 0) drops it while still checking eligibility in the
+latest configuration: Takeover drops the new primary from the eligible set,
+so the deposed primary drops it and commits a write the new primary does not
+hold. But the deposed primary has not seen that configuration; in its own, the
+new primary is eligible, and "before step 4" already forbids dropping it. So
+the run shows only that the model's two conditions go together. With the
+check in the primary's own configuration there is no counterexample, and the
+proof uses the second condition there too.
 **Proposed doc change:** state that early removal applies to replicas not yet
-committed as eligible, and that a primary performs it only while it holds the
-latest shard configuration.
+committed as eligible. Holding the latest shard configuration is a
+defensive addition (it covers a primary that does not learn the outcome of
+its own promotion), not one a run shows needed.
 
 ## Survival condition (an assumption, not a defect)
 
@@ -463,9 +472,10 @@ Further runs settle lease rules the proof uses. A restart must clear the
 restarted node's read lease, which is how the model reads "Lease state is kept
 in memory" (section 5): a replica that restarts empty and keeps its lease
 serves a read of an empty log (`restartKeepsReadLease_stale`). The demotion
-wait after a restart is needed: a primary that restarts while a replica holds a
-read lease from it, demotes the replica at once and commits alone lets the
-replica serve a stale read (`restartNoDemotionWait_stale`). So is the doc's
+wait after a restart is needed: a primary restarts while a replica holds a
+read lease from it, demotes the replica at once and commits alone, and the
+replica serves a stale read (`restartNoDemotionWait_stale`, with the restart
+taking no time). So is the doc's
 wait after a takeover before demoting a replica of the old configuration: the
 old primary grants a read lease at the last moment it may, the new primary
 takes over one tick later, demotes that replica at once and commits alone
@@ -561,9 +571,11 @@ The review showed that is only half supported:
 - **Shown:** takeover waits for the primary lease (`noWaitPrim`). Demotion
   waits for the read lease (`noWaitRead`). The drift margin covers both
   clocks (`smallMargin`); this is a condition of the clock model, see F11.
-- **Not shown by TLC:** `noWaitOld`, `noStopGrant` and `noReset` (the Lean
-  runs `takeoverNoDemotionWait_stale` and `restartNoDemotionWait_stale` now
-  show the post-takeover and restart demotion waits needed). Their first
+- **Not shown by TLC:** `noWaitOld`, `noStopGrant` and `noReset`. Lean now
+  shows the first two needed: `takeoverNoDemotionWait_stale` (`WaitOldLeases`)
+  and `grantWithoutPrimaryLease_stale` (`StopGrant`). `noReset`
+  (`ResetOnLearn`, the takeover timer restart on Learn) has no Lean run; the
+  restart demotion wait (`restartNoDemotionWait_stale`) has no TLC switch. Their first
   traces never took the disabled action (they were the F10 echo bug). Rerun
   with F10 fixed: no stale read found in one hour for `noWaitOld` and
   `noStopGrant`, and in 10 minutes for `noReset` (its one-hour run was
