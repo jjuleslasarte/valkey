@@ -68,8 +68,9 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
 - **Commit rule.** The primary's **committed offset** advances only past entries every
   member of its **sync replica set** has acknowledged, and only while at least
   `min-sync-replicas` of those members are eligible with a matching incarnation. Only a
-  primary advances its committed offset; `REPLCONF COMMIT` and replicas' committed
-  offsets are not modelled (they matter for reads, which are out of scope).
+  primary advances its own committed offset; in the replication layer `REPLCONF COMMIT`
+  is not a message. The lease layer models its payload as each replica's **committed
+  view**, carried on data messages.
 - **Promotion flow.** The primary first counts a caught-up replica's acknowledgements
   (design §4, step 2), then commits the replica as eligible to the cluster bus (step
   4). A
@@ -78,7 +79,8 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   committed the log it holds (a new primary, or one that restarted with its data),
   the end of that log.
 - **Early removal.** Between steps 2 and 4, the primary may drop the counted replica
-  again if it falls behind or fails (design §4). Only the current primary does this,
+  again if it falls behind or fails (design §4). Only the current primary (the one
+  named in the latest configuration) does this,
   and only for a replica that is not yet eligible; once a replica is eligible it
   leaves the sync replica set through demotion alone.
 - **Demotion flow.** The primary commits the replica as ineligible and stops counting
@@ -110,16 +112,24 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   replica until one lease duration after it last received an acknowledgement from
   it. The primary echoes acknowledgements, and so renews read leases, only while it
   holds its own lease from every eligible replica it knows of, and only to sync
-  members that are eligible with a matching incarnation. A takeover waits out the
-  primary lease; a demotion waits out the read lease, and a new primary also waits
-  one read lease plus the margin after its takeover before demoting anyone. Clocks
-  may drift by at most `drift` over a lease; each holder subtracts the margin and
-  assumes its clock slow, each grantor assumes its clock fast. A restart clears a
-  node's lease state and restarts both its timers.
+  members that are eligible with a matching incarnation. Clocks may drift by at most
+  `drift` over a lease; each holder subtracts a `margin` from its lease and assumes
+  its clock slow, each grantor assumes its clock fast. A takeover waits out the
+  primary lease; a demotion waits out the read lease, and after a takeover or a
+  restart the primary also waits one read lease plus the margin before demoting any
+  replica. A restart clears a node's leases and committed view and restarts both
+  waits, the takeover wait and the demotion wait; it does not otherwise delay reads.
+  A grant also requires the granting node to think it is primary. The primary's
+  promise not to commit without a lease-holding replica is enforced at demotion; the
+  other ways a replica leaves the sync set are early removal, which never applies to
+  an eligible replica and so never to a lease holder, and the replica's own restart.
 - **Linearizable reads.** A primary may serve one while it holds its lease from every
   eligible replica it knows and has nothing uncommitted. A sync replica may serve one
   while it holds a read lease and its committed view (the offset the last `REPLCONF
-  COMMIT` told it) covers its whole log.
+  COMMIT` told it) covers its whole log. This is the single-key form of dirty key
+  tracking: the model serves no linearizable read while any write is uncommitted,
+  where the design holds only reads of keys with uncommitted writes. Property 6
+  therefore says nothing about reads of clean keys made while other keys are dirty.
 - **Reply blocking.** A write's reply is held until it commits. Each held reply
   carries the term of the primaryship that accepted the write. The reply is released
   as OK only while the node that accepted it still considers itself primary, in that
@@ -189,7 +199,7 @@ Under the survival condition, every reachable state satisfies:
 | **3** | **AckedDurable:** every write released as OK is in the committed history, at its offset. | `SyncReplication.ackSafety` |
 | **4** | **AckedHeld:** every authoritative node holds every write released as OK, at its offset. | `SyncReplication.ackedHeld` |
 | **5** | With `min-sync-replicas ≥ 1`, when the current primary commits, the committed history is on at least two distinct authoritative nodes: the primary and an eligible sync replica. | `SyncReplication.commit_two_copies` |
-| **6** | **NoStaleRead:** with `margin ≥ 2 · drift`, any node that may serve a linearizable read has exactly the committed history as its log. | `SyncReplication.noStaleRead` |
+| **6** | **NoStaleRead:** with `margin ≥ 2 · drift`, any node that may serve a linearizable read has exactly the committed history as its log. (If `readDur + drift ≤ margin`, no read lease is ever valid and the replica half holds vacuously; `replCanRead_reachable` shows it is not vacuous at the parameters of Appendix B.) | `SyncReplication.noStaleRead` |
 
 The committed history only grows, so property 3 says that no acknowledged write is
 ever lost or replaced. Property 6 is the design's "leases prevent stale reads in both
@@ -282,28 +292,39 @@ Facts about the current primary (`histLe` and the primary clauses of the fence) 
 only while it is authoritative: a primary that came back empty holds nothing, and
 nothing new is committed until an authoritative eligible replica takes over.
 
-Property 6 extends `Invariant` with fifteen more parts (`LeaseInvariant`,
-`LeaseInvariant.lean`). Eight are bookkeeping: every recorded time is in the past, a
-lease starts no later than the traffic it is measured from, an acknowledgement a
-primary echoes was sent no later than it arrived, every acknowledgement a primary
-holds arrived during its current primaryship. Two carry the argument:
+Property 6 extends `Invariant` with fourteen more parts (`LeaseInvariant`,
+`LeaseInvariant.lean`). Eight are bookkeeping: every recorded time is in the past; a
+lease, and the data an acknowledgement confirms, is dated no later than the traffic it
+is measured from; an acknowledgement a primary echoes was sent no later than it
+arrived; every acknowledgement a primary holds arrived during its current primaryship
+(this last one is what lets a read lease dated by a takeover be renewed into one dated
+by an acknowledgement). Two carry the argument:
 - **A deposed primary's lease is over for good** (`deposed`). A primary `p` was deposed
-  by a takeover of some `t` that was eligible in `p`'s own configuration (only `p`
-  could have made `t` eligible). `t` waited until `p`'s lease must have expired,
-  measured from the last traffic `t` received from `p`, and `p`'s lease from `t`
-  started no later than that traffic. So `p` can never again hold a valid lease from
-  every eligible replica it knows: only the current primary can. This is the primary
-  half of the read rule, and it is also why a deposed primary cannot renew read leases.
+  by a takeover of some `t`. `p` was current then, so it knew the latest configuration,
+  and `t`'s takeover checked `t`'s eligibility in that configuration: `t` is eligible in
+  `p`'s own configuration. `t` waited until `p`'s lease must have expired, measured from
+  the last traffic `t` received from `p`, and `p`'s lease from `t` started no later than
+  that traffic; `t` now follows someone else, so the lease is never renewed. So `p` can
+  never again hold a valid lease from every eligible replica it knows: only the current
+  primary can. This is the primary half of the read rule, and it is also why a deposed
+  primary cannot renew read leases.
 - **A valid read lease makes its holder authoritative** (`leaseAuth`). A lease is
   granted only by a primary that holds its own lease, hence by the current primary,
   and only to an eligible replica with a matching incarnation. Demotion waits until
   the lease must have expired; every lease started no later than the current primary's
   last acknowledgement from its holder, or no later than the current primary's
   takeover (`leaseBound`), which is what the new primary's extra wait covers.
-The rest: a replica's committed view is a committed prefix of its log, a node whose
-configuration names it primary holds no read lease. The theorem then follows from the
+The rest: a replica's committed view is a committed prefix of its log, and a node whose
+configuration names it primary holds no read lease (which keeps a deposed primary out
+of the read-lease holders across a takeover). The theorem then follows from the
 replication invariant: the current primary has the history below its committed offset
 or catch-up point (`histLe`), and an authoritative node holds the history (`ehc`).
+Both halves use `margin ≥ 2 · drift`, in two places: to turn the taker's wait into the
+invalidity of `p`'s lease from `t`, and to turn the demotion wait into the invalidity of
+the demoted replica's read lease. A holder assumes its clock slow and a grantor its
+clock fast, each by `drift`, so the two worst cases are `2 · drift` apart. That the
+premises of property 6 are reachable at all (so the theorem is not vacuous) is checked
+by `primCanRead_reachable` and `replCanRead_reachable`.
 
 The acknowledged-write properties (3 and 4) extend `Invariant` with three more parts
 (`ReplyInvariant`, `Durability.lean`): terms never exceed the configuration version;
@@ -344,7 +365,7 @@ What these say about the design's own wording is in Appendix B.
 | Property 6 (no stale linearizable read, `margin ≥ 2 · drift`) | `SyncReplication.noStaleRead` |
 | Properties 1 and 2 under the lease layer | `SyncReplication.lease_safety` |
 | Lease margin and durations | `Lease/` |
-| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `smallMargin_stale` |
+| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `smallMargin_stale` |
 
 Size: the model is 886 lines (451 for the protocol, 113 for the held-reply layer,
 322 for the lease layer), the invariants and their lemmas 1,529 (444 for replication,
@@ -372,6 +393,9 @@ encoding.
   primary whose sync replica set fell below `min-sync-replicas` releasing held writes
   as `UNCOMMITTED`, is not modelled, and neither is the `CLUSTERDOWN` rejection path
   or client retry semantics.
+- **Planned demotion** (design §4 step 2: the primary asks a healthy replica to drop
+  its read lease and proceeds on its confirmation). Demotion always waits the read
+  lease out.
 - **Correlated data loss** is excluded by the survival condition. The design's
   detection of it (no eligible replica with a matching incarnation, so the shard
   stays unavailable) is not proven.
@@ -381,9 +405,10 @@ encoding.
   which replica to promote (the model allows any promotion); replication lag
   thresholds; manual failover; slot migration and anything beyond a single shard;
   modules; dirty key tracking.
-- **Replica committed offsets.** Only a primary advances its committed offset;
-  `REPLCONF COMMIT` is not modelled. Property 2 therefore constrains committed
-  offsets a node reached while it was primary.
+- **Replica committed offsets.** Only a primary advances its own committed offset
+  (`commit`); property 2 constrains the offsets a node reached while it was primary.
+  A replica's committed view (`committedView`, the lease layer's model of `REPLCONF
+  COMMIT`) is separate, and is what a replica read is served from.
 - **The Cluster V2 bus is assumed correct** and modelled as a compare-and-set register
   (section 1).
 - **Messages are abstracted** (section 1). An acknowledgement carries the replica's
@@ -403,7 +428,7 @@ encoding.
 
 - **The survival condition** is required at every restart that takes a new
   incarnation (section 2).
-- **Restarts carry four assumptions the design only implies.** (a) A node restarts
+- **Restarts carry six assumptions the design only implies.** (a) A node restarts
   only when it knows the latest configuration (`KnowsLatest`), justified by design
   §6's "syncs to the latest log before it re-enters the cluster"; a restart with a
   stale configuration is excluded, not proved equivalent. (b) A restart without data
@@ -419,16 +444,25 @@ encoding.
   latest configuration. A deposed primary that has not learned of the takeover may
   not drop a member: the member it would drop could be the one whose frozen
   acknowledgement fences it. The design does not say this; it describes early removal
-  from the live primary's point of view. (f) A restarted primary waits one read lease
+  from the live primary's point of view. (f) The acknowledgement high-water mark
+  `ackHigh` survives a restart with data and is lost with a new incarnation; the model
+  assumes the implementation persists it with the data it covers. A stale file is
+  modelled as a prefix of the log; a file that is not a prefix (a diverged tail) is not
+  modelled.
+- **Leases carry four assumptions.** (a) A restarted primary waits one read lease
   plus the margin before demoting anyone, as a new primary does after its takeover.
   The design's restart rule covers takeover and serving reads; the model applies it to
   demotion too, because a restarted primary has forgotten when it last heard from each
-  replica. (g) Read leases are granted only to sync members that are eligible with a
-  matching incarnation. The design says "sync replica"; Appendix B shows the narrower
-  rule is needed. (d) The acknowledgement high-water mark `ackHigh` survives a
-  restart with data and is lost with a new incarnation; the model assumes the
-  implementation persists it with the data it covers. A stale file is modelled as a
-  prefix of the log; a file that is not a prefix (a diverged tail) is not modelled.
+  replica. (b) That wait, after a takeover or a restart, blocks demotion of every
+  replica, not only replicas of the old configuration as the design says; the model
+  forbids demoting a replica the new primary promoted itself inside that window.
+  (c) Read leases are granted only to sync members that are eligible with a matching
+  incarnation. The design says "sync replica". Appendix B shows that sync membership
+  and eligibility are each needed; the incarnation match is used by the proof and not
+  shown needed. (d) In the other direction, the design's restart rule delays reads for
+  one lease after a restart; the model only clears the restarted node's leases, so it
+  may read as soon as it holds a new one. The proof shows that suffices, so the read
+  half of the restart rule is not needed for safety.
 - **The incarnation checks** in `ThinksPrimary` and `Writable` are in the model as
   guards. The design states only the takeover compare-and-set. Appendix B shows both
   are needed: the first for safety, the second for the two-copies property.
@@ -437,11 +471,19 @@ encoding.
 
 The Lean model is written by hand from the design. Nothing mechanical checks it
 against the design doc itself; sections 1 and 5 are the argument, and reviewing them
-is the step that needs a systems engineer (Appendix A.6). The model mirrors a TLA+
-model of the same protocol (Appendix C), which was model-checked at small sizes, and
-earlier versions of the Lean encoding were checked against that model's complete
-state graph; that catches slips in how the Lean was written, not differences between
-both models and the design.
+is the step that needs a systems engineer (Appendix A.6). The replication model
+mirrors a TLA+ model of the same protocol (Appendix C), which was model-checked at
+small sizes, and earlier versions of the Lean encoding were checked against that
+model's complete state graph; that catches slips in how the Lean was written, not
+differences between both models and the design. The lease layer mirrors
+`spec/Leases.tla` but was not checked against its state graph, and differs from it in:
+instant messages instead of one-slot lossy channels; the echo on a separate heartbeat;
+restarts and incarnations, absent from `Leases.tla`; `MayGrant` requiring eligibility
+and a matching incarnation where `EchoOnlySync` requires sync membership; traffic and
+acknowledgements not gated on the sender thinking it is primary (which only adds
+behaviours); no leases in the initial state where `Leases.tla` starts with every
+replica eligible and both leases established; a takeover resetting the committed
+offset to 0 where `Leases.tla` starts it at the replica's committed view.
 
 "Any number of nodes" means any Lean type of node identifiers, including infinite
 ones. `Writable` uses `Set.encard`, which is the usual cardinality on finite sets and
@@ -466,7 +508,7 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 248 |
 | `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,085 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation | 852 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation; reachability witnesses for the read rule | 920 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
 | `lean/Check.lean` | Prints the axioms of every theorem | |
@@ -831,16 +873,18 @@ run ending in a stale linearizable read at `min-sync-replicas = 0`:
 - *The primary waits out the read lease before demoting* (`noWaitRead_stale`, 9
   steps): without the wait, the demoted replica still holds a valid read lease and
   serves a read that misses the write committed without it.
-- *Read leases go only to eligible sync members* (`grantAny_stale`, 5 steps): a
-  follower outside the sync set that is echoed an acknowledgement gets a read lease
-  the primary never waits on. The design says "sync replica"; this is the reason
-  to read that as the eligible members with a matching incarnation.
+- *Read leases go only to sync members* (`grantAny_stale`, 5 steps): a follower
+  outside the sync set that receives an echo of its acknowledgement gets a read lease
+  the primary never waits on. *And only to eligible ones* (`grantSync_stale`, 7
+  steps): a counted replica that is not yet eligible can be dropped by early removal
+  with no wait, then serve a stale read on its lease. The design says "sync replica";
+  these two runs are the reason to read that as the eligible members. The proof also
+  requires a matching incarnation; no run shows that part is needed.
 - *The margin is at least twice the drift* (`smallMargin_stale`, 12 steps): with
   margin 1 and drift 1 and every rule kept, the taker's wait ends while the deposed
   primary, its clock a drift slow, still believes its lease valid.
-The new primary's extra wait after takeover (one read lease plus the margin before
-demoting a replica of the old configuration) is used by the proof; no run shows it
-is needed on its own.
+The extra wait after a takeover or restart (one read lease plus the margin before
+demoting any replica) is used by the proof; no run shows it is needed on its own.
 
 **F11: the clock-drift margin** (`Lease/`). The design says "Both sides use monotonic
 clocks and subtract a clock-drift margin". Read literally, with both sides
@@ -907,4 +951,4 @@ relation instead.
 | Survival | `CoreRestart_noSurvivorMin0`/`Min1` | `noSurvivor_loses` |
 | F13 | `CoreRestart_staleKeepMin0` (5 states), `_staleKeepMin1` (9), `_staleKeepMin1Loss` (11); weaker rules `_staleCommitMin1`, `_staleAckOnlyMin0`/`Min1` | `staleRestoreKeepsInc_unsafe` |
 | Safe runs | `CoreRestart_safeMin0`/`_safeMin1` (120.6 M and 78.8 M states), `CoreRestart_twoCopiesMin1` | subsumed by `safety`, `ackSafety`, `commit_two_copies` |
-| Lease rules | `Leases_noWaitPrim`, `_noWaitRead`, `_noEchoSync`, `_smallMargin` (each violates `NoStaleLinRead`); the safe runs never finished | `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `smallMargin_stale`; `noStaleRead` is the first proof that the rules suffice |
+| Lease rules | `Leases_noWaitPrim`, `_noWaitRead`, `_noEchoSync`, `_smallMargin` (each violates `NoStaleLinRead`); the safe runs never finished | `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale` (the `EchoOnlySync` rule), `grantSync_stale` (eligibility, which `Leases.tla` has no switch for), `smallMargin_stale`; `noStaleRead` is the first proof that the rules suffice |

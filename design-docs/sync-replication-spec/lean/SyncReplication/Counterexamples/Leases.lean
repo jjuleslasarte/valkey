@@ -34,19 +34,19 @@ def P0 : LeaseParams := ⟨5, 2, 1, 2⟩
 /-- As `P0` with margin 1, below twice the drift. -/
 def P1 : LeaseParams := ⟨5, 2, 1, 1⟩
 
-instance (P : LeaseParams) (a : LState N) (p : N) : Decidable (PrimLeaseValid P a p) := by
+instance (P : LeaseParams) (a : LeaseState N) (p : N) : Decidable (PrimLeaseValid P a p) := by
   unfold PrimLeaseValid; infer_instance
-instance (P : LeaseParams) (a : LState N) (p : N) : Decidable (PrimCanRead P a p) := by
+instance (P : LeaseParams) (a : LeaseState N) (p : N) : Decidable (PrimCanRead P a p) := by
   unfold PrimCanRead; infer_instance
-instance (P : LeaseParams) (a : LState N) (r : N) : Decidable (ReplCanRead P a r) := by
+instance (P : LeaseParams) (a : LeaseState N) (r : N) : Decidable (ReplCanRead P a r) := by
   unfold ReplCanRead ReadLeaseValid; infer_instance
-instance (P : LeaseParams) (a : LState N) (p r : N) : Decidable (MayGrant P a p r) := by
+instance (P : LeaseParams) (a : LeaseState N) (p r : N) : Decidable (MayGrant P a p r) := by
   unfold MayGrant; infer_instance
 
 /-- A run of the lease layer is a run of any weakening of it. -/
-theorem lmtr_of_step {L : LTS (LState N) (LAction N)} {m : Nat} {P : LeaseParams}
-    (hL : ∀ {a μ a'}, LStep m P a μ a' → L.Tr a μ a') {a b : LState N} {μs : List (LAction N)}
-    (h : (llts m P).MTr a μs b) : L.MTr a μs b := by
+theorem leaseMtr_of_step {L : LTS (LeaseState N) (LeaseAction N)} {m : Nat} {P : LeaseParams}
+    (hL : ∀ {a μ a'}, LeaseStep m P a μ a' → L.Tr a μ a') {a b : LeaseState N} {μs : List (LeaseAction N)}
+    (h : (leaseLTS m P).MTr a μs b) : L.MTr a μs b := by
   induction h with
   | refl => exact .refl
   | stepL hs _ ih => exact .stepL (hL hs) ih
@@ -57,7 +57,7 @@ n0 counts n1 and makes it eligible; n1 learns the configuration; a heartbeat fro
 reaches n1 and n1 acknowledges it. n0 now holds a primary lease from n1 (from time 0),
 and n0 has n1's acknowledgement to echo. -/
 
-def l0 : LState N := linit 0
+def l0 : LeaseState N := leaseInit 0
 def l1 := withCore l0 (count l0.core 0 1)
 def l2 := withCore l1 (makeEligible l1.core 0 1)
 def l3 := learnL l2 1
@@ -65,80 +65,148 @@ def l4 := recvData l3 1 l3.core none
 def l5 := recvAck l4 1 l4.core
 
 /-- The prefix, for any lease parameters: none of its steps consults them. -/
-theorem leases_prefix (P : LeaseParams) : (llts 0 P).MTr l0
+theorem leases_prefix (P : LeaseParams) : (leaseLTS 0 P).MTr l0
     [.core (.count 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1] l5 :=
-  .stepL (LStep.core l0 _ _ (Step.count l0.core 0 1 (by decide) (by decide) (by decide) (by decide)
+  .stepL (LeaseStep.core l0 _ _ (Step.count l0.core 0 1 (by decide) (by decide) (by decide) (by decide)
     (by decide)) rfl) <|
-  .stepL (LStep.core l1 _ _ (Step.makeEligible l1.core 0 1 (by decide) (by decide) (by decide)
+  .stepL (LeaseStep.core l1 _ _ (Step.makeEligible l1.core 0 1 (by decide) (by decide) (by decide)
     (by decide)) rfl) <|
-  .stepL (LStep.learn l2 1 (by decide)) <|
-  .stepL (LStep.heartbeat l3 1 (by decide) (by decide)) <|
-  .stepL (LStep.ackRenew l4 1 (by decide) (by decide)) <|
+  .stepL (LeaseStep.learn l2 1 (by decide)) <|
+  .stepL (LeaseStep.heartbeat l3 1 (by decide) (by decide)) <|
+  .stepL (LeaseStep.ackRenew l4 1 (by decide) (by decide)) <|
   .refl
+
+/-! ## The read rule is not vacuous
+
+In the protocol itself (no rule removed), both halves of `NoStaleRead` have a reachable
+state in which their premise holds, so the theorem says something. -/
+
+/-- After the prefix, n0 holds a valid primary lease from the eligible n1 and may serve a
+linearizable read. -/
+theorem primCanRead_reachable : ∃ a, LeaseReachable 0 P0 (0 : N) a ∧
+    PrimCanRead P0 a 0 ∧ (a.core.known 0).eligible 1 = true :=
+  ⟨l5, ⟨_, leases_prefix P0⟩, by decide, by decide⟩
+
+def l6 := recvData l5 1 l5.core (l5.ackEcho 0 1)   -- n0 echoes n1's acknowledgement
+
+/-- After one echo, n1 holds a valid read lease and may serve a linearizable read. -/
+theorem replCanRead_reachable : ∃ a, LeaseReachable 0 P0 (0 : N) a ∧ ReplCanRead P0 a 1 :=
+  ⟨l6, ⟨_, LTS.MTr.comp (leaseLTS 0 P0) (leases_prefix P0)
+    (.stepL (LeaseStep.heartbeatGrant l5 1 (by decide) (by decide) (by decide) (by decide)) .refl)⟩,
+   by decide⟩
+
+/-! ## Granting a read lease to a sync member that is not yet eligible
+
+Early removal (`uncount`) drops a counted, not-yet-eligible replica with no read-lease
+wait. So if such a replica could be granted a read lease, the primary could drop it and
+commit without it while the lease is still valid. -/
+
+/-- `LeaseStep`, plus an echo to any sync member, eligible or not. -/
+inductive LeaseStepGrantSync (m : Nat) (P : LeaseParams) : LeaseState N → LeaseAction N → LeaseState N → Prop
+  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepGrantSync m P a μ a'
+  | heartbeatGrant (a : LeaseState N) (r : N) : primaryOf a.core r ≠ r →
+      ThinksPrimary a.core (primaryOf a.core r) → a.core.log r <+: a.core.log (primaryOf a.core r) →
+      PrimLeaseValid P a (primaryOf a.core r) → a.core.sync (primaryOf a.core r) r = true →
+      LeaseStepGrantSync m P a (.heartbeat r) (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
+
+def leaseLTSGrantSync (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+  Tr := LeaseStepGrantSync m P
+
+def lu1 := withCore l0 (count l0.core 0 2)          -- n0 counts n2, which stays ineligible
+def lu2 := recvData lu1 2 lu1.core none              -- a heartbeat reaches n2
+def lu3 := recvAck lu2 2 lu2.core                    -- n2 acknowledges
+def lu4 := recvData lu3 2 lu3.core (lu3.ackEcho 0 2) -- n0 echoes it: n2 gets a read lease
+def lu5 := withCore lu4 (uncount lu4.core 0 2)       -- n0 drops n2 at once (early removal)
+def lu6 := withCore lu5 (appendWrite lu5.core 0)     -- n0 writes
+def lu7 := withCore lu6 (commitNext lu6.core 0)      -- n0 commits alone: the history is [1]
+
+theorem grantSync_run : (leaseLTSGrantSync 0 P0).MTr l0
+    [.core (.count 0 2), .heartbeat 2, .ack 2, .heartbeat 2, .core (.uncount 0 2),
+     .core (.append 0), .core (.commit 0)] lu7 :=
+  .stepL (.step (LeaseStep.core l0 _ _ (Step.count l0.core 0 2 (by decide) (by decide) (by decide)
+    (by decide) (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.heartbeat lu1 2 (by decide) (by decide))) <|
+  .stepL (.step (LeaseStep.ackRenew lu2 2 (by decide) (by decide))) <|
+  .stepL (LeaseStepGrantSync.heartbeatGrant lu3 2 (by decide) (by decide) (by decide) (by decide)
+    (by decide)) <|
+  .stepL (.step (LeaseStep.core lu4 _ _ (Step.uncount lu4.core 0 2 (by decide) (by decide) (by decide)
+    (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lu5 _ _ (Step.append lu5.core 0 (by decide) (writable_zero _ _)
+    (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lu6 _ _ (Step.commit lu6.core 0 (by decide) (writable_zero _ _)
+    (by decide) (by decide)) rfl)) <|
+  .refl
+
+/-- Read leases must go only to *eligible* sync members: a counted replica that is not
+yet eligible can be dropped by early removal without a wait, and then serve a stale
+read on the lease it was granted. -/
+theorem grantSync_stale : ∃ a, (leaseLTSGrantSync 0 P0).CanReach (leaseInit 0) a ∧
+    ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist :=
+  ⟨lu7, ⟨_, grantSync_run⟩, by decide, by decide⟩
 
 /-! ## Takeover without waiting out the primary lease -/
 
-/-- `LStep`, plus a takeover with no wait. -/
-inductive LStepNoWaitPrim (m : Nat) (P : LeaseParams) : LState N → LAction N → LState N → Prop
-  | step {a μ a'} : LStep m P a μ a' → LStepNoWaitPrim m P a μ a'
-  | takeover (a : LState N) (n : N) : KnowsLatest a.core n → a.core.cfg.eligible n = true →
+/-- `LeaseStep`, plus a takeover with no wait. -/
+inductive LeaseStepNoWaitPrim (m : Nat) (P : LeaseParams) : LeaseState N → LeaseAction N → LeaseState N → Prop
+  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepNoWaitPrim m P a μ a'
+  | takeover (a : LeaseState N) (n : N) : KnowsLatest a.core n → a.core.cfg.eligible n = true →
       n ≠ a.core.cfg.primary → a.core.cfg.incarnation n = a.core.incarnation n →
-      LStepNoWaitPrim m P a (.takeover n) (takeoverL a n)
+      LeaseStepNoWaitPrim m P a (.takeover n) (takeoverL a n)
 
-def lltsNoWaitPrim (m : Nat) (P : LeaseParams) : LTS (LState N) (LAction N) where
-  Tr := LStepNoWaitPrim m P
+def leaseLTSNoWaitPrim (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+  Tr := LeaseStepNoWaitPrim m P
 
 def lw6 := takeoverL l5 1                           -- n1 takes over at once
 def lw7 := withCore lw6 (appendWrite lw6.core 1)      -- n1 writes
 def lw8 := withCore lw7 (commitNext lw7.core 1)       -- n1 commits alone: the history is [3]
 
-theorem noWaitPrim_run : (lltsNoWaitPrim 0 P0).MTr l0
+theorem noWaitPrim_run : (leaseLTSNoWaitPrim 0 P0).MTr l0
     [.core (.count 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
      .takeover 1, .core (.append 1), .core (.commit 1)] lw8 :=
-  LTS.MTr.comp (lltsNoWaitPrim 0 P0) (lmtr_of_step LStepNoWaitPrim.step (leases_prefix P0)) <|
-  .stepL (LStepNoWaitPrim.takeover l5 1 (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (.step (LStep.core lw6 _ _ (Step.append lw6.core 1 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
-  .stepL (.step (LStep.core lw7 _ _ (Step.commit lw7.core 1 (by decide) (writable_zero _ _) (by decide)
+  LTS.MTr.comp (leaseLTSNoWaitPrim 0 P0) (leaseMtr_of_step LeaseStepNoWaitPrim.step (leases_prefix P0)) <|
+  .stepL (LeaseStepNoWaitPrim.takeover l5 1 (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (.step (LeaseStep.core lw6 _ _ (Step.append lw6.core 1 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lw7 _ _ (Step.commit lw7.core 1 (by decide) (writable_zero _ _) (by decide)
     (by decide)) rfl)) <|
   .refl
 
 /-- Without the takeover wait, the deposed n0 may still serve a linearizable read, and
 its log misses the committed write. -/
-theorem noWaitPrim_stale : ∃ a, (lltsNoWaitPrim 0 P0).CanReach (linit 0) a ∧
+theorem noWaitPrim_stale : ∃ a, (leaseLTSNoWaitPrim 0 P0).CanReach (leaseInit 0) a ∧
     PrimCanRead P0 a 0 ∧ a.core.log 0 ≠ a.core.hist :=
   ⟨lw8, ⟨_, noWaitPrim_run⟩, by decide, by decide⟩
 
 /-! ## Demotion without waiting out the read lease -/
 
-/-- `LStep`, plus a demotion with no wait. -/
-inductive LStepNoWaitRead (m : Nat) (P : LeaseParams) : LState N → LAction N → LState N → Prop
-  | step {a μ a'} : LStep m P a μ a' → LStepNoWaitRead m P a μ a'
-  | demote (a : LState N) (p r : N) : ThinksPrimary a.core p → KnowsLatest a.core p →
+/-- `LeaseStep`, plus a demotion with no wait. -/
+inductive LeaseStepNoWaitRead (m : Nat) (P : LeaseParams) : LeaseState N → LeaseAction N → LeaseState N → Prop
+  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepNoWaitRead m P a μ a'
+  | demote (a : LeaseState N) (p r : N) : ThinksPrimary a.core p → KnowsLatest a.core p →
       a.core.cfg.eligible r = true →
-      LStepNoWaitRead m P a (.demote p r) (withCore a (makeIneligible a.core p r))
+      LeaseStepNoWaitRead m P a (.demote p r) (withCore a (makeIneligible a.core p r))
 
-def lltsNoWaitRead (m : Nat) (P : LeaseParams) : LTS (LState N) (LAction N) where
-  Tr := LStepNoWaitRead m P
+def leaseLTSNoWaitRead (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+  Tr := LeaseStepNoWaitRead m P
 
 def ld6 := recvData l5 1 l5.core (l5.ackEcho 0 1)     -- n0 echoes n1's acknowledgement: read lease
 def ld7 := withCore ld6 (makeIneligible ld6.core 0 1)   -- n0 demotes n1 at once
 def ld8 := withCore ld7 (appendWrite ld7.core 0)        -- n0 writes
 def ld9 := withCore ld8 (commitNext ld8.core 0)         -- n0 commits alone: the history is [1]
 
-theorem noWaitRead_run : (lltsNoWaitRead 0 P0).MTr l0
+theorem noWaitRead_run : (leaseLTSNoWaitRead 0 P0).MTr l0
     [.core (.count 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
      .heartbeat 1, .demote 0 1, .core (.append 0), .core (.commit 0)] ld9 :=
-  LTS.MTr.comp (lltsNoWaitRead 0 P0) (lmtr_of_step LStepNoWaitRead.step (leases_prefix P0)) <|
-  .stepL (.step (LStep.heartbeatGrant l5 1 (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (LStepNoWaitRead.demote ld6 0 1 (by decide) (by decide) (by decide)) <|
-  .stepL (.step (LStep.core ld7 _ _ (Step.append ld7.core 0 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
-  .stepL (.step (LStep.core ld8 _ _ (Step.commit ld8.core 0 (by decide) (writable_zero _ _) (by decide)
+  LTS.MTr.comp (leaseLTSNoWaitRead 0 P0) (leaseMtr_of_step LeaseStepNoWaitRead.step (leases_prefix P0)) <|
+  .stepL (.step (LeaseStep.heartbeatGrant l5 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (LeaseStepNoWaitRead.demote ld6 0 1 (by decide) (by decide) (by decide)) <|
+  .stepL (.step (LeaseStep.core ld7 _ _ (Step.append ld7.core 0 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core ld8 _ _ (Step.commit ld8.core 0 (by decide) (writable_zero _ _) (by decide)
     (by decide)) rfl)) <|
   .refl
 
 /-- Without the demotion wait, the demoted n1 may still serve a linearizable read, and
 its log misses the committed write. -/
-theorem noWaitRead_stale : ∃ a, (lltsNoWaitRead 0 P0).CanReach (linit 0) a ∧
+theorem noWaitRead_stale : ∃ a, (leaseLTSNoWaitRead 0 P0).CanReach (leaseInit 0) a ∧
     ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist :=
   ⟨ld9, ⟨_, noWaitRead_run⟩, by decide, by decide⟩
 
@@ -156,35 +224,35 @@ def ls10 := takeoverL ls9 1                          -- n1's wait is satisfied: 
 def ls11 := withCore ls10 (appendWrite ls10.core 1)
 def ls12 := withCore ls11 (commitNext ls11.core 1)
 
-theorem smallMargin_run : (llts 0 P1).MTr l0
+theorem smallMargin_run : (leaseLTS 0 P1).MTr l0
     [.core (.count 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
      .tick, .tick, .tick, .tick, .takeover 1, .core (.append 1), .core (.commit 1)] ls12 :=
-  LTS.MTr.comp (llts 0 P1) (leases_prefix P1) <|
-  .stepL (LStep.tick l5) <| .stepL (LStep.tick ls6) <| .stepL (LStep.tick ls7) <| .stepL (LStep.tick ls8) <|
-  .stepL (LStep.takeover ls9 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (LStep.core ls10 _ _ (Step.append ls10.core 1 (by decide) (writable_zero _ _) (by decide)) rfl) <|
-  .stepL (LStep.core ls11 _ _ (Step.commit ls11.core 1 (by decide) (writable_zero _ _) (by decide)
+  LTS.MTr.comp (leaseLTS 0 P1) (leases_prefix P1) <|
+  .stepL (LeaseStep.tick l5) <| .stepL (LeaseStep.tick ls6) <| .stepL (LeaseStep.tick ls7) <| .stepL (LeaseStep.tick ls8) <|
+  .stepL (LeaseStep.takeover ls9 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (LeaseStep.core ls10 _ _ (Step.append ls10.core 1 (by decide) (writable_zero _ _) (by decide)) rfl) <|
+  .stepL (LeaseStep.core ls11 _ _ (Step.commit ls11.core 1 (by decide) (writable_zero _ _) (by decide)
     (by decide)) rfl) <|
   .refl
 
 /-- `margin ≥ 2 · drift` is needed: with margin 1 and drift 1, and every rule kept, the
 deposed n0 may serve a linearizable read of a log that misses the committed write. -/
-theorem smallMargin_stale : ∃ a, LReachable 0 P1 (0 : N) a ∧
+theorem smallMargin_stale : ∃ a, LeaseReachable 0 P1 (0 : N) a ∧
     PrimCanRead P1 a 0 ∧ a.core.log 0 ≠ a.core.hist :=
   ⟨ls12, ⟨_, smallMargin_run⟩, by decide, by decide⟩
 
 /-! ## Granting a read lease to a replica that is not an eligible sync member -/
 
-/-- `LStep`, plus an echo to any follower. -/
-inductive LStepGrantAny (m : Nat) (P : LeaseParams) : LState N → LAction N → LState N → Prop
-  | step {a μ a'} : LStep m P a μ a' → LStepGrantAny m P a μ a'
-  | heartbeatGrant (a : LState N) (r : N) : primaryOf a.core r ≠ r →
+/-- `LeaseStep`, plus an echo to any follower. -/
+inductive LeaseStepGrantAny (m : Nat) (P : LeaseParams) : LeaseState N → LeaseAction N → LeaseState N → Prop
+  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepGrantAny m P a μ a'
+  | heartbeatGrant (a : LeaseState N) (r : N) : primaryOf a.core r ≠ r →
       ThinksPrimary a.core (primaryOf a.core r) → a.core.log r <+: a.core.log (primaryOf a.core r) →
       PrimLeaseValid P a (primaryOf a.core r) →
-      LStepGrantAny m P a (.heartbeat r) (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
+      LeaseStepGrantAny m P a (.heartbeat r) (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
 
-def lltsGrantAny (m : Nat) (P : LeaseParams) : LTS (LState N) (LAction N) where
-  Tr := LStepGrantAny m P
+def leaseLTSGrantAny (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+  Tr := LeaseStepGrantAny m P
 
 def lg1 := recvData l0 2 l0.core none                 -- a heartbeat reaches n2, which follows n0
 def lg2 := recvAck lg1 2 lg1.core                       -- n2 acknowledges
@@ -192,19 +260,19 @@ def lg3 := recvData lg2 2 lg2.core (lg2.ackEcho 0 2)     -- n0 echoes it: n2 get
 def lg4 := withCore lg3 (appendWrite lg3.core 0)        -- n0 writes
 def lg5 := withCore lg4 (commitNext lg4.core 0)         -- n0 commits alone: the history is [1]
 
-theorem grantAny_run : (lltsGrantAny 0 P0).MTr l0
+theorem grantAny_run : (leaseLTSGrantAny 0 P0).MTr l0
     [.heartbeat 2, .ack 2, .heartbeat 2, .core (.append 0), .core (.commit 0)] lg5 :=
-  .stepL (.step (LStep.heartbeat l0 2 (by decide) (by decide))) <|
-  .stepL (.step (LStep.ackRenew lg1 2 (by decide) (by decide))) <|
-  .stepL (LStepGrantAny.heartbeatGrant lg2 2 (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (.step (LStep.core lg3 _ _ (Step.append lg3.core 0 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
-  .stepL (.step (LStep.core lg4 _ _ (Step.commit lg4.core 0 (by decide) (writable_zero _ _) (by decide)
+  .stepL (.step (LeaseStep.heartbeat l0 2 (by decide) (by decide))) <|
+  .stepL (.step (LeaseStep.ackRenew lg1 2 (by decide) (by decide))) <|
+  .stepL (LeaseStepGrantAny.heartbeatGrant lg2 2 (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (.step (LeaseStep.core lg3 _ _ (Step.append lg3.core 0 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lg4 _ _ (Step.commit lg4.core 0 (by decide) (writable_zero _ _) (by decide)
     (by decide)) rfl)) <|
   .refl
 
 /-- Read leases must go only to eligible sync members: a follower outside the sync set
 that is granted one may serve a linearizable read of a log that misses the write. -/
-theorem grantAny_stale : ∃ a, (lltsGrantAny 0 P0).CanReach (linit 0) a ∧
+theorem grantAny_stale : ∃ a, (leaseLTSGrantAny 0 P0).CanReach (leaseInit 0) a ∧
     ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist :=
   ⟨lg5, ⟨_, grantAny_run⟩, by decide, by decide⟩
 

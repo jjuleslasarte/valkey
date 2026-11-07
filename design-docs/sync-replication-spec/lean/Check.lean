@@ -18,3 +18,6 @@ import SyncReplication
 #print axioms SyncReplication.noWaitRead_stale
 #print axioms SyncReplication.smallMargin_stale
 #print axioms SyncReplication.grantAny_stale
+#print axioms SyncReplication.primCanRead_reachable
+#print axioms SyncReplication.replCanRead_reachable
+#print axioms SyncReplication.grantSync_stale
