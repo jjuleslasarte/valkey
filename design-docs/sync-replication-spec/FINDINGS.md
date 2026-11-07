@@ -394,14 +394,18 @@ that part is needed.
 Rules the model adds to or narrows from the doc, all used by the proof: a
 restarted primary waits one read lease plus the margin before demoting anyone
 (the doc's restart rule covers takeover and reads, not demotion; a restarted
-primary has forgotten when it last heard from each replica); that wait, after a
-takeover or restart, applies to every replica rather than only those of the old
-configuration; and read leases go only to eligible sync members with a matching
-incarnation. Not modelled: planned demotion (the replica drops its lease on
-request). One observation: the model does not delay reads after a restart, only
-clears the restarted node's leases, and the proof still goes through, so the
-read half of the doc's restart rule is not needed for safety. **Proposed doc
-change:** state the demotion wait after restart and the eligible-only grant.
+primary has forgotten when it last heard from each replica, and which
+configuration it took over from, so the wait covers every replica, where after
+a takeover it covers only replicas of the replaced configuration as the doc
+says); and read leases go only to eligible sync members with a matching
+incarnation. The incarnation part is shown needed only when the read lease may
+outlast the primary lease (`grantNoInc_stale`), which the "Lease durations"
+rule forbids; under that rule it is open. Not modelled: planned demotion (the
+replica drops its lease on request). One observation: the model does not delay
+reads after a restart, only clears the restarted node's leases, and the proof
+still goes through, so the read half of the doc's restart rule is not needed
+for safety. **Proposed doc change:** state the demotion wait after restart and
+the eligible-only grant.
 
 ## F11. The doc's drift-margin wording is unsafe if read literally
 
