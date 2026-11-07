@@ -382,19 +382,26 @@ log is exactly the committed history. For every min-sync value, any number of
 nodes, with restarts. This is the first evidence that the lease rules are
 sufficient: the TLC safe runs of `Leases.tla` never finished.
 
-Four runs show that each rule is needed (`SyncReplication.noWaitPrim_stale`,
-`noWaitRead_stale`, `grantAny_stale`, `smallMargin_stale`, matching TLC's
-`Leases_noWaitPrim`, `_noWaitRead`, `_noEchoSync`, `_smallMargin`): the takeover
-wait, the demotion wait, granting read leases only to eligible sync members
-(F10, tightened from "sync set" to "eligible with a matching incarnation"), and
-the margin bound.
+Five runs show the rules are needed (`SyncReplication.noWaitPrim_stale`,
+`noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `smallMargin_stale`; the
+first three and the last match TLC's `Leases_noWaitPrim`, `_noWaitRead`,
+`_noEchoSync`, `_smallMargin`): the takeover wait, the demotion wait, granting
+read leases only to sync members (F10) and only to eligible ones (a counted,
+not-yet-eligible member can be dropped by early removal without a wait), and
+the margin bound. The proof also requires a matching incarnation; no run shows
+that part is needed.
 
-Two rules the model adds to the doc, both used by the proof: a restarted
-primary waits one read lease plus the margin before demoting anyone (the doc's
-restart rule covers takeover and reads, not demotion; a restarted primary has
-forgotten when it last heard from each replica); and read leases go only to
-eligible sync members with a matching incarnation. **Proposed doc change:**
-state both.
+Rules the model adds to or narrows from the doc, all used by the proof: a
+restarted primary waits one read lease plus the margin before demoting anyone
+(the doc's restart rule covers takeover and reads, not demotion; a restarted
+primary has forgotten when it last heard from each replica); that wait, after a
+takeover or restart, applies to every replica rather than only those of the old
+configuration; and read leases go only to eligible sync members with a matching
+incarnation. Not modelled: planned demotion (the replica drops its lease on
+request). One observation: the model does not delay reads after a restart, only
+clears the restarted node's leases, and the proof still goes through, so the
+read half of the doc's restart rule is not needed for safety. **Proposed doc
+change:** state the demotion wait after restart and the eligible-only grant.
 
 ## F11. The doc's drift-margin wording is unsafe if read literally
 
