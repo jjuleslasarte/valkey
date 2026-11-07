@@ -52,7 +52,7 @@ MakeEligible reaches a state where an authoritative eligible replica (n2) lacks 
 committed history. -/
 theorem noIncCheck_unsafe : ∃ s, (ltsNoInc 1).CanReach (init 0) s ∧ ¬ Safety s := by
   refine ⟨e9, ⟨_, noIncCheck_run⟩, ?_⟩
-  intro ⟨hehc, _⟩
-  exact absurd (hehc 2 (by decide)) (by decide)
+  intro ⟨hholds, _⟩
+  exact absurd (hholds 2 (by decide)) (by decide)
 
 end SyncReplication

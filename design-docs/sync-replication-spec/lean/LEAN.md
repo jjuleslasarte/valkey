@@ -13,7 +13,7 @@ lean/
   SyncReplication.lean          root import
   SyncReplication/
     Model.lean                  state, actions, Step, lts, Reachable, the safety properties
-    Replies.lean                held client replies: AState, AStep, AckedDurable, AckedHeld
+    Replies.lean                held client replies: ReplyState, ReplyStep, AckedDurable, AckedHeld
     Leases.lean                 the lease layer: LeaseState, LeaseStep, the read rule, NoStaleRead
     Invariant.lean              the inductive invariant in five layers; the fence; frame lemmas
     Contracts.lean              each action's effect in design terms, proved without the invariant
@@ -71,19 +71,19 @@ authoritative (README §2).
 ### No acknowledged write is lost (`Durability.lean`)
 
 ```lean
-theorem ackSafety {i : Node} {a : AState Node} {m : Nat} (h : AReachable m i a) :
+theorem ackSafety {i : Node} {a : ReplyState Node} {m : Nat} (h : ReplyReachable m i a) :
     AckedDurable a ∧ Safety a.core
 
-theorem ackedHeld {i : Node} {a : AState Node} {m : Nat} (h : AReachable m i a) : AckedHeld a
+theorem ackedHeld {i : Node} {a : ReplyState Node} {m : Nat} (h : ReplyReachable m i a) : AckedHeld a
 ```
 
 ```lean
-AckedDurable a  :=  ∀ x ∈ a.okd, 1 ≤ x.1 ∧ x.1 ≤ a.core.hist.length ∧ a.core.hist.getD (x.1 - 1) 0 = x.2
-AckedHeld a     :=  ∀ x ∈ a.okd, ∀ n, IsAuthoritative a.core n →
+AckedDurable a  :=  ∀ x ∈ a.acknowledged, 1 ≤ x.1 ∧ x.1 ≤ a.core.hist.length ∧ a.core.hist.getD (x.1 - 1) 0 = x.2
+AckedHeld a     :=  ∀ x ∈ a.acknowledged, ∀ n, IsAuthoritative a.core n →
                       x.1 ≤ (a.core.log n).length ∧ (a.core.log n).getD (x.1 - 1) 0 = x.2
 ```
 
-`okd` is the list of `(offset, value)` pairs released to clients as OK. `hist` only
+`acknowledged` is the list of `(offset, value)` pairs released to clients as OK. `hist` only
 grows, so an acknowledged write stays in the committed history.
 
 ### No stale linearizable read (`LeaseInvariant.lean`)
@@ -119,7 +119,7 @@ action with a rule removed) that violates the guarantee; see the appendix.
 
 ```lean
 theorem noReconcile_unsafe        : ∃ s, (ltsNoReconcile 1).CanReach (init 0) s ∧ ¬ Safety s
-theorem noReplyFence_unsafe       : ∃ a, (altsNoFence 0).CanReach (ainit 0) a ∧ ¬ AckedDurable a
+theorem noReplyFence_unsafe       : ∃ a, (replyLTSNoFence 0).CanReach (replyInit 0) a ∧ ¬ AckedDurable a
 theorem noRebuild_unsafe          : ∃ s, (ltsNoRebuild 1).CanReach (init 0) s ∧ ¬ Safety s
 theorem noIncCheck_unsafe         : ∃ s, (ltsNoInc 1).CanReach (init 0) s ∧ ¬ Safety s
 theorem staleRestoreKeepsInc_unsafe : ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧ ¬ Safety s
@@ -160,7 +160,7 @@ See "Lease timing" below.
 | `sync` | `Node → Node → Bool` | `sync p r`: `r` is in `p`'s sync replica set. |
 | `acked` | `Node → Node → Nat` | `acked p r`: how far `p` believes `r` has acknowledged. |
 | `commit` | `Node → Nat` | Each node's committed offset. |
-| `recon` | `Node → Nat` | Each node's catch-up point: a new primary must commit up to here before it serves. |
+| `inheritedEnd` | `Node → Nat` | The end of each node's inherited log: a new primary must commit up to here before it serves. `catchUpPoint` is derived from it. |
 | `term` | `Node → Nat` | The term each node writes new entries with. |
 | `ackHigh` | `Node → Nat` | Each node's acknowledgement high-water mark: the highest offset it has acknowledged as a replica (Ack) or as a primary (Commit). Survives a restart with data. |
 | `hist` | `List Nat` | Ghost: the committed history, extended the first time any node commits an offset. |
@@ -175,9 +175,9 @@ empty logs.
 
 Derived predicates: `ThinksPrimary s p` (`known[p]` names `p` primary with its current
 incarnation), `KnowsLatest s n` (`known[n].version = cfg.version`), `primaryOf s n`
-(`known[n].primary`), `Reconciled s p` (`recon p ≤ commit p`), `IsAuthoritative`,
+(`known[n].primary`), `Reconciled s p` (`inheritedEnd p ≤ commit p`), `IsAuthoritative`,
 `PrimaryAuthoritative s` (the current primary's incarnation matches),
-`catchUpPoint s p` (`commit p` once reconciled, else `min (recon p) (log p).length`),
+`catchUpPoint s p` (`commit p` once reconciled, else `min (inheritedEnd p) (log p).length`),
 `Writable m s p` (`m ≤` the number of sync members of `p` that are eligible with a
 matching incarnation in `known[p]`, as `Set.encard`).
 
@@ -199,11 +199,11 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 | `makeEligible p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new version with `r` eligible and `inc r` recorded; `known p` updated |
 | `makeIneligible p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `known p` updated; `sync p r := false` |
 | `learn n` | `n` does not know the latest configuration | `known n := cfg`; `sync n` emptied unless `n` is primary there |
-| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.incarnation n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the matching eligible replicas; `acked n`, `commit n` reset; `recon n := (log n).length`; `term n := cfg.version + 1` |
+| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.incarnation n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the matching eligible replicas; `acked n`, `commit n` reset; `inheritedEnd n := (log n).length`; `term n := cfg.version + 1` |
 | `resync r` | `r` does not consider itself primary; its log is not a prefix of its primary's; `r` is neither counted nor eligible in its primary's configuration | `log r := (log p).take (catchUpPoint s p)`; `acked p r := 0`; `commit r` capped |
 | `restartEmpty n` | `n` knows the latest configuration; some other node is authoritative | `log n := []`, `incarnation n + 1`, volatile state and `ackHigh n` reset; the current primary drops `n` from its sync set and acks |
-| `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `recon n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `known n`), else emptied |
-| `restartPartial n k`, keeping the incarnation | as `restartKeep`, with `k < (log n).length` and `ackHigh n ≤ k` | `restartKeep` on `(log n).take k`, with `recon n := k` |
+| `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `inheritedEnd n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `known n`), else emptied |
+| `restartPartial n k`, keeping the incarnation | as `restartKeep`, with `k < (log n).length` and `ackHigh n ≤ k` | `restartKeep` on `(log n).take k`, with `inheritedEnd n := k` |
 | `restartPartial n k`, new incarnation | `n` knows the latest configuration, `k < (log n).length`, `k < ackHigh n`, some other node authoritative | `restartEmpty`, except `log n := (log n).take k` |
 
 The protocol is a CSLib labelled transition system, `lts m : LTS (State Node)
@@ -240,19 +240,20 @@ configuration `p`'s takeover replaced; every `r` after a restart). `LeaseStep m 
 
 ### Held client replies (`Replies.lean`)
 
-`AState` is a `State` plus `held : List (Held Node)` and `okd : List (Nat × Nat)`. A
-held reply is `(p, o, t)`: primary `p`, 1-based offset `o`, tag `t = term p` at the
-append; since a log entry is the term, `t` is also the value written. `AStep m` has:
+`ReplyState` is a `State` plus `held : List (Held Node)` and `acknowledged : List (Nat × Nat)`.
+A held reply `h : Held` has fields `primary`, `offset` (1-based) and `term` (the primary's
+term at the append; since a log entry is the term, it is also the value written).
+`ReplyStep m` has:
 
 | Action | Guard | Effect |
 |---|---|---|
-| `core μ` | `Step m` for a non-restart action `μ` | the replication step; `held`, `okd` unchanged |
-| `write p` | as `append p` | `appendWrite` plus `(p, (log p).length + 1, term p)` held |
-| `release h` | `h` held, `h.o ≤ commit h.p`, and `fenced`: `h.p` thinks it is primary with `term h.p = h.t` | `h` removed; `(h.o, h.t)` added to `okd` |
-| `abort h` | `h` held and not `fenced` | `h` removed (UNCOMMITTED) |
-| `restartE n`, `restartK n`, `restartP n k` | as the replication restarts | the replication restart; `n`'s held replies dropped |
+| `core μ` | `Step m` for a non-restart action `μ` | the replication step; `held`, `acknowledged` unchanged |
+| `write p` | as `append p` | `appendWrite` plus `⟨p, (log p).length + 1, term p⟩` held |
+| `release h` | `h` held, `h.offset ≤ commit h.primary`, and `ReplyFenced`: `h.primary` thinks it is primary with `term h.primary = h.term` | `h` removed; `(h.offset, h.term)` added to `acknowledged` |
+| `abort h` | `h` held and not `ReplyFenced` | `h` removed (UNCOMMITTED) |
+| `restartEmpty n`, `restartKeep n`, `restartPartial n k` | as the replication restarts | the replication restart; `n`'s held replies dropped |
 
-`alts m`, `AReachable m i a` as above.
+`replyLTS m`, `ReplyReachable m i a` as above.
 
 ## The proof
 
@@ -260,19 +261,20 @@ append; since a log entry is the term, `t` is also the value written. `AStep m` 
 
 `Invariant s` extends five structures, `ConfigInvariant`, `ReplInvariant`,
 `MembershipInvariant`, `CommitInvariant`, `FailoverInvariant`, and adds the goal
-`ehc`. README §3.1 lists all 23 fields with their meaning; each has a docstring here
+`eligibleHoldsCommitted`. README §3.1 lists all 23 fields with their meaning; each has a docstring here
 citing the design. `invariant_init` proves it of `init i`, and `invariant_safety`
 that it implies `Safety`.
 
 The fence of a deposed primary `p` is `fence s p := sInf (s.acked p '' leftSync s p)`,
 the smallest acknowledgement `p` recorded from a sync member that now follows another
-primary. `Fenced s p` packages the five facts the proof needs about it (`left`,
-`reconLe`, `primHolds`, `primAck`, `eligHolds`). The preservation proofs use four
-lemmas rather than the definition: `Fenced.of_left` (to show `p` is fenced, name one
-departed replica and check the properties at its acknowledgement), `Fenced.attained`
-(the fence is some departed replica's acknowledgement), `Fenced.mono` (for steps that
-only extend logs or add sync members) and `Fenced.transfer` (for steps that leave the
-fenced primary's row alone). `Learn` and `Takeover` are the two actions where the fence
+primary. `DeposedFenced s p` packages the five facts the proof needs about it (`left`,
+`fenceLeInheritedEnd`, `primHolds`, `primAck`, `eligHolds`); it is unrelated to the
+reply fence `ReplyFenced` of `Replies.lean`. The preservation proofs use four lemmas
+rather than the definition: `DeposedFenced.of_left` (to show `p` is fenced, name one
+departed replica and check the properties at its acknowledgement),
+`DeposedFenced.attained` (the fence is some departed replica's acknowledgement),
+`DeposedFenced.mono` (for steps that only extend logs or add sync members) and
+`DeposedFenced.transfer` (for steps that leave the fenced primary's row alone). `Learn` and `Takeover` are the two actions where the fence
 can drop, and they build a fresh witness.
 
 `commit_holds` is the central lemma: if any primary, current or deposed, may commit
@@ -295,9 +297,15 @@ Resync), `Commit.lean` (Commit, Count, Uncount), `Config.lean` (Learn, MakeEligi
 MakeIneligible), `Failover.lean` (Takeover), `Restart.lean` (RestartEmpty,
 RestartKeep, RestartPartial). Every action with a non-trivial proof is proved one
 layer at a time, `config_X`, `repl_X`, `membership_X`, `commit_X`, `failover_X`,
-`ehc_X`, each with a docstring saying in design terms why that layer survives the
-action, and `invariant_X` assembles them as a term. Steps that leave a layer's
-variables alone use that layer's frame lemma (`ConfigInvariant.frame`, ...).
+`eligibleHoldsCommitted_X`, each with a docstring saying in design terms why that
+layer survives the action, and `invariant_X` assembles them as a term. Steps that leave
+a layer's variables alone use that layer's frame lemma (`ConfigInvariant.frame`, ...).
+
+Guard hypotheses keep one name from the `Step` constructor through `invariant_step` to
+the layer lemmas: `hp` (thinks it is primary), `hkl` (knows the latest configuration),
+`hnkl` (does not), `hel` (the eligibility guard), `hnp` (not the current primary), `hin`
+(recorded incarnation matches), `hsy` (sync membership), `hsurv` (some other node is
+authoritative), `hk`, `hkeep`, `hfresh` (the stale-restore bounds on `k`).
 
 `Preserve.lean` is the dispatch: `invariant_step` does a `cases` on `Step` and calls
 the `invariant_X` for each constructor; `invariant_trInv` states this as a CSLib
@@ -345,11 +353,11 @@ in `_takeover`, the two demotion waits in `_demote`.
 ### Durability (`Durability.lean`)
 
 `ReplyInvariant a` is `Invariant a.core` plus `TermLe` (every term is at most
-`cfg.version`), `HeldInvariant` (a held reply's tag is at most `cfg.version`, and a fenced
+`cfg.version`), `HeldInvariant` (a held reply's term is at most `cfg.version`, and a fenced
 reply points at its own entry in its primary's log) and `AckedDurable`. `step_facts`
 shows that every non-restart replication step extends `hist`, does not lower
 `cfg.version`, keeps `TermLe`, and keeps fenced replies fenced with their log only grown;
-the cases that matter are Takeover (the new term `cfg.version + 1` exceeds every tag),
+the cases that matter are Takeover (the new term `cfg.version + 1` exceeds every held term),
 Learn (can never make a node primary) and Resync (changes only a node that does not
 think it is primary). `release` reads its entry from `HeldInvariant`, and
 `CommittedAgree` turns that into `hist[o] = t`.
@@ -424,10 +432,10 @@ type; `Quot.sound` through function extensionality.
 
 | File | Lines |
 |---|---|
-| `SyncReplication/Model.lean` | 451 |
+| `SyncReplication/Model.lean` | 456 |
 | `SyncReplication/Leases.lean` | 314 |
 | `SyncReplication/LeaseInvariant.lean` | 1,055 |
-| `SyncReplication/Replies.lean` | 113 |
+| `SyncReplication/Replies.lean` | 129 |
 | `SyncReplication/Invariant.lean` | 444 |
 | `SyncReplication/Contracts.lean` | 616 |
 | `SyncReplication/Preserve/Replication.lean` | 343 |
@@ -437,11 +445,11 @@ type; `Quot.sound` through function extensionality.
 | `SyncReplication/Preserve/Restart.lean` | 859 |
 | `SyncReplication/Preserve.lean` | 56 |
 | `SyncReplication/Safety.lean` | 43 |
-| `SyncReplication/Durability.lean` | 248 |
-| `SyncReplication/Counterexamples/` (10 files) | 1,048 |
+| `SyncReplication/Durability.lean` | 249 |
+| `SyncReplication/Counterexamples/` (10 files) | 1,054 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 7,343 (plus the two root imports, 15 lines) |
+| total | 7,371 (plus the two root imports, 15 lines) |
 
 `lake build` of the whole tree takes about 20 seconds warm on a laptop-class
 machine (1,030 jobs including Mathlib's and CSLib's prebuilt modules).
@@ -550,7 +558,7 @@ history is `[1]`, on n0 and n1).
 | File | Weakened relation | Rule removed | Trace | Violates |
 |---|---|---|---|---|
 | `Reconcile.lean` | `StepNoReconcile` | Count measures catch-up against the primary's own commit point | count 0 1, makeEligible 0 1, append 0, learn 1, replicate 1, ack 1, commit 0, takeover 1, learn 2, **count 1 2**, makeEligible 1 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
-| `ReplyFence.lean` | `AStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | count 0 1, makeEligible 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, count 1 0, makeEligible 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[5]` |
+| `ReplyFence.lean` | `ReplyStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | count 0 1, makeEligible 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, count 1 0, makeEligible 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[5]` |
 | `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |

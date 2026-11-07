@@ -31,9 +31,9 @@ theorem repl_commit : ReplInvariant (commitNext s p) := by
   have hold := commit_holds h hp hlen hcap
   have hC := commitNext_commit (s := s) p
   have hsucc := take_succ_getD hlen
-  have hcaEqP := h.caEq p
-  have hcl := h.caLen p
-  have hch := h.caHist p
+  have hprefixP := h.committedIsHistoryPrefix p
+  have hcl := h.commitWithinLog p
+  have hch := h.commitWithinHistory p
   have hH : (commitNext s p).hist.take (s.commit p + 1) = (s.log p).take (s.commit p + 1) ∧
       s.hist <+: (commitNext s p).hist ∧ (commitNext s p).hist.length ≤ s.hist.length + 1 ∧
       ((commitNext s p).hist.length = s.hist.length + 1 → s.commit p = s.hist.length) := by
@@ -41,7 +41,7 @@ theorem repl_commit : ReplInvariant (commitNext s p) := by
     · have hh := commitNext_hist_new (s := s) he
       rw [hh]
       refine ⟨?_, List.prefix_append _ _, by simp, fun _ => he⟩
-      rw [hsucc, hcaEqP, he, List.take_length, List.take_of_length_le (by simp)]
+      rw [hsucc, hprefixP, he, List.take_length, List.take_of_length_le (by simp)]
     · have hh := commitNext_hist_old (s := s) he
       rw [hh]
       refine ⟨?_, List.prefix_refl _, by omega, fun e => by omega⟩
@@ -49,7 +49,7 @@ theorem repl_commit : ReplInvariant (commitNext s p) := by
       -- both are prefixes of the log of an authoritative node
       obtain ⟨a, ha⟩ := h.authEx
       have h1 := hold a ha
-      have h2 := h.ehc a ha
+      have h2 := h.eligibleHoldsCommitted a ha
       have hl1 : s.commit p + 1 ≤ ((s.log p).take (s.commit p + 1)).length := by
         rw [List.length_take_of_le hlen]
       have := prefixes_agree h2 h1 (k := s.commit p + 1) hlt hl1
@@ -77,9 +77,9 @@ theorem commit_commit : CommitInvariant (commitNext s p) := by
   have hold := commit_holds h hp hlen hcap
   have hC := commitNext_commit (s := s) p
   have hsucc := take_succ_getD hlen
-  have hcaEqP := h.caEq p
-  have hcl := h.caLen p
-  have hch := h.caHist p
+  have hprefixP := h.committedIsHistoryPrefix p
+  have hcl := h.commitWithinLog p
+  have hch := h.commitWithinHistory p
   have hH : (commitNext s p).hist.take (s.commit p + 1) = (s.log p).take (s.commit p + 1) ∧
       s.hist <+: (commitNext s p).hist ∧ (commitNext s p).hist.length ≤ s.hist.length + 1 ∧
       ((commitNext s p).hist.length = s.hist.length + 1 → s.commit p = s.hist.length) := by
@@ -87,7 +87,7 @@ theorem commit_commit : CommitInvariant (commitNext s p) := by
     · have hh := commitNext_hist_new (s := s) he
       rw [hh]
       refine ⟨?_, List.prefix_append _ _, by simp, fun _ => he⟩
-      rw [hsucc, hcaEqP, he, List.take_length, List.take_of_length_le (by simp)]
+      rw [hsucc, hprefixP, he, List.take_length, List.take_of_length_le (by simp)]
     · have hh := commitNext_hist_old (s := s) he
       rw [hh]
       refine ⟨?_, List.prefix_refl _, by omega, fun e => by omega⟩
@@ -95,29 +95,29 @@ theorem commit_commit : CommitInvariant (commitNext s p) := by
       -- both are prefixes of the log of an authoritative node
       obtain ⟨a, ha⟩ := h.authEx
       have h1 := hold a ha
-      have h2 := h.ehc a ha
+      have h2 := h.eligibleHoldsCommitted a ha
       have hl1 : s.commit p + 1 ≤ ((s.log p).take (s.commit p + 1)).length := by
         rw [List.length_take_of_le hlen]
       have := prefixes_agree h2 h1 (k := s.commit p + 1) hlt hl1
       rw [this, List.take_take]; simp
   obtain ⟨hH1, hH2, hH3, hH4⟩ := hH
   exact {
-  caLen := by
+  commitWithinLog := by
     intro x; show (commitNext s p).commit x ≤ _; rw [hC]; split_ifs with hx
     · subst hx; exact hlen
-    · exact h.caLen x
-  caHist := by
+    · exact h.commitWithinLog x
+  commitWithinHistory := by
     intro x; show (commitNext s p).commit x ≤ (commitNext s p).hist.length; rw [hC]; split_ifs with hx
     · subst hx
       have := hH1; have hl := congrArg List.length this
       rw [List.length_take_of_le hlen] at hl
       simp only [List.length_take] at hl; omega
-    · exact Nat.le_trans (h.caHist x) hH2.length_le
-  caEq := by
+    · exact Nat.le_trans (h.commitWithinHistory x) hH2.length_le
+  committedIsHistoryPrefix := by
     intro x; show (s.log x).take ((commitNext s p).commit x) = (commitNext s p).hist.take _; rw [hC]
     split_ifs with hx
     · subst hx; exact hH1.symm
-    · rw [h.caEq x]; exact prefix_take_eq hH2 (h.caHist x)
+    · rw [h.committedIsHistoryPrefix x]; exact prefix_take_eq hH2 (h.commitWithinHistory x)
   histAck := by
     -- If the history grows, the new entry is at `p`'s commit point, which every other
     -- authoritative node has acknowledged (`commit_ackHigh`) and `p` now has too.
@@ -132,16 +132,16 @@ theorem commit_commit : CommitInvariant (commitNext s p) := by
       by_cases hnp : n = p
       · subst hnp; exact commitNext_ackHigh_self _
       · exact Nat.le_trans (commit_ackHigh h hp hcap n hn' hnp) hle
-  reconLen := h.reconLen
-  histLe := by
+  inheritedEndWithinLog := h.inheritedEndWithinLog
+  historyWithinCommitOrInherited := by
     intro hpa
     have hpa' : PrimaryAuthoritative s := hpa
     show (commitNext s p).hist.length ≤ (commitNext s p).commit s.cfg.primary ∨
-      (commitNext s p).hist.length ≤ s.recon s.cfg.primary
+      (commitNext s p).hist.length ≤ s.inheritedEnd s.cfg.primary
     rw [hC]
     rcases thinksPrimary_cases h hp with ⟨hpe, _⟩ | hv
     · rw [if_pos hpe.symm]
-      have hl0 := h.histLe hpa'
+      have hl0 := h.historyWithinCommitOrInherited hpa'
       rw [← hpe] at hl0
       rcases Nat.lt_or_ge s.hist.length ((commitNext s p).hist.length) with hl | hl
       · left; have := hH4 (by omega); omega
@@ -156,9 +156,9 @@ theorem commit_commit : CommitInvariant (commitNext s p) := by
         -- a deposed primary commits below its fence, which is below the reconciliation point
         have hF := h.stale p hp hv
         obtain ⟨w, ⟨hw1, _⟩, hwF⟩ := hF.attained
-        have := hF.reconLe hpa'
+        have := hF.fenceLeInheritedEnd hpa'
         have := hcap w hw1; omega
-      · rcases h.histLe hpa' with a | a
+      · rcases h.historyWithinCommitOrInherited hpa' with a | a
         · left; omega
         · right; omega }
 
@@ -166,9 +166,9 @@ theorem commit_commit : CommitInvariant (commitNext s p) := by
 theorem failover_commit : FailoverInvariant (commitNext s p) := by
   have hold := commit_holds h hp hlen hcap
   have hsucc := take_succ_getD hlen
-  have hcaEqP := h.caEq p
-  have hcl := h.caLen p
-  have hch := h.caHist p
+  have hprefixP := h.committedIsHistoryPrefix p
+  have hcl := h.commitWithinLog p
+  have hch := h.commitWithinHistory p
   have hH : (commitNext s p).hist.take (s.commit p + 1) = (s.log p).take (s.commit p + 1) ∧
       s.hist <+: (commitNext s p).hist ∧ (commitNext s p).hist.length ≤ s.hist.length + 1 ∧
       ((commitNext s p).hist.length = s.hist.length + 1 → s.commit p = s.hist.length) := by
@@ -176,7 +176,7 @@ theorem failover_commit : FailoverInvariant (commitNext s p) := by
     · have hh := commitNext_hist_new (s := s) he
       rw [hh]
       refine ⟨?_, List.prefix_append _ _, by simp, fun _ => he⟩
-      rw [hsucc, hcaEqP, he, List.take_length, List.take_of_length_le (by simp)]
+      rw [hsucc, hprefixP, he, List.take_length, List.take_of_length_le (by simp)]
     · have hh := commitNext_hist_old (s := s) he
       rw [hh]
       refine ⟨?_, List.prefix_refl _, by omega, fun e => by omega⟩
@@ -184,7 +184,7 @@ theorem failover_commit : FailoverInvariant (commitNext s p) := by
       -- both are prefixes of the log of an authoritative node
       obtain ⟨a, ha⟩ := h.authEx
       have h1 := hold a ha
-      have h2 := h.ehc a ha
+      have h2 := h.eligibleHoldsCommitted a ha
       have hl1 : s.commit p + 1 ≤ ((s.log p).take (s.commit p + 1)).length := by
         rw [List.length_take_of_le hlen]
       have := prefixes_agree h2 h1 (k := s.commit p + 1) hlt hl1
@@ -197,12 +197,12 @@ theorem failover_commit : FailoverInvariant (commitNext s p) := by
   authEx := h.authEx }
 
 /-- Every authoritative node already holds the newly committed entry (`commit_holds`). -/
-theorem ehc_commit : EligibleHoldsCommitted (commitNext s p) := by
+theorem eligibleHoldsCommitted_commit : EligibleHoldsCommitted (commitNext s p) := by
   have hold := commit_holds h hp hlen hcap
   have hsucc := take_succ_getD hlen
-  have hcaEqP := h.caEq p
-  have hcl := h.caLen p
-  have hch := h.caHist p
+  have hprefixP := h.committedIsHistoryPrefix p
+  have hcl := h.commitWithinLog p
+  have hch := h.commitWithinHistory p
   have hH : (commitNext s p).hist.take (s.commit p + 1) = (s.log p).take (s.commit p + 1) ∧
       s.hist <+: (commitNext s p).hist ∧ (commitNext s p).hist.length ≤ s.hist.length + 1 ∧
       ((commitNext s p).hist.length = s.hist.length + 1 → s.commit p = s.hist.length) := by
@@ -210,7 +210,7 @@ theorem ehc_commit : EligibleHoldsCommitted (commitNext s p) := by
     · have hh := commitNext_hist_new (s := s) he
       rw [hh]
       refine ⟨?_, List.prefix_append _ _, by simp, fun _ => he⟩
-      rw [hsucc, hcaEqP, he, List.take_length, List.take_of_length_le (by simp)]
+      rw [hsucc, hprefixP, he, List.take_length, List.take_of_length_le (by simp)]
     · have hh := commitNext_hist_old (s := s) he
       rw [hh]
       refine ⟨?_, List.prefix_refl _, by omega, fun e => by omega⟩
@@ -218,7 +218,7 @@ theorem ehc_commit : EligibleHoldsCommitted (commitNext s p) := by
       -- both are prefixes of the log of an authoritative node
       obtain ⟨a, ha⟩ := h.authEx
       have h1 := hold a ha
-      have h2 := h.ehc a ha
+      have h2 := h.eligibleHoldsCommitted a ha
       have hl1 : s.commit p + 1 ≤ ((s.log p).take (s.commit p + 1)).length := by
         rw [List.length_take_of_le hlen]
       have := prefixes_agree h2 h1 (k := s.commit p + 1) hlt hl1
@@ -230,10 +230,10 @@ theorem ehc_commit : EligibleHoldsCommitted (commitNext s p) := by
   · have hh := commitNext_hist_new (s := s) he
     rw [hh]
     have := hold n hn
-    rw [hsucc, hcaEqP, he, List.take_length] at this
+    rw [hsucc, hprefixP, he, List.take_length] at this
     rw [he]; exact this
   · have hh := commitNext_hist_old (s := s) he
-    rw [hh]; exact h.ehc n hn
+    rw [hh]; exact h.eligibleHoldsCommitted n hn
 
 theorem invariant_commit : Invariant (commitNext s p) where
   toConfigInvariant := config_commit h p hp hlen hcap
@@ -241,7 +241,7 @@ theorem invariant_commit : Invariant (commitNext s p) where
   toMembershipInvariant := membership_commit h p hp hlen hcap
   toCommitInvariant := commit_commit h p hp hlen hcap
   toFailoverInvariant := failover_commit h p hp hlen hcap
-  ehc := ehc_commit h p hp hlen hcap
+  eligibleHoldsCommitted := eligibleHoldsCommitted_commit h p hp hlen hcap
 
 end commit
 
@@ -287,7 +287,7 @@ theorem membership_count : MembershipInvariant (count s p r) := by
     rcases hs with hs | ⟨hq, rfl⟩
     · exact h.syncNew x hs he
     · subst hq
-      have := Nat.le_trans (recon_le_catchUpPoint (s := s) h0) hcup
+      have := Nat.le_trans (inheritedEnd_le_catchUpPoint (s := s) h0) hcup
       exact ⟨hf, this⟩
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -308,8 +308,8 @@ theorem failover_count : FailoverInvariant (count s p r) := by
   authEx := h.authEx }
 
 /-- Count moves no log. -/
-theorem ehc_count : EligibleHoldsCommitted (count s p r) := by
-  exact h.ehc
+theorem eligibleHoldsCommitted_count : EligibleHoldsCommitted (count s p r) := by
+  exact h.eligibleHoldsCommitted
 
 theorem invariant_count : Invariant (count s p r) where
   toConfigInvariant := config_count h p r hp hrp hf hcup
@@ -317,16 +317,16 @@ theorem invariant_count : Invariant (count s p r) where
   toMembershipInvariant := membership_count h p r hp hrp hf hcup
   toCommitInvariant := commit_count h p r hp hrp hf hcup
   toFailoverInvariant := failover_count h p r hp hrp hf hcup
-  ehc := ehc_count h p r hp hrp hf hcup
+  eligibleHoldsCommitted := eligibleHoldsCommitted_count h p r hp hrp hf hcup
 
 end count
 
 section uncount
 
 variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p) (hkl : KnowsLatest s p)
-  (hs : s.sync p r = true) (he : s.cfg.eligible r = false)
+  (hs : s.sync p r = true) (hel : s.cfg.eligible r = false)
 
-include h hp hkl hs he
+include h hp hkl hs hel
 
 /-- `p` knows the latest configuration, so it is the current primary. -/
 theorem uncount_prim : p = s.cfg.primary := by
@@ -364,7 +364,7 @@ theorem membership_uncount : MembershipInvariant (uncount s p r) := by
     show (uncount s p r).sync q x = true
     rw [hS]; simp only [Bool.and_eq_true, h.eligibleCounted q x hq hex hi, Bool.not_eq_true', decide_eq_false_iff_not, true_and]
     rintro ⟨e1, e2⟩; subst e1; subst e2
-    rw [h.knownEq _ hkl] at hex; rw [hex] at he; exact absurd he (by decide)
+    rw [h.knownEq _ hkl] at hex; rw [hex] at hel; exact absurd hel (by decide)
   syncNew := by
     intro x hx hex
     change (uncount s p r).sync s.cfg.primary x = true at hx
@@ -389,8 +389,8 @@ theorem failover_uncount : FailoverInvariant (uncount s p r) := by
     have hwr : ¬ (q = p ∧ w = r) := by
       rintro ⟨e1, _⟩; subst e1
       exact absurd hv' (by unfold KnowsLatest at hkl; omega)
-    refine Fenced.of_left (w := w) ⟨by rw [hS, hw1]; simp only [Bool.true_and, Bool.not_eq_true', decide_eq_false_iff_not]; exact hwr, hw2⟩ ?_ ?_ ?_ ?_
-    · intro hpa; show s.acked q w ≤ s.recon s.cfg.primary; rw [hwF]; exact hF.reconLe hpa
+    refine DeposedFenced.of_left (w := w) ⟨by rw [hS, hw1]; simp only [Bool.true_and, Bool.not_eq_true', decide_eq_false_iff_not]; exact hwr, hw2⟩ ?_ ?_ ?_ ?_
+    · intro hpa; show s.acked q w ≤ s.inheritedEnd s.cfg.primary; rw [hwF]; exact hF.fenceLeInheritedEnd hpa
     · intro hpa; show (s.log q).take (s.acked q w) <+: s.log s.cfg.primary; rw [hwF]; exact hF.primHolds hpa
     · intro hpa; show s.acked q w ≤ s.ackHigh s.cfg.primary; rw [hwF]; exact hF.primAck hpa
     · intro m hm hi
@@ -406,15 +406,15 @@ theorem failover_uncount : FailoverInvariant (uncount s p r) := by
   authEx := h.authEx }
 
 /-- Uncount moves no log. -/
-theorem ehc_uncount : EligibleHoldsCommitted (uncount s p r) := h.ehc
+theorem eligibleHoldsCommitted_uncount : EligibleHoldsCommitted (uncount s p r) := h.eligibleHoldsCommitted
 
 theorem invariant_uncount : Invariant (uncount s p r) where
-  toConfigInvariant := config_uncount h p r hp hkl hs he
-  toReplInvariant := repl_uncount h p r hp hkl hs he
-  toMembershipInvariant := membership_uncount h p r hp hkl hs he
-  toCommitInvariant := commit_uncount h p r hp hkl hs he
-  toFailoverInvariant := failover_uncount h p r hp hkl hs he
-  ehc := ehc_uncount h p r hp hkl hs he
+  toConfigInvariant := config_uncount h p r hp hkl hs hel
+  toReplInvariant := repl_uncount h p r hp hkl hs hel
+  toMembershipInvariant := membership_uncount h p r hp hkl hs hel
+  toCommitInvariant := commit_uncount h p r hp hkl hs hel
+  toFailoverInvariant := failover_uncount h p r hp hkl hs hel
+  eligibleHoldsCommitted := eligibleHoldsCommitted_uncount h p r hp hkl hs hel
 
 end uncount
 

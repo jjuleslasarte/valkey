@@ -63,7 +63,7 @@ reaches a state where an authoritative eligible replica (n1) lacks the committed
 history. -/
 theorem uncountElig_unsafe : ∃ s, (ltsUncountElig 1).CanReach (init 0) s ∧ ¬ Safety s := by
   refine ⟨u9, ⟨_, uncountElig_run⟩, ?_⟩
-  intro ⟨hehc, _⟩
-  exact absurd (hehc 1 (by decide)) (by decide)
+  intro ⟨hholds, _⟩
+  exact absurd (hholds 1 (by decide)) (by decide)
 
 end SyncReplication

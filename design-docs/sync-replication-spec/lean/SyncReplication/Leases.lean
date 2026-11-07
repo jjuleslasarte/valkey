@@ -195,12 +195,12 @@ def recvAck (a : LeaseState Node) (r : Node) (c : State Node) : LeaseState Node 
 
 /-- `n` learns the latest configuration and restarts its takeover timer ("Takeover
 timers restart on a configuration change"). -/
-def learnL (a : LeaseState Node) (n : Node) : LeaseState Node :=
+def leaseLearn (a : LeaseState Node) (n : Node) : LeaseState Node :=
   { a with core := learn a.core n, primaryTraffic := update a.primaryTraffic n a.now }
 
 /-- `n` takes over. It has heard nothing from its replicas as primary: no primary
 lease, no acknowledgements; it holds no read lease; its primaryship starts now. -/
-def takeoverL (a : LeaseState Node) (n : Node) : LeaseState Node :=
+def leaseTakeover (a : LeaseState Node) (n : Node) : LeaseState Node :=
   { a with core := takeover a.core n,
            primarySince := update a.primarySince n (some a.now),
            oldEligible := update a.oldEligible n a.core.cfg.eligible,
@@ -210,7 +210,7 @@ def takeoverL (a : LeaseState Node) (n : Node) : LeaseState Node :=
            readLease := update a.readLease n none }
 
 /-- A full resync replaces `r`'s data; its committed view starts over. -/
-def resyncL (a : LeaseState Node) (r : Node) : LeaseState Node :=
+def leaseResync (a : LeaseState Node) (r : Node) : LeaseState Node :=
   { a with core := resync a.core r, committedView := update a.committedView r 0 }
 
 /-- `n` restarts, with replication state `c` afterwards. Lease state is in memory, so
@@ -219,7 +219,7 @@ def resyncL (a : LeaseState Node) (r : Node) : LeaseState Node :=
 now (no demotion for one read lease plus the margin). `dataSent n := now` treats the
 restart as traffic received now, so an acknowledgement before any new data gives the
 primary a lease from the restart time, matching `primaryTraffic n`. -/
-def restartL (a : LeaseState Node) (n : Node) (c : State Node) : LeaseState Node :=
+def leaseRestart (a : LeaseState Node) (n : Node) (c : State Node) : LeaseState Node :=
   { a with core := c,
            committedView := update a.committedView n 0,
            primaryLease := update a.primaryLease n (fun _ => none),
@@ -272,36 +272,36 @@ inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActio
   | ackRenew (a r) : primaryOf a.core r ≠ r → a.core.log r <+: a.core.log (primaryOf a.core r) →
       LeaseStep m P a (.ack r) (recvAck a r a.core)
   /-- A node learns the latest configuration. -/
-  | learn (a n) : ¬ KnowsLatest a.core n → LeaseStep m P a (.learn n) (learnL a n)
+  | learn (a n) : (hnkl : ¬ KnowsLatest a.core n) → LeaseStep m P a (.learn n) (leaseLearn a n)
   /-- Demotion (design §4 and §5): the primary waits until the replica's read lease
   must have expired, measured from the last acknowledgement it received from it, and,
   for a replica of the configuration its takeover replaced, until one read lease plus
   the margin after that takeover. -/
-  | demote (a p r) : ThinksPrimary a.core p → KnowsLatest a.core p → a.core.cfg.eligible r = true →
+  | demote (a p r) : (hp : ThinksPrimary a.core p) → (hkl : KnowsLatest a.core p) → (hel : a.core.cfg.eligible r = true) →
       GrantorOver P a.now (a.ackReceived p r) P.readDur →
       (∀ T, a.primarySince p = some T → a.oldEligible p r = true →
         T + P.readDur + P.margin ≤ a.now + P.drift) →
       LeaseStep m P a (.demote p r) (withCore a (makeIneligible a.core p r))
   /-- Takeover: the replica waits until the primary's lease must have expired, measured
   from the last traffic it received from the primary. -/
-  | takeover (a n) : KnowsLatest a.core n → a.core.cfg.eligible n = true → n ≠ a.core.cfg.primary →
+  | takeover (a n) : (hkl : KnowsLatest a.core n) → (hel : a.core.cfg.eligible n = true) → (hnp : n ≠ a.core.cfg.primary) →
       a.core.cfg.incarnation n = a.core.incarnation n →
       a.primaryTraffic n + P.primDur ≤ a.now + P.drift →
-      LeaseStep m P a (.takeover n) (takeoverL a n)
+      LeaseStep m P a (.takeover n) (leaseTakeover a n)
   /-- A full resync. -/
   | resync (a r) : primaryOf a.core r ≠ r → ¬ (a.core.log r <+: a.core.log (primaryOf a.core r)) →
       a.core.sync (primaryOf a.core r) r = false → (a.core.known (primaryOf a.core r)).eligible r = false →
-      LeaseStep m P a (.resync r) (resyncL a r)
+      LeaseStep m P a (.resync r) (leaseResync a r)
   /-- The restarts, each clearing the node's lease state. -/
-  | restartEmpty (a n) : KnowsLatest a.core n → (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
-      LeaseStep m P a (.restartEmpty n) (restartL a n (restartEmpty a.core n))
-  | restartKeep (a n) : KnowsLatest a.core n →
-      LeaseStep m P a (.restartKeep n) (restartL a n (restartKeep a.core n))
-  | restartPartialKeep (a n k) : KnowsLatest a.core n → k < (a.core.log n).length → a.core.ackHigh n ≤ k →
-      LeaseStep m P a (.restartPartial n k) (restartL a n (restartPartialKeep a.core n k))
-  | restartPartialFresh (a n k) : KnowsLatest a.core n → k < (a.core.log n).length → k < a.core.ackHigh n →
+  | restartEmpty (a n) : (hkl : KnowsLatest a.core n) → (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      LeaseStep m P a (.restartEmpty n) (leaseRestart a n (restartEmpty a.core n))
+  | restartKeep (a n) : (hkl : KnowsLatest a.core n) →
+      LeaseStep m P a (.restartKeep n) (leaseRestart a n (restartKeep a.core n))
+  | restartPartialKeep (a n k) : (hkl : KnowsLatest a.core n) → (hk : k < (a.core.log n).length) → (hkeep : a.core.ackHigh n ≤ k) →
+      LeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialKeep a.core n k))
+  | restartPartialFresh (a n k) : (hkl : KnowsLatest a.core n) → (hk : k < (a.core.log n).length) → (hfresh : k < a.core.ackHigh n) →
       (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
-      LeaseStep m P a (.restartPartial n k) (restartL a n (restartPartialFresh a.core n k))
+      LeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialFresh a.core n k))
 
 /-- The lease layer as a labelled transition system. -/
 def leaseLTS (m : Nat) (P : LeaseParams) : LTS (LeaseState Node) (LeaseAction Node) where

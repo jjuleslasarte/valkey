@@ -265,13 +265,15 @@ and demotion.
 
 **Commit** (`CommitInvariant`, design §2 and §5). Committed prefixes agree with the
 committed history.
-- `caLen`, `caHist`: a committed offset is within the node's log and within the
+- `commitWithinLog`, `commitWithinHistory`: a committed offset is within the node's
+  log and within the history.
+- `committedIsHistoryPrefix`: what a node has committed is exactly the start of the
   history.
-- `caEq`: what a node has committed is exactly the start of the history.
-- `reconLen`: the current primary's catch-up point is within its log.
-- `histLe`: while the current primary is authoritative, the whole history is below
-  its committed offset or its catch-up point, so a new primary reconciles against all
-  of it.
+- `inheritedEndWithinLog`: the end of the current primary's inherited log is within
+  its log.
+- `historyWithinCommitOrInherited`: while the current primary is authoritative, the
+  whole history is below its committed offset or within its inherited log, so a new
+  primary reconciles against all of it.
 - `histAck`: every authoritative node has acknowledged the whole history. This is
   what makes a restart from a stale file safe when the file covers `ackHigh`.
 
@@ -288,9 +290,10 @@ committed history.
 - `authEx`: some node is authoritative. The survival condition keeps this true.
 
 **Goal.**
-- `ehc`: EligibleHoldsCommitted itself, over authoritative nodes.
+- `eligibleHoldsCommitted`: EligibleHoldsCommitted itself, over authoritative nodes.
 
-Facts about the current primary (`histLe` and the primary clauses of the fence) hold
+Facts about the current primary (`historyWithinCommitOrInherited` and the primary
+clauses of the fence) hold
 only while it is authoritative: a primary that came back empty holds nothing, and
 nothing new is committed until an authoritative eligible replica takes over.
 
@@ -320,7 +323,8 @@ The rest: a replica's committed view is a committed prefix of its log, and a nod
 configuration names it primary holds no read lease (which keeps a deposed primary out
 of the read-lease holders across a takeover). The theorem then follows from the
 replication invariant: the current primary has the history below its committed offset
-or catch-up point (`histLe`), and an authoritative node holds the history (`ehc`).
+or inherited log (`historyWithinCommitOrInherited`), and an authoritative node holds
+the history (`eligibleHoldsCommitted`).
 Both halves use `margin ≥ 2 · drift`, in two places: to turn the taker's wait into the
 invalidity of `p`'s lease from `t`, and to turn the demotion wait into the invalidity of
 the demoted replica's read lease. A holder assumes its clock slow and a grantor its
@@ -499,16 +503,16 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 
 | Path | Contents | Lines |
 |---|---|---|
-| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 451 |
-| `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 113 |
+| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 456 |
+| `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 129 |
 | `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 314 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 444 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
 | `lean/SyncReplication/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,566 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
-| `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 248 |
+| `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 249 |
 | `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,055 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation; reachability witnesses for the read rule and the narrowed demotion wait | 1,048 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation; reachability witnesses for the read rule and the narrowed demotion wait | 1,054 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
 | `lean/Check.lean` | Prints the axioms of every theorem | |
@@ -762,7 +766,7 @@ Each item has a Lean counterexample (`lean/SyncReplication/Counterexamples/`): a
 of the model with the rule removed, every guard checked by `decide`, ending in a
 state that violates the guarantee, or, for the survival condition and the F13 loss
 run, a state where no node's log holds the committed history. The weakened step relation is named in the
-theorem (`StepNoReconcile`, `AStepNoFence`, ...), so the statement says exactly which
+theorem (`StepNoReconcile`, `ReplyStepNoFence`, ...), so the statement says exactly which
 rule the run does without.
 
 **F1: reconcile against the inherited log** (`Counterexamples/Reconcile.lean`).
@@ -790,8 +794,8 @@ needed at `min-sync-replicas ≥ 1`; the proof uses it there too.
 
 **F5: a restarted primary rebuilds its sync replica set**
 (`Counterexamples/Rebuild.lean`). A primary that restarts with its data loses its
-in-memory sync replica set. If it starts from an empty set, it can commit without an
-eligible replica. Scenario: n0 promotes n1 and writes, restarts with its data, counts
+in-memory sync replica set. If it starts from an empty set, it can commit without
+waiting for a replica that was eligible before the restart. Scenario: n0 promotes n1 and writes, restarts with its data, counts
 and promotes n2 (which has the write), and commits with n2's acknowledgement only. n1
 is eligible and authoritative but lacks the committed write. Rule: on restart, the
 primary's sync replica set is the eligible replicas whose recorded incarnation

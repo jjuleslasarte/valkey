@@ -32,16 +32,16 @@ theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv
   | ack r hne hpre hlt => exact invariant_ack h r hne hpre hlt
   | commit p hp _ hlen hcap => exact invariant_commit h p hp hlen hcap
   | count p r hp hrp hf _ hle => exact invariant_count h p r hp hrp hf hle
-  | uncount p r hp hk hs he => exact invariant_uncount h p r hp hk hs he
-  | makeEligible p r hp hk hsy he => exact invariant_makeEligible h hp hk hsy he
-  | makeIneligible p r hp hk he => exact invariant_makeIneligible h hp hk he
-  | learn n hk => exact invariant_learn h n hk
-  | takeover n hk he hnp hin => exact invariant_takeover h n hk he hnp hin
+  | uncount p r hp hkl hsy hel => exact invariant_uncount h p r hp hkl hsy hel
+  | makeEligible p r hp hkl hsy hel => exact invariant_makeEligible h hp hkl hsy hel
+  | makeIneligible p r hp hkl hel => exact invariant_makeIneligible h hp hkl hel
+  | learn n hnkl => exact invariant_learn h n hnkl
+  | takeover n hkl hel hnp hin => exact invariant_takeover h n hkl hel hnp hin
   | resync r hne _ hsy hke => exact invariant_resync h r hne hsy hke
-  | restartEmpty n hk hsv => exact invariant_restartEmpty h n hk hsv
-  | restartKeep n hk => exact invariant_restartKeep h n hk
+  | restartEmpty n hkl hsurv => exact invariant_restartEmpty h n hkl hsurv
+  | restartKeep n hkl => exact invariant_restartKeep h n hkl
   | restartPartialKeep n k hkl hk hkeep => exact invariant_restartPartialKeep h n k hkl hk hkeep
-  | restartPartialFresh n k hkl hk hfresh hsv => exact invariant_restartPartialFresh h n k hkl hsv hk hfresh
+  | restartPartialFresh n k hkl hk hfresh hsurv => exact invariant_restartPartialFresh h n k hkl hsurv hk hfresh
 
 /-- `Invariant` is a one-step invariant of the protocol, in CSLib's sense. -/
 theorem invariant_trInv {m : Nat} : (lts m (Node := Node)).TrInv Invariant :=

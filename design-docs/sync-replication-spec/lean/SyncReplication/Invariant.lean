@@ -11,10 +11,10 @@ incarnations), `ReplInvariant` (acknowledgements are real; the commit rule),
 `MembershipInvariant` (the ordering rules of promotion and demotion),
 `CommitInvariant` (committed prefixes and the reconciliation point) and
 `FailoverInvariant` (deposed primaries are fenced; some node is authoritative). The
-goal, EligibleHoldsCommitted, is `Invariant`'s own field `ehc`. Each conjunct's
+goal, EligibleHoldsCommitted, is `Invariant`'s own field `eligibleHoldsCommitted`. Each conjunct's
 docstring cites the design.
 
-Facts about the current primary (`histLe`, the primary clauses of `Fenced`) hold
+Facts about the current primary (`historyWithinCommitOrInherited`, the primary clauses of `DeposedFenced`) hold
 only while it is authoritative: a primary that came back empty holds nothing, and
 nothing new is committed until an authoritative eligible replica takes over. -/
 
@@ -40,18 +40,18 @@ def leftSync (s : State Node) (p : Node) : Set Node :=
 
 /-- The fence of `p`: the smallest acknowledgement `p` has recorded from a sync
 replica that has left it. It is `0` when no replica has left (`sInf ∅ = 0`); it is only
-used through `Fenced`, which rules that case out. -/
+used through `DeposedFenced`, which rules that case out. -/
 noncomputable def fence (s : State Node) (p : Node) : Nat :=
   sInf (s.acked p '' leftSync s p)
 
 /-- `p` is fenced: some sync replica has left it, and the new configuration holds
 `p`'s log up to its fence. -/
-structure Fenced (s : State Node) (p : Node) : Prop where
+structure DeposedFenced (s : State Node) (p : Node) : Prop where
   /-- Some member of `p`'s sync replica set has moved to a different primary. -/
   left      : (leftSync s p).Nonempty
   /-- While the current primary is authoritative, it must reconcile at least up to the
   fence. -/
-  reconLe   : PrimaryAuthoritative s → fence s p ≤ s.recon s.cfg.primary
+  fenceLeInheritedEnd   : PrimaryAuthoritative s → fence s p ≤ s.inheritedEnd s.cfg.primary
   /-- While the current primary is authoritative, it holds `p`'s log up to the fence. -/
   primHolds : PrimaryAuthoritative s → (s.log p).take (fence s p) <+: s.log s.cfg.primary
   /-- ... and has acknowledged up to the fence, so a stale restore that keeps its
@@ -70,14 +70,14 @@ theorem fence_le {s : State Node} {p r : Node} (hr : r ∈ leftSync s p) : fence
 /-- To show `p` is fenced, name one sync replica `w` that has left it and show the
 fence properties at `w`'s acknowledgement. The fence is at most that, and each
 property still holds at a smaller offset. -/
-theorem Fenced.of_left {s : State Node} {p w : Node} (hw : w ∈ leftSync s p)
-    (hrec : PrimaryAuthoritative s → s.acked p w ≤ s.recon s.cfg.primary)
+theorem DeposedFenced.of_left {s : State Node} {p w : Node} (hw : w ∈ leftSync s p)
+    (hrec : PrimaryAuthoritative s → s.acked p w ≤ s.inheritedEnd s.cfg.primary)
     (hprim : PrimaryAuthoritative s → (s.log p).take (s.acked p w) <+: s.log s.cfg.primary)
     (hprimAck : PrimaryAuthoritative s → s.acked p w ≤ s.ackHigh s.cfg.primary)
     (helig : ∀ m, s.cfg.eligible m = true → s.cfg.incarnation m = s.incarnation m →
       ((s.log p).take (s.acked p w) <+: s.log m ∧ s.acked p w ≤ s.ackHigh m) ∨
         (s.sync p m = true ∧ (s.known m).primary = p)) :
-    Fenced s p := by
+    DeposedFenced s p := by
   have hle := fence_le hw
   refine ⟨⟨w, hw⟩, fun hp => hle.trans (hrec hp), fun hp => take_mono_prefix hle (hprim hp),
     fun hp => hle.trans (hprimAck hp), ?_⟩
@@ -87,27 +87,27 @@ theorem Fenced.of_left {s : State Node} {p w : Node} (hw : w ∈ leftSync s p)
   · exact Or.inr d
 
 /-- The fence is the acknowledgement of some replica that has left. -/
-theorem Fenced.attained {s : State Node} {p : Node} (hF : Fenced s p) :
+theorem DeposedFenced.attained {s : State Node} {p : Node} (hF : DeposedFenced s p) :
     ∃ w ∈ leftSync s p, s.acked p w = fence s p := Nat.sInf_mem (hF.left.image _)
 
 /-- A step that only extends logs, may add sync replicas, and leaves the configuration,
 the nodes' views of it and `p`'s acknowledgements from departed replicas alone keeps
 `p` fenced (AppendWrite, Replicate, Ack, Commit, Count). -/
-theorem Fenced.mono {s s' : State Node} {p : Node} (hF : Fenced s p)
-    (hcfg : s'.cfg = s.cfg) (hknown : s'.known = s.known) (hrecon : s'.recon = s.recon)
+theorem DeposedFenced.mono {s s' : State Node} {p : Node} (hF : DeposedFenced s p)
+    (hcfg : s'.cfg = s.cfg) (hknown : s'.known = s.known) (hinherited : s'.inheritedEnd = s.inheritedEnd)
     (hinc : s'.incarnation = s.incarnation) (hgrow : ∀ x, s.log x <+: s'.log x)
     (hah : ∀ x, s.ackHigh x ≤ s'.ackHigh x)
     (hlp : ∀ r, s.acked p r ≤ (s.log p).length)
     (hsync : ∀ r, s.sync p r = true → s'.sync p r = true)
-    (hacked : ∀ r, (s.known r).primary ≠ p → s'.acked p r = s.acked p r) : Fenced s' p := by
+    (hacked : ∀ r, (s.known r).primary ≠ p → s'.acked p r = s.acked p r) : DeposedFenced s' p := by
   obtain ⟨w, ⟨hw1, hw2⟩, hwF⟩ := hF.attained
   have hpa : PrimaryAuthoritative s' → PrimaryAuthoritative s := by
     unfold PrimaryAuthoritative; rw [hcfg, hinc]; exact id
   have ha : s'.acked p w = fence s p := (hacked w hw2).trans hwF
   have e : (s'.log p).take (s'.acked p w) = (s.log p).take (fence s p) := by
     rw [ha]; exact (prefix_take_eq (hgrow p) (by rw [← hwF]; exact hlp w)).symm
-  refine Fenced.of_left (w := w) ⟨hsync w hw1, by rw [hknown]; exact hw2⟩ ?_ ?_ ?_ ?_
-  · intro hp; rw [ha, hrecon, hcfg]; exact hF.reconLe (hpa hp)
+  refine DeposedFenced.of_left (w := w) ⟨hsync w hw1, by rw [hknown]; exact hw2⟩ ?_ ?_ ?_ ?_
+  · intro hp; rw [ha, hinherited, hcfg]; exact hF.fenceLeInheritedEnd (hpa hp)
   · intro hp; rw [e, hcfg]; exact (hF.primHolds (hpa hp)).trans (hgrow _)
   · intro hp; rw [ha, hcfg]; exact (hF.primAck (hpa hp)).trans (hah _)
   · intro m hm hi
@@ -121,21 +121,21 @@ and does not move who follows whom keeps `x` fenced, provided the current primar
 satisfies the fence bounds and every authoritative eligible replica either is unchanged
 or holds (and has acknowledged) `x`'s log up to the fence (MakeEligible, MakeIneligible,
 Resync, the restarts). -/
-theorem Fenced.transfer {s s' : State Node} {x : Node} (hF : Fenced s x)
+theorem DeposedFenced.transfer {s s' : State Node} {x : Node} (hF : DeposedFenced s x)
     (hsync : s'.sync x = s.sync x) (hkn : ∀ y, (s'.known y).primary = (s.known y).primary)
     (hack : ∀ r, s.sync x r = true → s'.acked x r = s.acked x r)
     (hlog : s'.log x = s.log x) (hprim : s'.cfg.primary = s.cfg.primary)
     (hpa : PrimaryAuthoritative s' → PrimaryAuthoritative s)
-    (hrec : PrimaryAuthoritative s' → fence s x ≤ s'.recon s.cfg.primary)
+    (hrec : PrimaryAuthoritative s' → fence s x ≤ s'.inheritedEnd s.cfg.primary)
     (hlp : PrimaryAuthoritative s' → (s.log x).take (fence s x) <+: s'.log s.cfg.primary)
     (hahp : PrimaryAuthoritative s' → fence s x ≤ s'.ackHigh s.cfg.primary)
     (hcov : ∀ m, s'.cfg.eligible m = true → s'.cfg.incarnation m = s'.incarnation m →
       (s.cfg.eligible m = true ∧ s.cfg.incarnation m = s.incarnation m ∧ s'.log m = s.log m ∧
           s.ackHigh m ≤ s'.ackHigh m) ∨
-        ((s.log x).take (fence s x) <+: s'.log m ∧ fence s x ≤ s'.ackHigh m)) : Fenced s' x := by
+        ((s.log x).take (fence s x) <+: s'.log m ∧ fence s x ≤ s'.ackHigh m)) : DeposedFenced s' x := by
   obtain ⟨w, ⟨hw1, hw2⟩, hwF⟩ := hF.attained
   have ha : s'.acked x w = fence s x := (hack w hw1).trans hwF
-  refine Fenced.of_left (w := w) ⟨by rw [hsync]; exact hw1, by rw [hkn]; exact hw2⟩ ?_ ?_ ?_ ?_
+  refine DeposedFenced.of_left (w := w) ⟨by rw [hsync]; exact hw1, by rw [hkn]; exact hw2⟩ ?_ ?_ ?_ ?_
   · intro hp; rw [ha, hprim]; exact hrec hp
   · intro hp; rw [ha, hlog, hprim]; exact hlp hp
   · intro hp; rw [ha, hprim]; exact hahp hp
@@ -147,7 +147,7 @@ theorem Fenced.transfer {s s' : State Node} {x : Node} (hF : Fenced s x)
     · left; rw [ha, hlog]; exact d
 
 /-- The fence is within `p`'s log when `p`'s recorded acknowledgements are. -/
-theorem Fenced.le_len {s : State Node} {p : Node} (hF : Fenced s p)
+theorem DeposedFenced.le_len {s : State Node} {p : Node} (hF : DeposedFenced s p)
     (hlp : ∀ r, s.acked p r ≤ (s.log p).length) : fence s p ≤ (s.log p).length := by
   obtain ⟨w, _, hwF⟩ := hF.attained; rw [← hwF]; exact hlp w
 
@@ -158,7 +158,7 @@ theorem Fenced.le_len {s : State Node} {p : Node} (hF : Fenced s p)
 and each is stated in terms of the layers listed before it, with one exception:
 `MembershipInvariant.syncNew` already uses the reconciliation point that `CommitInvariant`
 constrains. Read them in order; the last
-field of the last layer, `ehc`, is the property we want.
+field of the last layer, `eligibleHoldsCommitted`, is the property we want.
 -/
 
 /-- **Configuration.** Cluster V2 holds one totally ordered configuration; each node's
@@ -212,7 +212,7 @@ structure MembershipInvariant (s : State Node) : Prop where
   /-- A replica the current primary counts but has not made eligible follows it and has
   acknowledged at least the reconciliation point (promotion steps 1-2). -/
   syncNew    : ∀ r, s.sync s.cfg.primary r = true → s.cfg.eligible r = false →
-                 (s.known r).primary = s.cfg.primary ∧ s.recon s.cfg.primary ≤ s.acked s.cfg.primary r
+                 (s.known r).primary = s.cfg.primary ∧ s.inheritedEnd s.cfg.primary ≤ s.acked s.cfg.primary r
   /-- An eligible replica that follows an old primary is still eligible in that
   primary's configuration. -/
   eligibleInOldConfig    : ∀ m, s.cfg.eligible m = true → (s.known m).primary ≠ s.cfg.primary →
@@ -222,16 +222,16 @@ structure MembershipInvariant (s : State Node) : Prop where
 primary's catch-up point covers it (design §2, "committed offset"; §5, reconciliation). -/
 structure CommitInvariant (s : State Node) : Prop where
   /-- A committed offset is within the node's log. -/
-  caLen      : ∀ p, s.commit p ≤ (s.log p).length
+  commitWithinLog      : ∀ p, s.commit p ≤ (s.log p).length
   /-- ... and within the committed history. -/
-  caHist     : ∀ p, s.commit p ≤ s.hist.length
+  commitWithinHistory     : ∀ p, s.commit p ≤ s.hist.length
   /-- What a node has committed is exactly the start of the committed history. -/
-  caEq       : ∀ p, (s.log p).take (s.commit p) = s.hist.take (s.commit p)
+  committedIsHistoryPrefix       : ∀ p, (s.log p).take (s.commit p) = s.hist.take (s.commit p)
   /-- The current primary's catch-up point is within its log. -/
-  reconLen   : s.recon s.cfg.primary ≤ (s.log s.cfg.primary).length
+  inheritedEndWithinLog   : s.inheritedEnd s.cfg.primary ≤ (s.log s.cfg.primary).length
   /-- While the current primary is authoritative, the whole committed history is below
   its commit point or its catch-up point: a new primary reconciles against all of it. -/
-  histLe     : PrimaryAuthoritative s → s.hist.length ≤ s.commit s.cfg.primary ∨ s.hist.length ≤ s.recon s.cfg.primary
+  historyWithinCommitOrInherited     : PrimaryAuthoritative s → s.hist.length ≤ s.commit s.cfg.primary ∨ s.hist.length ≤ s.inheritedEnd s.cfg.primary
   /-- Every authoritative node has acknowledged the whole committed history: a replica
   is counted, and so made eligible, only after acknowledging past the reconciliation
   point, and a commit by the current primary waits for every counted replica. This is
@@ -245,7 +245,7 @@ structure FailoverInvariant (s : State Node) : Prop where
   /-- A node that still thinks it is primary under an old configuration is fenced:
   it can only commit below its `fence`, and the new configuration holds its log up
   to there. -/
-  stale      : ∀ p, ThinksPrimary s p → (s.known p).version < s.cfg.version → Fenced s p
+  stale      : ∀ p, ThinksPrimary s p → (s.known p).version < s.cfg.version → DeposedFenced s p
   /-- Survival: some node is authoritative (kept by the RestartEmpty guard). -/
   authEx     : ∃ n, IsAuthoritative s n
 
@@ -263,13 +263,13 @@ theorem ConfigInvariant.frame {s s' : State Node} (h : ConfigInvariant s)
 /-- A step that changes no commit point, catch-up point, log, history, configuration or
 incarnation keeps `CommitInvariant`. -/
 theorem CommitInvariant.frame {s s' : State Node} (h : CommitInvariant s)
-    (hcommit : s'.commit = s.commit) (hrecon : s'.recon = s.recon) (hlog : s'.log = s.log)
+    (hcommit : s'.commit = s.commit) (hinherited : s'.inheritedEnd = s.inheritedEnd) (hlog : s'.log = s.log)
     (hhist : s'.hist = s.hist) (hcfg : s'.cfg = s.cfg) (hinc : s'.incarnation = s.incarnation)
     (hah : s'.ackHigh = s.ackHigh) : CommitInvariant s' := by
   obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
   refine ⟨by rw [hcommit, hlog]; exact h1, by rw [hcommit, hhist]; exact h2,
-    by rw [hcommit, hlog, hhist]; exact h3, by rw [hrecon, hlog, hcfg]; exact h4, ?_, ?_⟩
-  · intro hpa; rw [hhist, hcommit, hrecon, hcfg]
+    by rw [hcommit, hlog, hhist]; exact h3, by rw [hinherited, hlog, hcfg]; exact h4, ?_, ?_⟩
+  · intro hpa; rw [hhist, hcommit, hinherited, hcfg]
     exact h5 (by unfold PrimaryAuthoritative at hpa ⊢; rw [hcfg, hinc] at hpa; exact hpa)
   · intro n hn; rw [hhist, hah]
     exact h6 n (by unfold IsAuthoritative at hn ⊢; rw [hcfg, hinc] at hn; exact hn)
@@ -278,14 +278,14 @@ theorem CommitInvariant.frame {s s' : State Node} (h : CommitInvariant s)
 incarnation or catch-up point keeps `MembershipInvariant`. -/
 theorem MembershipInvariant.frame {s s' : State Node} (h : MembershipInvariant s)
     (hsync : s'.sync = s.sync) (hacked : s'.acked = s.acked) (hcfg : s'.cfg = s.cfg)
-    (hknown : s'.known = s.known) (hinc : s'.incarnation = s.incarnation) (hrecon : s'.recon = s.recon) :
+    (hknown : s'.known = s.known) (hinc : s'.incarnation = s.incarnation) (hinherited : s'.inheritedEnd = s.inheritedEnd) :
     MembershipInvariant s' := by
   obtain ⟨h1, h2, h3⟩ := h
   have htp : ∀ p, ThinksPrimary s' p ↔ ThinksPrimary s p := by
     intro p; unfold ThinksPrimary; rw [hknown, hinc]
   refine ⟨?_, ?_, ?_⟩
   · intro p r hp; rw [hknown, hinc, hsync]; exact h1 p r ((htp p).1 hp)
-  · intro r; rw [hcfg, hsync, hknown, hrecon, hacked]; exact h2 r
+  · intro r; rw [hcfg, hsync, hknown, hinherited, hacked]; exact h2 r
   · intro m; rw [hcfg, hknown]; exact h3 m
 
 /-- The inductive invariant: the five layers plus the goal. -/
@@ -293,16 +293,16 @@ structure Invariant (s : State Node) : Prop
     extends ConfigInvariant s, ReplInvariant s, MembershipInvariant s, CommitInvariant s, FailoverInvariant s where
   /-- **Goal**, EligibleHoldsCommitted: every authoritative node holds the whole
   committed history. -/
-  ehc        : ∀ n, IsAuthoritative s n → s.hist <+: s.log n
+  eligibleHoldsCommitted        : ∀ n, IsAuthoritative s n → s.hist <+: s.log n
 
 theorem invariant_safety {s : State Node} (h : Invariant s) : Safety s :=
-  ⟨h.ehc, fun p => ⟨h.caLen p, h.caEq p⟩⟩
+  ⟨h.eligibleHoldsCommitted, fun p => ⟨h.commitWithinLog p, h.committedIsHistoryPrefix p⟩⟩
 
 theorem invariant_init (i : Node) : Invariant (init i) where
-  ehc := by intro n _; simp [init]
-  caLen := by intro p; simp [init]
-  caHist := by intro p; simp [init]
-  caEq := by intro p; simp [init]
+  eligibleHoldsCommitted := by intro n _; simp [init]
+  commitWithinLog := by intro p; simp [init]
+  commitWithinHistory := by intro p; simp [init]
+  committedIsHistoryPrefix := by intro p; simp [init]
   knownLe := by intro n; simp [init]
   knownEq := by intro n _; rfl
   primKnows := rfl
@@ -315,10 +315,10 @@ theorem invariant_init (i : Node) : Invariant (init i) where
   ackedLe := by intro p r _; simp [init]
   ackHolds := by intro p n _ _ _; simp [init]
   syncNew := by intro r h; simp [init] at h
-  reconLen := by simp [init]
+  inheritedEndWithinLog := by simp [init]
   syncCommit := by intro q r _ _; simp [init]
   eligibleInOldConfig := by intro m h; simp [init, initCfg] at h
-  histLe := by intro _; simp [init]
+  historyWithinCommitOrInherited := by intro _; simp [init]
   stale := by intro p _ h; simp [init, initCfg] at h
   ackedHigh := by intro p n _ _ _; simp [init]
   histAck := by intro n _; simp [init]
@@ -424,14 +424,14 @@ end
 
 /-- CatchUpPoint is at least the committed offset. -/
 theorem commit_le_catchUpPoint {s : State Node} (h : Invariant s) (p : Node) : s.commit p ≤ catchUpPoint s p := by
-  have := h.caLen p
+  have := h.commitWithinLog p
   unfold catchUpPoint; split_ifs with c
   · omega
   · exact Nat.le_refl _
 
 /-- For the current primary, CatchUpPoint covers the reconciliation point. -/
-theorem recon_le_catchUpPoint {s : State Node} (h : Invariant s) : s.recon s.cfg.primary ≤ catchUpPoint s s.cfg.primary := by
-  have := h.reconLen
+theorem inheritedEnd_le_catchUpPoint {s : State Node} (h : Invariant s) : s.inheritedEnd s.cfg.primary ≤ catchUpPoint s s.cfg.primary := by
+  have := h.inheritedEndWithinLog
   unfold catchUpPoint; split_ifs with c
   · omega
   · simp at c; exact c
@@ -439,6 +439,6 @@ theorem recon_le_catchUpPoint {s : State Node} (h : Invariant s) : s.recon s.cfg
 theorem catchUpPoint_le_len {s : State Node} (h : Invariant s) (p : Node) : catchUpPoint s p ≤ (s.log p).length := by
   unfold catchUpPoint; split
   · exact Nat.min_le_right _ _
-  · exact h.caLen p
+  · exact h.commitWithinLog p
 
 end SyncReplication

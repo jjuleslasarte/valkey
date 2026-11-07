@@ -67,7 +67,7 @@ theorem noReconcile_run : (ltsNoReconcile 1).MTr r0
 eligible replica (n2) that lacks the committed history. -/
 theorem noReconcile_unsafe : ∃ s, (ltsNoReconcile 1).CanReach (init 0) s ∧ ¬ Safety s := by
   refine ⟨r11, ⟨_, noReconcile_run⟩, ?_⟩
-  intro ⟨hehc, _⟩
-  exact absurd (hehc 2 (by decide)) (by decide)
+  intro ⟨hholds, _⟩
+  exact absurd (hholds 2 (by decide)) (by decide)
 
 end SyncReplication

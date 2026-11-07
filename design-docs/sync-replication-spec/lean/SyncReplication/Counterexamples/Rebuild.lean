@@ -64,7 +64,7 @@ min-sync-replicas = 1 has an authoritative eligible replica (n1) that lacks the
 committed history. -/
 theorem noRebuild_unsafe : ∃ s, (ltsNoRebuild 1).CanReach (init 0) s ∧ ¬ Safety s := by
   refine ⟨d9, ⟨_, noRebuild_run⟩, ?_⟩
-  intro ⟨hehc, _⟩
-  exact absurd (hehc 1 (by decide)) (by decide)
+  intro ⟨hholds, _⟩
+  exact absurd (hholds 1 (by decide)) (by decide)
 
 end SyncReplication

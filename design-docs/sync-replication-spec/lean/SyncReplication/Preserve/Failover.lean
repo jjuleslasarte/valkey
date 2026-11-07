@@ -5,7 +5,7 @@ import SyncReplication.Contracts
 # Preservation: failover (design §5)
 
 Takeover: an eligible replica becomes primary in a new configuration. The old primary
-is not stopped; it is fenced (`Fenced`).
+is not stopped; it is fenced (`DeposedFenced`).
 -/
 
 namespace SyncReplication
@@ -133,24 +133,24 @@ catch-up point: it reconciles before it serves. -/
 theorem commit_takeover : CommitInvariant (takeover s n) := by
   have hCn : (takeover s n).commit n = 0 := takeover_commit_self
   have hCo : ∀ x, x ≠ n → (takeover s n).commit x = s.commit x := fun _ => takeover_commit_other
-  have hRn : (takeover s n).recon n = (s.log n).length := takeover_recon_self
-  have hehn : s.hist <+: s.log n := h.ehc n ⟨Or.inl hel, hin⟩
+  have hRn : (takeover s n).inheritedEnd n = (s.log n).length := takeover_inheritedEnd_self
+  have hehn : s.hist <+: s.log n := h.eligibleHoldsCommitted n ⟨Or.inl hel, hin⟩
   have hNE := takeoverEligible_iff (s := s) (n := n)
   exact {
-  caLen := by
+  commitWithinLog := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.caLen x
-  caHist := by
+    · rw [hCo x e]; exact h.commitWithinLog x
+  commitWithinHistory := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.caHist x
-  caEq := by
+    · rw [hCo x e]; exact h.commitWithinHistory x
+  committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
-    · rw [hCo x e]; exact h.caEq x
-  reconLen := by show (takeover s n).recon n ≤ (s.log n).length; rw [hRn]
-  histLe := by intro _; right; show s.hist.length ≤ (takeover s n).recon n; rw [hRn]; exact hehn.length_le
+    · rw [hCo x e]; exact h.committedIsHistoryPrefix x
+  inheritedEndWithinLog := by show (takeover s n).inheritedEnd n ≤ (s.log n).length; rw [hRn]
+  historyWithinCommitOrInherited := by intro _; right; show s.hist.length ≤ (takeover s n).inheritedEnd n; rw [hRn]; exact hehn.length_le
   histAck := by
     intro m ⟨hm, hi⟩
     change takeoverEligible s n m = true ∨ m = n at hm
@@ -169,7 +169,7 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
   have hKo : ∀ x, x ≠ n → (takeover s n).known x = s.known x := fun _ => takeover_known_other
   have hSo : ∀ x, x ≠ n → (takeover s n).sync x = s.sync x := fun _ => takeover_sync_other
   have hAo : ∀ x, x ≠ n → (takeover s n).acked x = s.acked x := fun _ => takeover_acked_other
-  have hRn : (takeover s n).recon n = (s.log n).length := takeover_recon_self
+  have hRn : (takeover s n).inheritedEnd n = (s.log n).length := takeover_inheritedEnd_self
   have hNE := takeoverEligible_iff (s := s) (n := n)
   have htp := takeover_thinksPrimary hin
   exact {
@@ -195,7 +195,7 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
         -- acknowledgement from such a replica, so the fence is 0.
         obtain ⟨r, hr1, hr2, hr3⟩ := hex
         have h0 : (takeover s n).acked s.cfg.primary r = 0 := by rw [hAx]; exact h.ackedPrim r hr2
-        refine Fenced.of_left (hleft r hr1 (by rw [hKo r hr3]; exact hr2)) ?_ ?_ ?_ ?_ <;> simp [h0]
+        refine DeposedFenced.of_left (hleft r hr1 (by rw [hKo r hr3]; exact hr2)) ?_ ?_ ?_ ?_ <;> simp [h0]
       · -- n is the only replica that left x: the fence is n's acknowledgement, and n
         -- holds x's log up to it.
         have hsn : s.sync s.cfg.primary n = true :=
@@ -204,9 +204,9 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
         have hlen := h.ackedLe s.cfg.primary n hxp
         have hnx : ((takeover s n).known n).primary ≠ s.cfg.primary := by
           rw [hK, if_pos rfl]; exact hnp
-        refine Fenced.of_left (hleft n hsn hnx) ?_ ?_ ?_ ?_
+        refine DeposedFenced.of_left (hleft n hsn hnx) ?_ ?_ ?_ ?_
         · intro _
-          change (takeover s n).acked s.cfg.primary n ≤ (takeover s n).recon n
+          change (takeover s n).acked s.cfg.primary n ≤ (takeover s n).inheritedEnd n
           rw [hAx, hRn]
           have := hhold.length_le; rw [List.length_take_of_le hlen] at this; exact this
         · intro _
@@ -246,9 +246,9 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
         rw [hK]; split
         · show n ≠ x; exact fun c => e c.symm
         · exact hw2)
-      refine Fenced.of_left hw' ?_ ?_ ?_ ?_
+      refine DeposedFenced.of_left hw' ?_ ?_ ?_ ?_
       · intro _
-        change (takeover s n).acked x w ≤ (takeover s n).recon n
+        change (takeover s n).acked x w ≤ (takeover s n).inheritedEnd n
         rw [hAx, hwF, hRn]
         have := hn6.1.length_le
         rw [List.length_take_of_le (hwF ▸ h.ackedLe x w hx')] at this; exact this
@@ -271,15 +271,15 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
 
 /-- Goal: `n` held the committed history as an eligible replica, and the new eligible
 set is part of the old one, so every authoritative node still holds it. -/
-theorem ehc_takeover :
+theorem eligibleHoldsCommitted_takeover :
     ∀ m, IsAuthoritative (takeover s n) m → (takeover s n).hist <+: (takeover s n).log m := by
   have hNE := takeoverEligible_iff (s := s) (n := n)
-  have hehn : s.hist <+: s.log n := h.ehc n ⟨Or.inl hel, hin⟩
+  have hehn : s.hist <+: s.log n := h.eligibleHoldsCommitted n ⟨Or.inl hel, hin⟩
   intro m ⟨hm, hi⟩
   change takeoverEligible s n m = true ∨ m = n at hm
   change s.cfg.incarnation m = s.incarnation m at hi
   rcases hm with hm | rfl
-  · exact h.ehc m ⟨Or.inl ((hNE m).1 hm).1, hi⟩
+  · exact h.eligibleHoldsCommitted m ⟨Or.inl ((hNE m).1 hm).1, hi⟩
   · exact hehn
 /-- Takeover preserves the invariant, layer by layer. -/
 theorem invariant_takeover : Invariant (takeover s n) where
@@ -288,7 +288,7 @@ theorem invariant_takeover : Invariant (takeover s n) where
   toMembershipInvariant := membership_takeover h n hkl hel hnp hin
   toCommitInvariant := commit_takeover h n hkl hel hnp hin
   toFailoverInvariant := failover_takeover h n hkl hel hnp hin
-  ehc := ehc_takeover h n hkl hel hnp hin
+  eligibleHoldsCommitted := eligibleHoldsCommitted_takeover h n hkl hel hnp hin
 
 end takeover
 

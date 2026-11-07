@@ -117,8 +117,9 @@ structure State (Node : Type) [DecidableEq Node] where
   acked  : Node → Node → Nat
   /-- Each node's commit point. -/
   commit : Node → Nat
-  /-- Catch-up point: a new primary must commit up to here before taking writes. -/
-  recon  : Node → Nat
+  /-- End of the inherited log: a new primary must commit up to here before taking
+  writes (design §5, reconciliation). `catchUpPoint` is derived from it. -/
+  inheritedEnd : Node → Nat
   /-- The term each node writes new entries with. -/
   term   : Node → Nat
   /-- `ackHigh n`: the highest offset `n` has ever acknowledged, as a replica to a
@@ -146,7 +147,7 @@ def init (i : Node) : State Node where
   sync   := fun _ _ => false
   acked  := fun _ _ => 0
   commit := fun _ => 0
-  recon  := fun _ => 0
+  inheritedEnd  := fun _ => 0
   term   := fun n => if n = i then 1 else 0
   ackHigh := fun _ => 0
   hist   := []
@@ -164,7 +165,7 @@ one it replicates from. -/
 def primaryOf (s : State Node) (n : Node) : Node := (s.known n).primary
 /-- `p` is reconciled: it has committed up to its catch-up point, so it has committed
 everything it inherited. -/
-def Reconciled (s : State Node) (p : Node) : Prop := s.recon p ≤ s.commit p
+def Reconciled (s : State Node) (p : Node) : Prop := s.inheritedEnd p ≤ s.commit p
 /-- `n` is authoritative: in the latest configuration, `n` is the primary or an eligible
 replica, and the incarnation recorded for it is its actual one. These are the nodes
 that must hold the committed history. -/
@@ -258,13 +259,13 @@ def takeover (s : State Node) (n : Node) : State Node :=
            sync := update s.sync n (takeoverSync s n),
            acked := update s.acked n (fun _ => 0),
            commit := update s.commit n 0,
-           recon := update s.recon n (s.log n).length,
+           inheritedEnd := update s.inheritedEnd n (s.log n).length,
            term := update s.term n (s.cfg.version + 1) }
 
 /-- The point a replica must have acknowledged before `p` counts it: `p`'s catch-up
 point while it is still reconciling, otherwise its commit point. -/
 def catchUpPoint (s : State Node) (p : Node) : Nat :=
-  if s.commit p < s.recon p then min (s.recon p) (s.log p).length else s.commit p
+  if s.commit p < s.inheritedEnd p then min (s.inheritedEnd p) (s.log p).length else s.commit p
 
 /-- The sync members of `p` that are eligible in `p`'s configuration with the
 incarnation it records for them. These are the replicas
@@ -299,7 +300,7 @@ def restartEmpty (s : State Node) (n : Node) : State Node :=
            incarnation := update s.incarnation n (s.incarnation n + 1),
            ackHigh := update s.ackHigh n 0,
            commit := update s.commit n 0,
-           recon := update s.recon n 0,
+           inheritedEnd := update s.inheritedEnd n 0,
            sync := fun p => if p = n then (fun _ => false)
                             else if p = s.cfg.primary then update (s.sync p) n false else s.sync p,
            acked := fun p => if p = n then (fun _ => 0)
@@ -316,7 +317,7 @@ its whole log again before it serves. If `n` is primary, its sync set is rebuilt
 the configuration it knows (`rebuiltSync`); otherwise it is empty. -/
 def restartKeep (s : State Node) (n : Node) : State Node :=
   { s with commit := update s.commit n 0,
-           recon := update s.recon n (s.log n).length,
+           inheritedEnd := update s.inheritedEnd n (s.log n).length,
            acked := update s.acked n (fun _ => 0),
            sync := update s.sync n
              (if (s.known n).primary = n ∧ (s.known n).incarnation n = s.incarnation n
@@ -327,16 +328,18 @@ file holding only the first `k` entries of its log. Everything else is RestartKe
 the truncated log: volatile state lost, catch-up point at the end of what it holds,
 sync replica set rebuilt if it is primary. -/
 def restartPartialKeep (s : State Node) (n : Node) (k : Nat) : State Node :=
-  { restartKeep s n with log := update s.log n ((s.log n).take k), recon := update s.recon n k }
+  { restartKeep s n with log := update s.log n ((s.log n).take k), inheritedEnd := update s.inheritedEnd n k }
 
 /-- RestartPartial(n, k), taking a new incarnation: RestartEmpty, except that `n` keeps
 the first `k` entries of its log as a starting point for resynchronisation. -/
 def restartPartialFresh (s : State Node) (n : Node) (k : Nat) : State Node :=
   { restartEmpty s n with log := update s.log n ((s.log n).take k) }
 
-/-- The actions of the protocol, one per `Step` constructor. A run of
-the protocol is a list of actions, so a counterexample's trace can be read off its
-statement. `restartPartial n k` labels both outcomes of a stale restore. -/
+/-- The actions of the protocol. A run of the protocol is a list of actions, so a
+counterexample's trace can be read off its statement. There is one action per `Step`
+constructor, except that `restartPartial n k` labels both outcomes of a stale restore
+(`Step.restartPartialKeep` and `Step.restartPartialFresh`, which differ only in their
+guards), so `Step` has fifteen constructors for fourteen actions. -/
 inductive Action (Node : Type)
   | append (p : Node) | replicate (r : Node) | ack (r : Node) | commit (p : Node)
   | count (p r : Node) | uncount (p r : Node) | makeEligible (p r : Node) | makeIneligible (p r : Node)
@@ -365,49 +368,51 @@ inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
       s.acked (primaryOf s r) r < (s.log r).length → Step m s (.ack r) (ack s r)
   /-- A writable primary may commit its next entry once every sync member has
   acknowledged it. -/
-  | commit (s p) : ThinksPrimary s p → Writable m s p → s.commit p < (s.log p).length →
-      (∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m s (.commit p) (commitNext s p)
+  | commit (s p) : (hp : ThinksPrimary s p) → (hw : Writable m s p) → (hlen : s.commit p < (s.log p).length) →
+      (hacked : ∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m s (.commit p) (commitNext s p)
   /-- A primary may count one of its replicas once that replica has acknowledged up
   to the catch-up point. -/
-  | count (s p r) : ThinksPrimary s p → r ≠ p → primaryOf s r = p → s.sync p r = false →
-      catchUpPoint s p ≤ s.acked p r → Step m s (.count p r) (count s p r)
+  | count (s p r) : (hp : ThinksPrimary s p) → (hrp : r ≠ p) → (hfollows : primaryOf s r = p) →
+      (hsy : s.sync p r = false) → (hcaught : catchUpPoint s p ≤ s.acked p r) →
+      Step m s (.count p r) (count s p r)
   /-- A primary that knows the latest configuration may drop a counted replica that is
   not yet eligible (design §4: "if the replica falls behind or fails before step 4, the
   primary simply removes it from the commit calculation"). A deposed primary may not:
   the member it would drop may be the one whose frozen acknowledgement fences it. -/
-  | uncount (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true →
-      s.cfg.eligible r = false → Step m s (.uncount p r) (uncount s p r)
+  | uncount (s p r) : (hp : ThinksPrimary s p) → (hkl : KnowsLatest s p) → (hsy : s.sync p r = true) →
+      (hel : s.cfg.eligible r = false) → Step m s (.uncount p r) (uncount s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
-  | makeEligible (s p r) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true → s.cfg.eligible r = false →
-      Step m s (.makeEligible p r) (makeEligible s p r)
+  | makeEligible (s p r) : (hp : ThinksPrimary s p) → (hkl : KnowsLatest s p) → (hsy : s.sync p r = true) →
+      (hel : s.cfg.eligible r = false) → Step m s (.makeEligible p r) (makeEligible s p r)
   /-- A primary that knows the latest configuration may make a replica ineligible. -/
-  | makeIneligible (s p r) : ThinksPrimary s p → KnowsLatest s p → s.cfg.eligible r = true →
+  | makeIneligible (s p r) : (hp : ThinksPrimary s p) → (hkl : KnowsLatest s p) → (hel : s.cfg.eligible r = true) →
       Step m s (.makeIneligible p r) (makeIneligible s p r)
   /-- A node with a stale configuration may learn the latest one. -/
-  | learn (s n) : ¬ KnowsLatest s n → Step m s (.learn n) (learn s n)
+  | learn (s n) : (hnkl : ¬ KnowsLatest s n) → Step m s (.learn n) (learn s n)
   /-- An eligible replica that knows the latest configuration, with a matching
   recorded incarnation, may take over from the current primary. -/
-  | takeover (s n) : KnowsLatest s n → s.cfg.eligible n = true → n ≠ s.cfg.primary →
-      s.cfg.incarnation n = s.incarnation n → Step m s (.takeover n) (takeover s n)
+  | takeover (s n) : (hkl : KnowsLatest s n) → (hel : s.cfg.eligible n = true) → (hnp : n ≠ s.cfg.primary) →
+      (hin : s.cfg.incarnation n = s.incarnation n) → Step m s (.takeover n) (takeover s n)
   /-- A diverged replica may resync once its primary has neither counted it nor made
   it eligible. -/
-  | resync (s r) : primaryOf s r ≠ r → ¬ (s.log r <+: s.log (primaryOf s r)) →
-      s.sync (primaryOf s r) r = false → (s.known (primaryOf s r)).eligible r = false →
+  | resync (s r) : (hne : primaryOf s r ≠ r) → (hdiv : ¬ (s.log r <+: s.log (primaryOf s r))) →
+      (hsy : s.sync (primaryOf s r) r = false) → (hke : (s.known (primaryOf s r)).eligible r = false) →
       Step m s (.resync r) (resync s r)
   /-- A node that knows the latest configuration may restart empty while some other
   authoritative node keeps its data (the survival assumption). -/
-  | restartEmpty (s n) : KnowsLatest s n → (∃ m, m ≠ n ∧ IsAuthoritative s m) → Step m s (.restartEmpty n) (restartEmpty s n)
+  | restartEmpty (s n) : (hkl : KnowsLatest s n) → (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
+      Step m s (.restartEmpty n) (restartEmpty s n)
   /-- A node that knows the latest configuration may restart and keep its data. -/
-  | restartKeep (s n) : KnowsLatest s n → Step m s (.restartKeep n) (restartKeep s n)
+  | restartKeep (s n) : (hkl : KnowsLatest s n) → Step m s (.restartKeep n) (restartKeep s n)
   /-- A node may restart from a persistence file holding only the first `k` entries of
   its log. It keeps its incarnation only if the file covers every offset it has
   acknowledged (`ackHigh n ≤ k`). -/
-  | restartPartialKeep (s n k) : KnowsLatest s n → k < (s.log n).length → s.ackHigh n ≤ k →
+  | restartPartialKeep (s n k) : (hkl : KnowsLatest s n) → (hk : k < (s.log n).length) → (hkeep : s.ackHigh n ≤ k) →
       Step m s (.restartPartial n k) (restartPartialKeep s n k)
   /-- Otherwise it takes a new incarnation and rejoins as after RestartEmpty, under the
   same survival assumption, keeping the `k` entries it has. -/
-  | restartPartialFresh (s n k) : KnowsLatest s n → k < (s.log n).length → k < s.ackHigh n →
-      (∃ m, m ≠ n ∧ IsAuthoritative s m) →
+  | restartPartialFresh (s n k) : (hkl : KnowsLatest s n) → (hk : k < (s.log n).length) → (hfresh : k < s.ackHigh n) →
+      (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
       Step m s (.restartPartial n k) (restartPartialFresh s n k)
 
 /-- The protocol as a labelled transition system (CSLib's `LTS`): `Step` is its

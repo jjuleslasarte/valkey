@@ -21,13 +21,13 @@ set_option linter.unusedSectionVars false
 /-- Any step that only extends logs preserves the invariant (AppendWrite, Replicate). -/
 theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat)
     (hL : ∀ x, s.log x <+: L x) : Invariant { s with log := L } where
-  ehc := fun n hn => (h.ehc n hn).trans (hL n)
-  caLen := fun p => Nat.le_trans (h.caLen p) (hL p).length_le
-  caHist := h.caHist
-  caEq := by
+  eligibleHoldsCommitted := fun n hn => (h.eligibleHoldsCommitted n hn).trans (hL n)
+  commitWithinLog := fun p => Nat.le_trans (h.commitWithinLog p) (hL p).length_le
+  commitWithinHistory := h.commitWithinHistory
+  committedIsHistoryPrefix := by
     intro p
     show (L p).take (s.commit p) = _
-    rw [← prefix_take_eq (hL p) (h.caLen p)]; exact h.caEq p
+    rw [← prefix_take_eq (hL p) (h.commitWithinLog p)]; exact h.committedIsHistoryPrefix p
   knownLe := h.knownLe
   knownEq := h.knownEq
   primKnows := h.primKnows
@@ -43,13 +43,13 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
   ackedHigh := h.ackedHigh
   histAck := h.histAck
   syncNew := h.syncNew
-  reconLen := Nat.le_trans h.reconLen (hL _).length_le
+  inheritedEndWithinLog := Nat.le_trans h.inheritedEndWithinLog (hL _).length_le
   syncCommit := h.syncCommit
   eligibleInOldConfig := h.eligibleInOldConfig
   incLe := h.incLe
   knownIncLe := h.knownIncLe
   authEx := h.authEx
-  histLe := h.histLe
+  historyWithinCommitOrInherited := h.historyWithinCommitOrInherited
   stale := fun p hp hv => (h.stale p hp hv).mono rfl rfl rfl rfl hL (fun _ => Nat.le_refl _)
     (fun r => h.ackedLe p r hp) (fun _ x => x) (fun _ _ => rfl)
 
@@ -125,17 +125,17 @@ theorem membership_ack : MembershipInvariant (ack s r) := by
     show _ ≤ (ack s r).acked s.cfg.primary x
     rw [hA]; split_ifs with hc
     · obtain ⟨h1, rfl⟩ := hc
-      show s.recon s.cfg.primary ≤ _; have := hlt; rw [← h1] at this; omega
+      show s.inheritedEnd s.cfg.primary ≤ _; have := hlt; rw [← h1] at this; omega
     · exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
 /-- Ack changes no commit point, catch-up point or history, and only raises a high-water mark. -/
 theorem commit_ack : CommitInvariant (ack s r) where
-  caLen := h.caLen
-  caHist := h.caHist
-  caEq := h.caEq
-  reconLen := h.reconLen
-  histLe := h.histLe
+  commitWithinLog := h.commitWithinLog
+  commitWithinHistory := h.commitWithinHistory
+  committedIsHistoryPrefix := h.committedIsHistoryPrefix
+  inheritedEndWithinLog := h.inheritedEndWithinLog
+  historyWithinCommitOrInherited := h.historyWithinCommitOrInherited
   histAck := fun n hn => Nat.le_trans (h.histAck n hn) (ack_ackHigh_le r n)
 
 /-- Only the acknowledgement of a replica that still follows its primary moves, so no fence moves. -/
@@ -156,8 +156,8 @@ theorem failover_ack : FailoverInvariant (ack s r) := by
   authEx := h.authEx }
 
 /-- Ack moves no log. -/
-theorem ehc_ack : EligibleHoldsCommitted (ack s r) := by
-  exact h.ehc
+theorem eligibleHoldsCommitted_ack : EligibleHoldsCommitted (ack s r) := by
+  exact h.eligibleHoldsCommitted
 
 theorem invariant_ack : Invariant (ack s r) where
   toConfigInvariant := config_ack h r hne hpre hlt
@@ -165,7 +165,7 @@ theorem invariant_ack : Invariant (ack s r) where
   toMembershipInvariant := membership_ack h r hne hpre hlt
   toCommitInvariant := commit_ack h r hne hpre hlt
   toFailoverInvariant := failover_ack h r hne hpre hlt
-  ehc := ehc_ack h r hne hpre hlt
+  eligibleHoldsCommitted := eligibleHoldsCommitted_ack h r hne hpre hlt
 
 end ack
 
@@ -246,7 +246,7 @@ theorem membership_resync : MembershipInvariant (resync s r) := by
     intro x hs he
     obtain ⟨a, b⟩ := h.syncNew x hs he
     refine ⟨a, ?_⟩
-    show s.recon s.cfg.primary ≤ (resync s r).acked s.cfg.primary x
+    show s.inheritedEnd s.cfg.primary ≤ (resync s r).acked s.cfg.primary x
     rw [hAs _ _ (show s.sync s.cfg.primary x = true from hs)]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -260,15 +260,15 @@ theorem commit_resync : CommitInvariant (resync s r) := by
   have hCr := resync_commit_self (s := s) (r := r)
   have hCo : ∀ x, x ≠ r → (resync s r).commit x = s.commit x := fun _ => resync_commit_other
   exact {
-  caLen := by
+  commitWithinLog := by
     intro x; by_cases e : x = r
     · subst e; rw [hCr, hLr, List.length_take_of_le hcu]; omega
-    · rw [hCo x e, hLo x e]; exact h.caLen x
-  caHist := by
+    · rw [hCo x e, hLo x e]; exact h.commitWithinLog x
+  commitWithinHistory := by
     intro x; by_cases e : x = r
-    · subst e; rw [hCr]; exact Nat.le_trans (Nat.min_le_left _ _) (h.caHist _)
-    · rw [hCo x e]; exact h.caHist x
-  caEq := by
+    · subst e; rw [hCr]; exact Nat.le_trans (Nat.min_le_left _ _) (h.commitWithinHistory _)
+    · rw [hCo x e]; exact h.commitWithinHistory x
+  committedIsHistoryPrefix := by
     intro x; by_cases e : x = r
     · subst e
       show ((resync s x).log x).take ((resync s x).commit x) = s.hist.take ((resync s x).commit x)
@@ -281,15 +281,15 @@ theorem commit_resync : CommitInvariant (resync s r) := by
       rw [show (s.log (primaryOf s x)).take (min (s.commit x) (s.commit (primaryOf s x))) =
           ((s.log (primaryOf s x)).take (s.commit (primaryOf s x))).take (min (s.commit x) (s.commit (primaryOf s x)))
           by rw [List.take_take]; congr 1; omega]
-      rw [h.caEq (primaryOf s x), List.take_take, hk]
-    · rw [hCo x e, hLo x e]; exact h.caEq x
-  reconLen := by
+      rw [h.committedIsHistoryPrefix (primaryOf s x), List.take_take, hk]
+    · rw [hCo x e, hLo x e]; exact h.committedIsHistoryPrefix x
+  inheritedEndWithinLog := by
     show _ ≤ ((resync s r).log s.cfg.primary).length
-    rw [hLo _ (Ne.symm hrprim)]; exact h.reconLen
-  histLe := by
+    rw [hLo _ (Ne.symm hrprim)]; exact h.inheritedEndWithinLog
+  historyWithinCommitOrInherited := by
     intro hpa
     show s.hist.length ≤ (resync s r).commit s.cfg.primary ∨ _
-    rw [hCo _ (Ne.symm hrprim)]; exact h.histLe hpa
+    rw [hCo _ (Ne.symm hrprim)]; exact h.historyWithinCommitOrInherited hpa
   histAck := h.histAck }
 
 /-- `r` is neither a primary nor eligible (`resync_facts`), and no counted acknowledgement
@@ -311,13 +311,13 @@ theorem failover_resync : FailoverInvariant (resync s r) := by
     have hxr := htpne x hx
     have hF := h.stale x hx hv
     exact hF.transfer rfl (fun _ => rfl) (hAs x) (hLo x hxr) rfl id
-      (fun hq => hF.reconLe hq) (fun hq => by rw [hLo _ (Ne.symm hrprim)]; exact hF.primHolds hq)
+      (fun hq => hF.fenceLeInheritedEnd hq) (fun hq => by rw [hLo _ (Ne.symm hrprim)]; exact hF.primHolds hq)
       (fun hq => hF.primAck hq)
       (fun m hm hi => Or.inl ⟨hm, hi, hLo m (hnotr m (Or.inl hm)), Nat.le_refl _⟩)
   authEx := h.authEx }
 
 /-- `r` is not authoritative (`resync_facts`), and no authoritative node's log moves. -/
-theorem ehc_resync : EligibleHoldsCommitted (resync s r) := by
+theorem eligibleHoldsCommitted_resync : EligibleHoldsCommitted (resync s r) := by
   obtain ⟨hrprim, hrel, htpne⟩ := resync_facts h r hne hsy hke
   have hcl := commit_le_catchUpPoint h (primaryOf s r)
   have hLo : ∀ x, x ≠ r → (resync s r).log x = s.log x := fun _ => resync_log_other
@@ -326,7 +326,7 @@ theorem ehc_resync : EligibleHoldsCommitted (resync s r) := by
     rcases hx with hx | hx
     · rw [hrel] at hx; exact absurd hx (by decide)
     · exact hrprim hx
-  intro x hx; rw [hLo x (hnotr x hx.1)]; exact h.ehc x hx
+  intro x hx; rw [hLo x (hnotr x hx.1)]; exact h.eligibleHoldsCommitted x hx
 
 /-- Resync copies the primary's log up to its CatchUpPoint (the inherited log while it
 is unreconciled). -/
@@ -336,7 +336,7 @@ theorem invariant_resync : Invariant (resync s r) where
   toMembershipInvariant := membership_resync h r hne hsy hke
   toCommitInvariant := commit_resync h r hne hsy hke
   toFailoverInvariant := failover_resync h r hne hsy hke
-  ehc := ehc_resync h r hne hsy hke
+  eligibleHoldsCommitted := eligibleHoldsCommitted_resync h r hne hsy hke
 
 end resync
 

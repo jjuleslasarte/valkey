@@ -47,8 +47,8 @@ state has an authoritative eligible replica (n1) that lacks the committed histor
 theorem staleRestoreKeepsInc_unsafe :
     ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧ ¬ Safety s := by
   refine ⟨g8, ⟨_, staleRestoreKeepsInc_run⟩, ?_⟩
-  intro ⟨hehc, _⟩
-  exact absurd (hehc 1 (by decide)) (by decide)
+  intro ⟨hholds, _⟩
+  exact absurd (hholds 1 (by decide)) (by decide)
 
 def g9 := restartEmpty g8 0   -- n0 restarts empty; allowed, since n1 is still authoritative
 

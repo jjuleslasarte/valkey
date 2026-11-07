@@ -103,7 +103,7 @@ theorem membership_restartEmpty : MembershipInvariant (restartEmpty s n) := by
   have hkn : s.known n = s.cfg := h.knownEq n hkl
   have hIo : ∀ x, x ≠ n → (restartEmpty s n).incarnation x = s.incarnation x := fun _ => restartEmpty_inc_other
   have hIn := restartEmpty_inc_self (s := s) (n := n)
-  have hRo : ∀ x, x ≠ n → (restartEmpty s n).recon x = s.recon x := fun _ => restartEmpty_recon_other
+  have hRo : ∀ x, x ≠ n → (restartEmpty s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartEmpty_inheritedEnd_other
   have hS := restartEmpty_sync (s := s) (n := n)
   have hA := restartEmpty_acked (s := s) (n := n)
   have hSle : ∀ p r, (restartEmpty s n).sync p r = true → s.sync p r = true :=
@@ -132,7 +132,7 @@ theorem membership_restartEmpty : MembershipInvariant (restartEmpty s n) := by
         intro e; rw [hS, if_neg ep, if_pos ⟨rfl, e⟩] at hs; exact absurd hs (by decide)
       obtain ⟨a, b⟩ := h.syncNew r (hSle _ _ hs) he
       refine ⟨a, ?_⟩
-      show (restartEmpty s n).recon s.cfg.primary ≤ (restartEmpty s n).acked s.cfg.primary r
+      show (restartEmpty s n).inheritedEnd s.cfg.primary ≤ (restartEmpty s n).acked s.cfg.primary r
       rw [hRo _ ep, hA, if_neg ep, if_neg (fun c => hrn c.2)]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -141,35 +141,35 @@ theorem commit_restartEmpty : CommitInvariant (restartEmpty s n) := by
   have hLo : ∀ x, x ≠ n → (restartEmpty s n).log x = s.log x := fun _ => restartEmpty_log_other
   have hCo : ∀ x, x ≠ n → (restartEmpty s n).commit x = s.commit x := fun _ => restartEmpty_commit_other
   have hCn := restartEmpty_commit_self (s := s) (n := n)
-  have hRo : ∀ x, x ≠ n → (restartEmpty s n).recon x = s.recon x := fun _ => restartEmpty_recon_other
-  have hRn := restartEmpty_recon_self (s := s) (n := n)
+  have hRo : ∀ x, x ≠ n → (restartEmpty s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartEmpty_inheritedEnd_other
+  have hRn := restartEmpty_inheritedEnd_self (s := s) (n := n)
   have hnauth : ¬ (s.cfg.incarnation n = s.incarnation n + 1) := by have := h.incLe n; omega
   have hpa : PrimaryAuthoritative (restartEmpty s n) → s.cfg.primary ≠ n ∧ PrimaryAuthoritative s :=
     restartEmpty_primaryAuthoritative (h.incLe n)
   exact {
-  caLen := by
+  commitWithinLog := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e, hLo x e]; exact h.caLen x
-  caHist := by
+    · rw [hCo x e, hLo x e]; exact h.commitWithinLog x
+  commitWithinHistory := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.caHist x
-  caEq := by
+    · rw [hCo x e]; exact h.commitWithinHistory x
+  committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
-    · rw [hCo x e, hLo x e]; exact h.caEq x
-  reconLen := by
-    show (restartEmpty s n).recon s.cfg.primary ≤ ((restartEmpty s n).log s.cfg.primary).length
+    · rw [hCo x e, hLo x e]; exact h.committedIsHistoryPrefix x
+  inheritedEndWithinLog := by
+    show (restartEmpty s n).inheritedEnd s.cfg.primary ≤ ((restartEmpty s n).log s.cfg.primary).length
     by_cases ep : s.cfg.primary = n
     · rw [ep, hRn]; exact Nat.zero_le _
-    · rw [hRo _ ep, hLo _ ep]; exact h.reconLen
-  histLe := by
+    · rw [hRo _ ep, hLo _ ep]; exact h.inheritedEndWithinLog
+  historyWithinCommitOrInherited := by
     intro hp
     obtain ⟨hpn, hp'⟩ := hpa hp
     show s.hist.length ≤ (restartEmpty s n).commit s.cfg.primary ∨
-      s.hist.length ≤ (restartEmpty s n).recon s.cfg.primary
-    rw [hCo _ hpn, hRo _ hpn]; exact h.histLe hp'
+      s.hist.length ≤ (restartEmpty s n).inheritedEnd s.cfg.primary
+    rw [hCo _ hpn, hRo _ hpn]; exact h.historyWithinCommitOrInherited hp'
   histAck := by
     intro m hm
     obtain ⟨hmn, hm'⟩ := restartEmpty_isAuthoritative (h.incLe n) hm
@@ -181,7 +181,7 @@ theorem failover_restartEmpty : FailoverInvariant (restartEmpty s n) := by
   have hkn : s.known n = s.cfg := h.knownEq n hkl
   have hIo : ∀ x, x ≠ n → (restartEmpty s n).incarnation x = s.incarnation x := fun _ => restartEmpty_inc_other
   have hLo : ∀ x, x ≠ n → (restartEmpty s n).log x = s.log x := fun _ => restartEmpty_log_other
-  have hRo : ∀ x, x ≠ n → (restartEmpty s n).recon x = s.recon x := fun _ => restartEmpty_recon_other
+  have hRo : ∀ x, x ≠ n → (restartEmpty s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartEmpty_inheritedEnd_other
   have hS := restartEmpty_sync (s := s) (n := n)
   have hA := restartEmpty_acked (s := s) (n := n)
   have hnauth : ¬ (s.cfg.incarnation n = s.incarnation n + 1) := by have := h.incLe n; omega
@@ -202,7 +202,7 @@ theorem failover_restartEmpty : FailoverInvariant (restartEmpty s n) := by
       intro r; rw [hA, if_neg hpn, if_neg (fun c => hpp c.1)]
     have hF := h.stale p hp' hv
     refine hF.transfer hSp (fun _ => rfl) (fun r _ => hAp r) (hLo p hpn) rfl
-      (fun hq => (hpa hq).2) (fun hq => by rw [hRo _ (hpa hq).1]; exact hF.reconLe (hpa hq).2)
+      (fun hq => (hpa hq).2) (fun hq => by rw [hRo _ (hpa hq).1]; exact hF.fenceLeInheritedEnd (hpa hq).2)
       (fun hq => by rw [hLo _ (hpa hq).1]; exact hF.primHolds (hpa hq).2)
       (fun hq => by rw [restartEmpty_ackHigh_other (hpa hq).1]; exact hF.primAck (hpa hq).2) ?_
     intro m hm hi
@@ -217,14 +217,14 @@ theorem failover_restartEmpty : FailoverInvariant (restartEmpty s n) := by
     show s.cfg.incarnation m = (restartEmpty s n).incarnation m; rw [hIo m hmn]; exact hm2 }
 
 /-- `n` stops being authoritative, and every other node keeps its log. -/
-theorem ehc_restartEmpty : EligibleHoldsCommitted (restartEmpty s n) := by
+theorem eligibleHoldsCommitted_restartEmpty : EligibleHoldsCommitted (restartEmpty s n) := by
   have hLo : ∀ x, x ≠ n → (restartEmpty s n).log x = s.log x := fun _ => restartEmpty_log_other
   have hnauth : ¬ (s.cfg.incarnation n = s.incarnation n + 1) := by have := h.incLe n; omega
   have hauth : ∀ x, IsAuthoritative (restartEmpty s n) x → x ≠ n ∧ IsAuthoritative s x :=
     fun _ => restartEmpty_isAuthoritative (h.incLe n)
   intro x hx
   obtain ⟨hxn, hx'⟩ := hauth x hx
-  rw [hLo x hxn]; exact h.ehc x hx'
+  rw [hLo x hxn]; exact h.eligibleHoldsCommitted x hx'
 
 theorem invariant_restartEmpty : Invariant (restartEmpty s n) where
   toConfigInvariant := config_restartEmpty h n hkl hsurv
@@ -232,7 +232,7 @@ theorem invariant_restartEmpty : Invariant (restartEmpty s n) where
   toMembershipInvariant := membership_restartEmpty h n hkl hsurv
   toCommitInvariant := commit_restartEmpty h n hkl hsurv
   toFailoverInvariant := failover_restartEmpty h n hkl hsurv
-  ehc := ehc_restartEmpty h n hkl hsurv
+  eligibleHoldsCommitted := eligibleHoldsCommitted_restartEmpty h n hkl hsurv
 
 end restartEmpty
 
@@ -293,7 +293,7 @@ theorem repl_restartKeep : ReplInvariant (restartKeep s n) := by
 /-- A restarted primary counts every matching eligible replica again. -/
 theorem membership_restartKeep : MembershipInvariant (restartKeep s n) := by
   have hkn : s.known n = s.cfg := h.knownEq n hkl
-  have hRo : ∀ x, x ≠ n → (restartKeep s n).recon x = s.recon x := fun _ => restartKeep_recon_other
+  have hRo : ∀ x, x ≠ n → (restartKeep s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartKeep_inheritedEnd_other
   have hAo : ∀ x, x ≠ n → (restartKeep s n).acked x = s.acked x := fun _ => restartKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartKeep s n).sync x = s.sync x := fun _ => restartKeep_sync_other
   have hSn := restartKeep_sync_self (s := s) (n := n)
@@ -329,7 +329,7 @@ theorem membership_restartKeep : MembershipInvariant (restartKeep s n) := by
     · have hs' : s.sync s.cfg.primary r = true := by rw [← hSo _ e]; exact hs
       obtain ⟨a, b⟩ := h.syncNew r hs' he
       refine ⟨a, ?_⟩
-      show (restartKeep s n).recon s.cfg.primary ≤ (restartKeep s n).acked s.cfg.primary r
+      show (restartKeep s n).inheritedEnd s.cfg.primary ≤ (restartKeep s n).acked s.cfg.primary r
       rw [hRo _ e, hAo _ e]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -337,40 +337,40 @@ theorem membership_restartKeep : MembershipInvariant (restartKeep s n) := by
 theorem commit_restartKeep : CommitInvariant (restartKeep s n) := by
   have hCo : ∀ x, x ≠ n → (restartKeep s n).commit x = s.commit x := fun _ => restartKeep_commit_other
   have hCn := restartKeep_commit_self (s := s) (n := n)
-  have hRo : ∀ x, x ≠ n → (restartKeep s n).recon x = s.recon x := fun _ => restartKeep_recon_other
-  have hRn := restartKeep_recon_self (s := s) (n := n)
+  have hRo : ∀ x, x ≠ n → (restartKeep s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartKeep_inheritedEnd_other
+  have hRn := restartKeep_inheritedEnd_self (s := s) (n := n)
   have htp := restartKeep_thinksPrimary (s := s) (n := n)
   exact {
-  caLen := by
+  commitWithinLog := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.caLen x
-  caHist := by
+    · rw [hCo x e]; exact h.commitWithinLog x
+  commitWithinHistory := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.caHist x
-  caEq := by
+    · rw [hCo x e]; exact h.commitWithinHistory x
+  committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
-    · rw [hCo x e]; exact h.caEq x
-  reconLen := by
-    show (restartKeep s n).recon s.cfg.primary ≤ (s.log s.cfg.primary).length
+    · rw [hCo x e]; exact h.committedIsHistoryPrefix x
+  inheritedEndWithinLog := by
+    show (restartKeep s n).inheritedEnd s.cfg.primary ≤ (s.log s.cfg.primary).length
     by_cases e : s.cfg.primary = n
     · rw [e, hRn]
-    · rw [hRo _ e]; exact h.reconLen
-  histLe := by
+    · rw [hRo _ e]; exact h.inheritedEndWithinLog
+  historyWithinCommitOrInherited := by
     intro hp
     show s.hist.length ≤ (restartKeep s n).commit s.cfg.primary ∨
-      s.hist.length ≤ (restartKeep s n).recon s.cfg.primary
+      s.hist.length ≤ (restartKeep s n).inheritedEnd s.cfg.primary
     by_cases e : s.cfg.primary = n
-    · right; rw [e, hRn]; rw [← e]; exact (h.ehc _ ⟨Or.inr rfl, hp⟩).length_le
-    · rw [hCo _ e, hRo _ e]; exact h.histLe hp
+    · right; rw [e, hRn]; rw [← e]; exact (h.eligibleHoldsCommitted _ ⟨Or.inr rfl, hp⟩).length_le
+    · rw [hCo _ e, hRo _ e]; exact h.historyWithinCommitOrInherited hp
   histAck := h.histAck }
 
 /-- `n` knows the latest configuration, so it is not deposed; other primaries' fences do not move. -/
 theorem failover_restartKeep : FailoverInvariant (restartKeep s n) := by
-  have hRo : ∀ x, x ≠ n → (restartKeep s n).recon x = s.recon x := fun _ => restartKeep_recon_other
-  have hRn := restartKeep_recon_self (s := s) (n := n)
+  have hRo : ∀ x, x ≠ n → (restartKeep s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartKeep_inheritedEnd_other
+  have hRn := restartKeep_inheritedEnd_self (s := s) (n := n)
   have hAo : ∀ x, x ≠ n → (restartKeep s n).acked x = s.acked x := fun _ => restartKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartKeep s n).sync x = s.sync x := fun _ => restartKeep_sync_other
   have htp := restartKeep_thinksPrimary (s := s) (n := n)
@@ -387,16 +387,16 @@ theorem failover_restartKeep : FailoverInvariant (restartKeep s n) := by
       (fun m hm hi => Or.inl ⟨hm, hi, rfl, Nat.le_refl _⟩)
     -- the primary's catch-up point only moves up, to the end of its log
     intro hq
-    show fence s p ≤ (restartKeep s n).recon s.cfg.primary
+    show fence s p ≤ (restartKeep s n).inheritedEnd s.cfg.primary
     by_cases e : s.cfg.primary = n
-    · have h1 := hF.reconLe hq; have h2 := h.reconLen; rw [e] at h1 h2 ⊢; rw [hRn]; omega
-    · rw [hRo _ e]; exact hF.reconLe hq
+    · have h1 := hF.fenceLeInheritedEnd hq; have h2 := h.inheritedEndWithinLog; rw [e] at h1 h2 ⊢; rw [hRn]; omega
+    · rw [hRo _ e]; exact hF.fenceLeInheritedEnd hq
   authEx := h.authEx }
 
 /-- No log or incarnation changes. -/
-theorem ehc_restartKeep : EligibleHoldsCommitted (restartKeep s n) := by
+theorem eligibleHoldsCommitted_restartKeep : EligibleHoldsCommitted (restartKeep s n) := by
   have htp := restartKeep_thinksPrimary (s := s) (n := n)
-  exact h.ehc
+  exact h.eligibleHoldsCommitted
 
 theorem invariant_restartKeep : Invariant (restartKeep s n) where
   toConfigInvariant := config_restartKeep h n hkl
@@ -404,7 +404,7 @@ theorem invariant_restartKeep : Invariant (restartKeep s n) where
   toMembershipInvariant := membership_restartKeep h n hkl
   toCommitInvariant := commit_restartKeep h n hkl
   toFailoverInvariant := failover_restartKeep h n hkl
-  ehc := ehc_restartKeep h n hkl
+  eligibleHoldsCommitted := eligibleHoldsCommitted_restartKeep h n hkl
 
 end restartKeep
 
@@ -418,7 +418,7 @@ include h hkl hk hkeep
 /-! `n` keeps its incarnation, so it may still be authoritative, or primary. What makes
 the truncated log safe is that it covers `n`'s high-water mark: everything `n`'s primary
 recorded as acknowledged (`ackedHigh`), the whole committed history (`histAck`), and
-every deposed primary's fence (`Fenced.eligHolds`, `Fenced.primAck`). -/
+every deposed primary's fence (`DeposedFenced.eligHolds`, `DeposedFenced.primAck`). -/
 
 /-- RestartPartial changes no configuration or incarnation. -/
 theorem config_restartPartialKeep : ConfigInvariant (restartPartialKeep s n k) :=
@@ -481,7 +481,7 @@ theorem repl_restartPartialKeep : ReplInvariant (restartPartialKeep s n k) := by
 /-- As for RestartKeep: a restarted primary counts every matching eligible replica. -/
 theorem membership_restartPartialKeep : MembershipInvariant (restartPartialKeep s n k) := by
   have hkn : s.known n = s.cfg := h.knownEq n hkl
-  have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).recon x = s.recon x := fun _ => restartPartialKeep_recon_other
+  have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialKeep_inheritedEnd_other
   have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).acked x = s.acked x := fun _ => restartPartialKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartPartialKeep s n k).sync x = s.sync x := fun _ => restartPartialKeep_sync_other
   have hSn := restartPartialKeep_sync_self (s := s) (n := n) (k := k)
@@ -516,7 +516,7 @@ theorem membership_restartPartialKeep : MembershipInvariant (restartPartialKeep 
     · have hs' : s.sync s.cfg.primary r = true := by rw [← hSo _ e]; exact hs
       obtain ⟨a, b⟩ := h.syncNew r hs' he
       refine ⟨a, ?_⟩
-      show (restartPartialKeep s n k).recon s.cfg.primary ≤ (restartPartialKeep s n k).acked s.cfg.primary r
+      show (restartPartialKeep s n k).inheritedEnd s.cfg.primary ≤ (restartPartialKeep s n k).acked s.cfg.primary r
       rw [hRo _ e, hAo _ e]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -528,36 +528,36 @@ theorem commit_restartPartialKeep : CommitInvariant (restartPartialKeep s n k) :
   have hLn := restartPartialKeep_log_self (s := s) (n := n) (k := k)
   have hCo : ∀ x, x ≠ n → (restartPartialKeep s n k).commit x = s.commit x := fun _ => restartPartialKeep_commit_other
   have hCn := restartPartialKeep_commit_self (s := s) (n := n) (k := k)
-  have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).recon x = s.recon x := fun _ => restartPartialKeep_recon_other
-  have hRn := restartPartialKeep_recon_self (s := s) (n := n) (k := k)
+  have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialKeep_inheritedEnd_other
+  have hRn := restartPartialKeep_inheritedEnd_self (s := s) (n := n) (k := k)
   exact {
-  caLen := by
+  commitWithinLog := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e, hLo x e]; exact h.caLen x
-  caHist := by
+    · rw [hCo x e, hLo x e]; exact h.commitWithinLog x
+  commitWithinHistory := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.caHist x
-  caEq := by
+    · rw [hCo x e]; exact h.commitWithinHistory x
+  committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
-    · rw [hCo x e, hLo x e]; exact h.caEq x
-  reconLen := by
-    show (restartPartialKeep s n k).recon s.cfg.primary ≤ ((restartPartialKeep s n k).log s.cfg.primary).length
+    · rw [hCo x e, hLo x e]; exact h.committedIsHistoryPrefix x
+  inheritedEndWithinLog := by
+    show (restartPartialKeep s n k).inheritedEnd s.cfg.primary ≤ ((restartPartialKeep s n k).log s.cfg.primary).length
     by_cases e : s.cfg.primary = n
     · rw [e, hRn, hLn, List.length_take]; omega
-    · rw [hRo _ e, hLo _ e]; exact h.reconLen
-  histLe := by
+    · rw [hRo _ e, hLo _ e]; exact h.inheritedEndWithinLog
+  historyWithinCommitOrInherited := by
     intro hp
     show s.hist.length ≤ (restartPartialKeep s n k).commit s.cfg.primary ∨
-      s.hist.length ≤ (restartPartialKeep s n k).recon s.cfg.primary
+      s.hist.length ≤ (restartPartialKeep s n k).inheritedEnd s.cfg.primary
     by_cases e : s.cfg.primary = n
     · right; rw [e, hRn]
       have hpa : PrimaryAuthoritative s := hp
       have := h.histAck n ⟨Or.inr e.symm, by rw [← e]; exact hpa⟩
       omega
-    · rw [hCo _ e, hRo _ e]; exact h.histLe hp
+    · rw [hCo _ e, hRo _ e]; exact h.historyWithinCommitOrInherited hp
   histAck := h.histAck }
 
 /-- `n` knows the latest configuration, so it is not deposed. Every deposed primary's
@@ -567,8 +567,8 @@ theorem failover_restartPartialKeep : FailoverInvariant (restartPartialKeep s n 
   have hkn : s.known n = s.cfg := h.knownEq n hkl
   have hLo : ∀ x, x ≠ n → (restartPartialKeep s n k).log x = s.log x := fun _ => restartPartialKeep_log_other
   have hLn := restartPartialKeep_log_self (s := s) (n := n) (k := k)
-  have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).recon x = s.recon x := fun _ => restartPartialKeep_recon_other
-  have hRn := restartPartialKeep_recon_self (s := s) (n := n) (k := k)
+  have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialKeep_inheritedEnd_other
+  have hRn := restartPartialKeep_inheritedEnd_self (s := s) (n := n) (k := k)
   have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).acked x = s.acked x := fun _ => restartPartialKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartPartialKeep s n k).sync x = s.sync x := fun _ => restartPartialKeep_sync_other
   exact {
@@ -584,10 +584,10 @@ theorem failover_restartPartialKeep : FailoverInvariant (restartPartialKeep s n 
       ?_ ?_ (fun hq => hF.primAck hq) ?_
     · -- the fence is within the primary's high-water mark, hence within the kept prefix
       intro hq
-      show fence s p ≤ (restartPartialKeep s n k).recon s.cfg.primary
+      show fence s p ≤ (restartPartialKeep s n k).inheritedEnd s.cfg.primary
       by_cases e : s.cfg.primary = n
       · rw [e, hRn]; have := hF.primAck hq; rw [e] at this; omega
-      · rw [hRo _ e]; exact hF.reconLe hq
+      · rw [hRo _ e]; exact hF.fenceLeInheritedEnd hq
     · intro hq
       show (s.log p).take (fence s p) <+: (restartPartialKeep s n k).log s.cfg.primary
       by_cases e : s.cfg.primary = n
@@ -613,16 +613,16 @@ theorem failover_restartPartialKeep : FailoverInvariant (restartPartialKeep s n 
   authEx := h.authEx }
 
 /-- `n` had acknowledged the whole committed history, so the kept prefix holds it. -/
-theorem ehc_restartPartialKeep : EligibleHoldsCommitted (restartPartialKeep s n k) := by
+theorem eligibleHoldsCommitted_restartPartialKeep : EligibleHoldsCommitted (restartPartialKeep s n k) := by
   intro x hx
   have hx' : IsAuthoritative s x := hx
   by_cases e : x = n
   · subst e
     show s.hist <+: (restartPartialKeep s x k).log x
     rw [restartPartialKeep_log_self]
-    exact prefix_take_of_length_le (h.ehc x hx') ((h.histAck x hx').trans hkeep)
+    exact prefix_take_of_length_le (h.eligibleHoldsCommitted x hx') ((h.histAck x hx').trans hkeep)
   · show s.hist <+: (restartPartialKeep s n k).log x
-    rw [restartPartialKeep_log_other e]; exact h.ehc x hx'
+    rw [restartPartialKeep_log_other e]; exact h.eligibleHoldsCommitted x hx'
 
 theorem invariant_restartPartialKeep : Invariant (restartPartialKeep s n k) where
   toConfigInvariant := config_restartPartialKeep h n k hkl hk hkeep
@@ -630,7 +630,7 @@ theorem invariant_restartPartialKeep : Invariant (restartPartialKeep s n k) wher
   toMembershipInvariant := membership_restartPartialKeep h n k hkl hk hkeep
   toCommitInvariant := commit_restartPartialKeep h n k hkl hk hkeep
   toFailoverInvariant := failover_restartPartialKeep h n k hkl hk hkeep
-  ehc := ehc_restartPartialKeep h n k hkl hk hkeep
+  eligibleHoldsCommitted := eligibleHoldsCommitted_restartPartialKeep h n k hkl hk hkeep
 
 end restartPartialKeep
 
@@ -723,7 +723,7 @@ theorem membership_restartPartialFresh : MembershipInvariant (restartPartialFres
   have hkn : s.known n = s.cfg := h.knownEq n hkl
   have hIo : ∀ x, x ≠ n → (restartPartialFresh s n k).incarnation x = s.incarnation x := fun _ => restartPartialFresh_inc_other
   have hIn := restartPartialFresh_inc_self (s := s) (n := n) (k := k)
-  have hRo : ∀ x, x ≠ n → (restartPartialFresh s n k).recon x = s.recon x := fun _ => restartPartialFresh_recon_other
+  have hRo : ∀ x, x ≠ n → (restartPartialFresh s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialFresh_inheritedEnd_other
   have hS := restartPartialFresh_sync (s := s) (n := n) (k := k)
   have hA := restartPartialFresh_acked (s := s) (n := n) (k := k)
   have hSle : ∀ p r, (restartPartialFresh s n k).sync p r = true → s.sync p r = true :=
@@ -752,7 +752,7 @@ theorem membership_restartPartialFresh : MembershipInvariant (restartPartialFres
         intro e; rw [hS, if_neg ep, if_pos ⟨rfl, e⟩] at hs; exact absurd hs (by decide)
       obtain ⟨a, b⟩ := h.syncNew r (hSle _ _ hs) he
       refine ⟨a, ?_⟩
-      show (restartPartialFresh s n k).recon s.cfg.primary ≤ (restartPartialFresh s n k).acked s.cfg.primary r
+      show (restartPartialFresh s n k).inheritedEnd s.cfg.primary ≤ (restartPartialFresh s n k).acked s.cfg.primary r
       rw [hRo _ ep, hA, if_neg ep, if_neg (fun c => hrn c.2)]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -761,35 +761,35 @@ theorem commit_restartPartialFresh : CommitInvariant (restartPartialFresh s n k)
   have hLo : ∀ x, x ≠ n → (restartPartialFresh s n k).log x = s.log x := fun _ => restartPartialFresh_log_other
   have hCo : ∀ x, x ≠ n → (restartPartialFresh s n k).commit x = s.commit x := fun _ => restartPartialFresh_commit_other
   have hCn := restartPartialFresh_commit_self (s := s) (n := n) (k := k)
-  have hRo : ∀ x, x ≠ n → (restartPartialFresh s n k).recon x = s.recon x := fun _ => restartPartialFresh_recon_other
-  have hRn := restartPartialFresh_recon_self (s := s) (n := n) (k := k)
+  have hRo : ∀ x, x ≠ n → (restartPartialFresh s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialFresh_inheritedEnd_other
+  have hRn := restartPartialFresh_inheritedEnd_self (s := s) (n := n) (k := k)
   have hnauth : ¬ (s.cfg.incarnation n = s.incarnation n + 1) := by have := h.incLe n; omega
   have hpa : PrimaryAuthoritative (restartPartialFresh s n k) → s.cfg.primary ≠ n ∧ PrimaryAuthoritative s :=
     restartPartialFresh_primaryAuthoritative (h.incLe n)
   exact {
-  caLen := by
+  commitWithinLog := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e, hLo x e]; exact h.caLen x
-  caHist := by
+    · rw [hCo x e, hLo x e]; exact h.commitWithinLog x
+  commitWithinHistory := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.caHist x
-  caEq := by
+    · rw [hCo x e]; exact h.commitWithinHistory x
+  committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
-    · rw [hCo x e, hLo x e]; exact h.caEq x
-  reconLen := by
-    show (restartPartialFresh s n k).recon s.cfg.primary ≤ ((restartPartialFresh s n k).log s.cfg.primary).length
+    · rw [hCo x e, hLo x e]; exact h.committedIsHistoryPrefix x
+  inheritedEndWithinLog := by
+    show (restartPartialFresh s n k).inheritedEnd s.cfg.primary ≤ ((restartPartialFresh s n k).log s.cfg.primary).length
     by_cases ep : s.cfg.primary = n
     · rw [ep, hRn]; exact Nat.zero_le _
-    · rw [hRo _ ep, hLo _ ep]; exact h.reconLen
-  histLe := by
+    · rw [hRo _ ep, hLo _ ep]; exact h.inheritedEndWithinLog
+  historyWithinCommitOrInherited := by
     intro hp
     obtain ⟨hpn, hp'⟩ := hpa hp
     show s.hist.length ≤ (restartPartialFresh s n k).commit s.cfg.primary ∨
-      s.hist.length ≤ (restartPartialFresh s n k).recon s.cfg.primary
-    rw [hCo _ hpn, hRo _ hpn]; exact h.histLe hp'
+      s.hist.length ≤ (restartPartialFresh s n k).inheritedEnd s.cfg.primary
+    rw [hCo _ hpn, hRo _ hpn]; exact h.historyWithinCommitOrInherited hp'
   histAck := by
     intro m hm
     obtain ⟨hmn, hm'⟩ := restartPartialFresh_isAuthoritative (h.incLe n) hm
@@ -801,7 +801,7 @@ theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s 
   have hkn : s.known n = s.cfg := h.knownEq n hkl
   have hIo : ∀ x, x ≠ n → (restartPartialFresh s n k).incarnation x = s.incarnation x := fun _ => restartPartialFresh_inc_other
   have hLo : ∀ x, x ≠ n → (restartPartialFresh s n k).log x = s.log x := fun _ => restartPartialFresh_log_other
-  have hRo : ∀ x, x ≠ n → (restartPartialFresh s n k).recon x = s.recon x := fun _ => restartPartialFresh_recon_other
+  have hRo : ∀ x, x ≠ n → (restartPartialFresh s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialFresh_inheritedEnd_other
   have hS := restartPartialFresh_sync (s := s) (n := n) (k := k)
   have hA := restartPartialFresh_acked (s := s) (n := n) (k := k)
   have hnauth : ¬ (s.cfg.incarnation n = s.incarnation n + 1) := by have := h.incLe n; omega
@@ -822,7 +822,7 @@ theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s 
       intro r; rw [hA, if_neg hpn, if_neg (fun c => hpp c.1)]
     have hF := h.stale p hp' hv
     refine hF.transfer hSp (fun _ => rfl) (fun r _ => hAp r) (hLo p hpn) rfl
-      (fun hq => (hpa hq).2) (fun hq => by rw [hRo _ (hpa hq).1]; exact hF.reconLe (hpa hq).2)
+      (fun hq => (hpa hq).2) (fun hq => by rw [hRo _ (hpa hq).1]; exact hF.fenceLeInheritedEnd (hpa hq).2)
       (fun hq => by rw [hLo _ (hpa hq).1]; exact hF.primHolds (hpa hq).2)
       (fun hq => by rw [restartPartialFresh_ackHigh_other (hpa hq).1]; exact hF.primAck (hpa hq).2) ?_
     intro m hm hi
@@ -837,14 +837,14 @@ theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s 
     show s.cfg.incarnation m = (restartPartialFresh s n k).incarnation m; rw [hIo m hmn]; exact hm2 }
 
 /-- `n` stops being authoritative, and every other node keeps its log. -/
-theorem ehc_restartPartialFresh : EligibleHoldsCommitted (restartPartialFresh s n k) := by
+theorem eligibleHoldsCommitted_restartPartialFresh : EligibleHoldsCommitted (restartPartialFresh s n k) := by
   have hLo : ∀ x, x ≠ n → (restartPartialFresh s n k).log x = s.log x := fun _ => restartPartialFresh_log_other
   have hnauth : ¬ (s.cfg.incarnation n = s.incarnation n + 1) := by have := h.incLe n; omega
   have hauth : ∀ x, IsAuthoritative (restartPartialFresh s n k) x → x ≠ n ∧ IsAuthoritative s x :=
     fun _ => restartPartialFresh_isAuthoritative (h.incLe n)
   intro x hx
   obtain ⟨hxn, hx'⟩ := hauth x hx
-  rw [hLo x hxn]; exact h.ehc x hx'
+  rw [hLo x hxn]; exact h.eligibleHoldsCommitted x hx'
 
 theorem invariant_restartPartialFresh : Invariant (restartPartialFresh s n k) where
   toConfigInvariant := config_restartPartialFresh h n k hkl hsurv hk hfresh
@@ -852,7 +852,7 @@ theorem invariant_restartPartialFresh : Invariant (restartPartialFresh s n k) wh
   toMembershipInvariant := membership_restartPartialFresh h n k hkl hsurv hk hfresh
   toCommitInvariant := commit_restartPartialFresh h n k hkl hsurv hk hfresh
   toFailoverInvariant := failover_restartPartialFresh h n k hkl hsurv hk hfresh
-  ehc := ehc_restartPartialFresh h n k hkl hsurv hk hfresh
+  eligibleHoldsCommitted := eligibleHoldsCommitted_restartPartialFresh h n k hkl hsurv hk hfresh
 
 end restartPartialFresh
 

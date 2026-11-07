@@ -60,7 +60,7 @@ and n0 has n1's acknowledgement to echo. -/
 def l0 : LeaseState N := leaseInit 0
 def l1 := withCore l0 (count l0.core 0 1)
 def l2 := withCore l1 (makeEligible l1.core 0 1)
-def l3 := learnL l2 1
+def l3 := leaseLearn l2 1
 def l4 := recvData l3 1 l3.core none
 def l5 := recvAck l4 1 l4.core
 
@@ -102,13 +102,13 @@ replaced. A replica the new primary promoted afterwards can be demoted as soon a
 own read lease has expired. This run reaches such a demotion with no tick after the
 takeover, which the earlier blanket wait forbade. -/
 
-def ln6 := learnL l5 2                               -- n2 learns the configuration
+def ln6 := leaseLearn l5 2                               -- n2 learns the configuration
 def ln7 := tick ln6
 def ln8 := tick ln7
 def ln9 := tick ln8
 def ln10 := tick ln9                                -- now = 4
-def ln11 := takeoverL ln10 1                         -- n1 takes over (0 + 5 ≤ 4 + 1)
-def ln12 := learnL ln11 2                            -- n2 learns it and follows n1
+def ln11 := leaseTakeover ln10 1                         -- n1 takes over (0 + 5 ≤ 4 + 1)
+def ln12 := leaseLearn ln11 2                            -- n2 learns it and follows n1
 def ln13 := withCore ln12 (count ln12.core 1 2)      -- n1 counts n2
 def ln14 := withCore ln13 (makeEligible ln13.core 1 2)  -- n1 makes n2 eligible: not of the old configuration
 def ln15 := withCore ln14 (makeIneligible ln14.core 1 2) -- n1 demotes n2 at once: n2 never held a lease
@@ -219,11 +219,11 @@ def li1 := withCore l0 (count l0.core 0 1)          -- n0 counts n1
 def li2 := withCore li1 (makeEligible li1.core 0 1) -- n1 eligible (version 2)
 def li3 := withCore li2 (count li2.core 0 2)        -- n0 counts n2
 def li4 := withCore li3 (makeEligible li3.core 0 2) -- n2 eligible (version 3)
-def li5 := learnL li4 1                             -- n1 learns version 3
-def li6 := learnL li5 2                             -- n2 learns version 3; its takeover timer starts at 0
+def li5 := leaseLearn li4 1                             -- n1 learns version 3
+def li6 := leaseLearn li5 2                             -- n2 learns version 3; its takeover timer starts at 0
 def li7 := recvData li6 2 li6.core none             -- a heartbeat reaches n2 at time 0
 def li8 := recvAck li7 2 li7.core                   -- n2 acknowledges: n0's lease from n2 starts at 0
-def li9 := restartL li8 1 (restartEmpty li8.core 1) -- n1 restarts empty: new incarnation, still listed eligible
+def li9 := leaseRestart li8 1 (restartEmpty li8.core 1) -- n1 restarts empty: new incarnation, still listed eligible
 def li10 := withCore li9 (count li9.core 0 1)       -- n0 counts n1 again
 def li11 := tick li10
 def li12 := tick li11
@@ -233,7 +233,7 @@ def li15 := recvData li14 1 li14.core none          -- a heartbeat reaches n1
 def li16 := recvAck li15 1 li15.core                -- n1 acknowledges
 def li17 := recvData li16 1 li16.core (li16.ackEcho 0 1)  -- n0 echoes it: n1's read lease starts at 4
 def li18 := tick li17                               -- now = 5
-def li19 := takeoverL li18 2                        -- n2's wait is over: 0 + 6 ≤ 5 + 1; n1 is not counted
+def li19 := leaseTakeover li18 2                        -- n2's wait is over: 0 + 6 ≤ 5 + 1; n1 is not counted
 def li20 := withCore li19 (appendWrite li19.core 2) -- n2 writes
 def li21 := withCore li20 (commitNext li20.core 2)  -- n2 commits alone: the history is [4]
 
@@ -285,12 +285,12 @@ inductive LeaseStepNoWaitPrim (m : Nat) (P : LeaseParams) : LeaseState N → Lea
   | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepNoWaitPrim m P a μ a'
   | takeover (a : LeaseState N) (n : N) : KnowsLatest a.core n → a.core.cfg.eligible n = true →
       n ≠ a.core.cfg.primary → a.core.cfg.incarnation n = a.core.incarnation n →
-      LeaseStepNoWaitPrim m P a (.takeover n) (takeoverL a n)
+      LeaseStepNoWaitPrim m P a (.takeover n) (leaseTakeover a n)
 
 def leaseLTSNoWaitPrim (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
   Tr := LeaseStepNoWaitPrim m P
 
-def lw6 := takeoverL l5 1                           -- n1 takes over at once
+def lw6 := leaseTakeover l5 1                           -- n1 takes over at once
 def lw7 := withCore lw6 (appendWrite lw6.core 1)      -- n1 writes
 def lw8 := withCore lw7 (commitNext lw7.core 1)       -- n1 commits alone: the history is [3]
 
@@ -354,7 +354,7 @@ def ls6 := tick l5
 def ls7 := tick ls6
 def ls8 := tick ls7
 def ls9 := tick ls8                                   -- now = 4
-def ls10 := takeoverL ls9 1                          -- n1's wait is satisfied: 0 + 5 ≤ 4 + 1
+def ls10 := leaseTakeover ls9 1                          -- n1's wait is satisfied: 0 + 5 ≤ 4 + 1
 def ls11 := withCore ls10 (appendWrite ls10.core 1)
 def ls12 := withCore ls11 (commitNext ls11.core 1)
 

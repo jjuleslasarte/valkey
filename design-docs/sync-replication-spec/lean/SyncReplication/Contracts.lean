@@ -55,7 +55,7 @@ theorem takeover_commit_other {x : Node} (hx : x ≠ n) : (takeover s n).commit 
   simp [takeover, update, hx]
 
 /-- The new primary must commit its whole inherited log before it serves. -/
-theorem takeover_recon_self : (takeover s n).recon n = (s.log n).length := by simp [takeover]
+theorem takeover_inheritedEnd_self : (takeover s n).inheritedEnd n = (s.log n).length := by simp [takeover]
 
 /-- The new primary counts exactly the eligible replicas of the new configuration
 whose recorded incarnation matches. -/
@@ -380,10 +380,10 @@ theorem restartEmpty_commit_other {x : Node} (e : x ≠ n) :
 
 theorem restartEmpty_commit_self : (restartEmpty s n).commit n = 0 := by simp [restartEmpty]
 
-theorem restartEmpty_recon_other {x : Node} (e : x ≠ n) :
-    (restartEmpty s n).recon x = s.recon x := by simp [restartEmpty, update, e]
+theorem restartEmpty_inheritedEnd_other {x : Node} (e : x ≠ n) :
+    (restartEmpty s n).inheritedEnd x = s.inheritedEnd x := by simp [restartEmpty, update, e]
 
-theorem restartEmpty_recon_self : (restartEmpty s n).recon n = 0 := by simp [restartEmpty]
+theorem restartEmpty_inheritedEnd_self : (restartEmpty s n).inheritedEnd n = 0 := by simp [restartEmpty]
 
 theorem restartEmpty_sync (p r : Node) : (restartEmpty s n).sync p r =
     if p = n then false else if p = s.cfg.primary ∧ r = n then false else s.sync p r := by
@@ -470,10 +470,10 @@ theorem restartKeep_commit_other {x : Node} (e : x ≠ n) :
 
 theorem restartKeep_commit_self : (restartKeep s n).commit n = 0 := by simp [restartKeep]
 
-theorem restartKeep_recon_other {x : Node} (e : x ≠ n) :
-    (restartKeep s n).recon x = s.recon x := by simp [restartKeep, update, e]
+theorem restartKeep_inheritedEnd_other {x : Node} (e : x ≠ n) :
+    (restartKeep s n).inheritedEnd x = s.inheritedEnd x := by simp [restartKeep, update, e]
 
-theorem restartKeep_recon_self : (restartKeep s n).recon n = (s.log n).length := by
+theorem restartKeep_inheritedEnd_self : (restartKeep s n).inheritedEnd n = (s.log n).length := by
   simp [restartKeep]
 
 theorem restartKeep_acked_other {x : Node} (e : x ≠ n) :
@@ -501,7 +501,7 @@ end restartKeep
 `n` restarts from a persistence file holding only the first `k` entries of its log.
 Keeping its incarnation (`restartPartialKeep`), it is RestartKeep on the truncated log;
 taking a new one (`restartPartialFresh`), it is RestartEmpty with those `k` entries as
-its log. Every field but `log` (and, when keeping, `recon`) is the corresponding
+its log. Every field but `log` (and, when keeping, `inheritedEnd`) is the corresponding
 restart's, so these facts are the restart's facts restated. -/
 
 section restartPartialKeep
@@ -523,12 +523,12 @@ theorem restartPartialKeep_commit_other {x : Node} (e : x ≠ n) :
 theorem restartPartialKeep_commit_self : (restartPartialKeep s n k).commit n = 0 :=
   restartKeep_commit_self
 
-theorem restartPartialKeep_recon_other {x : Node} (e : x ≠ n) :
-    (restartPartialKeep s n k).recon x = s.recon x := by
-  show update s.recon n k x = _; rw [update_of_ne _ _ e]
+theorem restartPartialKeep_inheritedEnd_other {x : Node} (e : x ≠ n) :
+    (restartPartialKeep s n k).inheritedEnd x = s.inheritedEnd x := by
+  show update s.inheritedEnd n k x = _; rw [update_of_ne _ _ e]
 
-theorem restartPartialKeep_recon_self : (restartPartialKeep s n k).recon n = k := by
-  show update s.recon n k n = _; rw [update_self]
+theorem restartPartialKeep_inheritedEnd_self : (restartPartialKeep s n k).inheritedEnd n = k := by
+  show update s.inheritedEnd n k n = _; rw [update_self]
 
 theorem restartPartialKeep_acked_other {x : Node} (e : x ≠ n) :
     (restartPartialKeep s n k).acked x = s.acked x := restartKeep_acked_other e
@@ -573,11 +573,11 @@ theorem restartPartialFresh_commit_other {x : Node} (e : x ≠ n) :
 theorem restartPartialFresh_commit_self : (restartPartialFresh s n k).commit n = 0 :=
   restartEmpty_commit_self
 
-theorem restartPartialFresh_recon_other {x : Node} (e : x ≠ n) :
-    (restartPartialFresh s n k).recon x = s.recon x := restartEmpty_recon_other e
+theorem restartPartialFresh_inheritedEnd_other {x : Node} (e : x ≠ n) :
+    (restartPartialFresh s n k).inheritedEnd x = s.inheritedEnd x := restartEmpty_inheritedEnd_other e
 
-theorem restartPartialFresh_recon_self : (restartPartialFresh s n k).recon n = 0 :=
-  restartEmpty_recon_self
+theorem restartPartialFresh_inheritedEnd_self : (restartPartialFresh s n k).inheritedEnd n = 0 :=
+  restartEmpty_inheritedEnd_self
 
 theorem restartPartialFresh_sync (p r : Node) : (restartPartialFresh s n k).sync p r =
     if p = n then false else if p = s.cfg.primary ∧ r = n then false else s.sync p r :=
