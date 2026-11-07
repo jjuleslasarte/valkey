@@ -115,10 +115,12 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   members that are eligible with a matching incarnation. Clocks may drift by at most
   `drift` over a lease; each holder subtracts a `margin` from its lease and assumes
   its clock slow, each grantor assumes its clock fast. A takeover waits out the
-  primary lease; a demotion waits out the read lease, and after a takeover or a
-  restart the primary also waits one read lease plus the margin before demoting any
-  replica. A restart clears a node's leases and committed view and restarts both
-  waits, the takeover wait and the demotion wait; it does not otherwise delay reads.
+  primary lease; a demotion waits out the read lease, and after a takeover the new
+  primary also waits one read lease plus the margin before demoting a replica of the
+  configuration it replaced (a replica it promoted itself needs no such wait). A
+  restart clears a node's leases and committed view and restarts both waits, the
+  takeover wait and the demotion wait, the latter for every replica since the node has
+  forgotten which configuration it took over from; it does not otherwise delay reads.
   A grant also requires the granting node to think it is primary. The primary's
   promise not to commit without a lease-holding replica is enforced at demotion; the
   other ways a replica leaves the sync set are early removal, which never applies to
@@ -365,11 +367,11 @@ What these say about the design's own wording is in Appendix B.
 | Property 6 (no stale linearizable read, `margin ≥ 2 · drift`) | `SyncReplication.noStaleRead` |
 | Properties 1 and 2 under the lease layer | `SyncReplication.lease_safety` |
 | Lease margin and durations | `Lease/` |
-| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `smallMargin_stale` |
+| Each rule in Appendix B is needed | `SyncReplication.noReconcile_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `grantNoInc_stale`, `smallMargin_stale` |
 
-Size: the model is 886 lines (451 for the protocol, 113 for the held-reply layer,
-322 for the lease layer), the invariants and their lemmas 1,529 (444 for replication,
-1,085 for leases, which includes their preservation), the per-action contracts 616,
+Size: the model is 901 lines (451 for the protocol, 113 for the held-reply layer,
+337 for the lease layer), the invariants and their lemmas 1,589 (444 for replication,
+1,145 for leases, which includes their preservation), the per-action contracts 616,
 and the replication preservation proofs 2,566. Lean checks the whole of
 `SyncReplication` in about 20 seconds on a laptop-class machine.
 
@@ -449,17 +451,17 @@ encoding.
   assumes the implementation persists it with the data it covers. A stale file is
   modelled as a prefix of the log; a file that is not a prefix (a diverged tail) is not
   modelled.
-- **Leases carry four assumptions.** (a) A restarted primary waits one read lease
-  plus the margin before demoting anyone, as a new primary does after its takeover.
-  The design's restart rule covers takeover and serving reads; the model applies it to
-  demotion too, because a restarted primary has forgotten when it last heard from each
-  replica. (b) That wait, after a takeover or a restart, blocks demotion of every
-  replica, not only replicas of the old configuration as the design says; the model
-  forbids demoting a replica the new primary promoted itself inside that window.
-  (c) Read leases are granted only to sync members that are eligible with a matching
-  incarnation. The design says "sync replica". Appendix B shows that sync membership
-  and eligibility are each needed; the incarnation match is used by the proof and not
-  shown needed. (d) In the other direction, the design's restart rule delays reads for
+- **Leases carry three assumptions.** (a) A restarted primary waits one read lease
+  plus the margin before demoting anyone, as a new primary does after its takeover for
+  replicas of the configuration it replaced. The design's restart rule covers takeover
+  and serving reads; the model applies it to demotion too, because a restarted primary
+  has forgotten when it last heard from each replica, and to every replica, because it
+  has also forgotten which configuration it took over from. (b) Read leases are
+  granted only to sync members that are eligible with a matching incarnation. The
+  design says "sync replica". Appendix B shows that all three parts are needed, the
+  incarnation match only when the read lease may outlast the primary lease, which the
+  design's "Lease durations" rule forbids; whether it is needed under that rule is
+  open. (c) In the other direction, the design's restart rule delays reads for
   one lease after a restart; the model only clears the restarted node's leases, so it
   may read as soon as it holds a new one. The proof shows that suffices, so the read
   half of the restart rule is not needed for safety.
@@ -501,14 +503,14 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 |---|---|---|
 | `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 451 |
 | `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 113 |
-| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 322 |
+| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 337 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 444 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
 | `lean/SyncReplication/Preserve/` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time | 2,566 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies` | 43 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 248 |
-| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,085 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation; reachability witnesses for the read rule | 920 |
+| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,145 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B, each in its own weakened step relation; reachability witnesses for the read rule and the narrowed demotion wait | 1,048 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
 | `lean/Check.lean` | Prints the axioms of every theorem | |
@@ -878,13 +880,23 @@ run ending in a stale linearizable read at `min-sync-replicas = 0`:
   the primary never waits on. *And only to eligible ones* (`grantSync_stale`, 7
   steps): a counted replica that is not yet eligible can be dropped by early removal
   with no wait, then serve a stale read on its lease. The design says "sync replica";
-  these two runs are the reason to read that as the eligible members. The proof also
-  requires a matching incarnation; no run shows that part is needed.
+  these two runs are the reason to read that as the eligible members. *And only to
+  ones with a matching incarnation* (`grantNoInc_stale`, 20 steps): a replica that
+  restarted empty stays listed as eligible and may be counted again, but a new primary
+  never counts or waits for it; granted a read lease, it serves a stale read once the
+  new primary commits. This run needs the read lease to outlast the primary lease
+  (read lease 10, primary lease 5), which the design's "Lease durations" rule forbids.
+  Under that rule, whether the incarnation match is needed is open: removing it breaks
+  the proof at the step "a valid read lease makes its holder authoritative", and no
+  run under the rule has been found.
 - *The margin is at least twice the drift* (`smallMargin_stale`, 12 steps): with
   margin 1 and drift 1 and every rule kept, the taker's wait ends while the deposed
   primary, its clock a drift slow, still believes its lease valid.
-The extra wait after a takeover or restart (one read lease plus the margin before
-demoting any replica) is used by the proof; no run shows it is needed on its own.
+The extra wait after a takeover (one read lease plus the margin before demoting a
+replica of the replaced configuration) is used by the proof; no run shows it is needed
+on its own. That the design's narrower form is what the model has, so that a new
+primary may demote a replica it promoted itself inside the window, is checked by
+`demoteNew_reachable`.
 
 **F11: the clock-drift margin** (`Lease/`). The design says "Both sides use monotonic
 clocks and subtract a clock-drift margin". Read literally, with both sides

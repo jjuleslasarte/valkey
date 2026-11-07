@@ -50,9 +50,10 @@ worst cases are the right reading of the design's drift model.
   serves reads under a lease") is applied to takeover, and to demotion too (see
   `primarySince`); for reads the model only clears the leases, so a restarted node may
   read as soon as it holds a new one. The proof shows that suffices.
-- After a takeover or a restart, the one-read-lease-plus-margin wait blocks demotion of
-  every replica, not only those of the old configuration as the design says. This
-  removes behaviours; it is listed as an assumption in the README.
+- After a takeover, the one-read-lease-plus-margin wait blocks demotion only of
+  replicas of the configuration the takeover replaced (`oldEligible`), as the design
+  says. After a restart it blocks demotion of every replica: the node has forgotten
+  which configuration it took over from.
 - `None` as a lease start means "no lease".
 -/
 
@@ -104,13 +105,17 @@ structure LeaseState (Node : Type) [DecidableEq Node] where
   restart. A primary does not demote a replica until one read lease plus the margin
   after this. -/
   primarySince      : Node → Option Nat
+  /-- `oldEligible p r`: `r` was eligible in the configuration `p`'s takeover replaced
+  ("a replica from the old configuration", design §5). After a restart, which forgets
+  this, every replica counts as old. -/
+  oldEligible : Node → Node → Bool
 
 variable {Node : Type} [DecidableEq Node]
 
 /-- The initial state: the replication model's initial state at time 0, no leases. -/
 def leaseInit (i : Node) : LeaseState Node :=
   ⟨init i, 0, fun _ => 0, fun _ _ => none, fun _ _ => none, fun _ _ => none, fun _ => none,
-   fun _ => 0, fun _ => 0, fun _ => none⟩
+   fun _ => 0, fun _ => 0, fun _ => none, fun _ _ => true⟩
 
 /-- The later of a lease start and a new candidate. -/
 def maxOpt (x : Option Nat) (y : Nat) : Nat :=
@@ -222,6 +227,7 @@ lease, no acknowledgements; it holds no read lease; its primaryship starts now. 
 def takeoverL (a : LeaseState Node) (n : Node) : LeaseState Node :=
   { a with core := takeover a.core n,
            primarySince := update a.primarySince n (some a.now),
+           oldEligible := update a.oldEligible n a.core.cfg.eligible,
            primaryLease := update a.primaryLease n (fun _ => none),
            ackReceived := update a.ackReceived n (fun _ => none),
            ackEcho := update a.ackEcho n (fun _ => none),
@@ -246,7 +252,8 @@ def restartL (a : LeaseState Node) (n : Node) (c : State Node) : LeaseState Node
            readLease := update a.readLease n none,
            primaryTraffic := update a.primaryTraffic n a.now,
            dataSent := update a.dataSent n a.now,
-           primarySince := update a.primarySince n (some a.now) }
+           primarySince := update a.primarySince n (some a.now),
+           oldEligible := update a.oldEligible n (fun _ => true) }
 
 /-- The replication actions that touch no lease state and keep their guards. -/
 def Action.isPlain : Action Node → Bool
@@ -292,10 +299,12 @@ inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActio
   | learn (a n) : ¬ KnowsLatest a.core n → LeaseStep m P a (.learn n) (learnL a n)
   /-- Demotion (design §4 and §5): the primary waits until the replica's read lease
   must have expired, measured from the last acknowledgement it received from it, and,
-  as a new primary, until one read lease plus the margin after its takeover. -/
+  for a replica of the configuration its takeover replaced, until one read lease plus
+  the margin after that takeover. -/
   | demote (a p r) : ThinksPrimary a.core p → KnowsLatest a.core p → a.core.cfg.eligible r = true →
       GrantorOver P a.now (a.ackReceived p r) P.readDur →
-      (∀ T, a.primarySince p = some T → T + P.readDur + P.margin ≤ a.now + P.drift) →
+      (∀ T, a.primarySince p = some T → a.oldEligible p r = true →
+        T + P.readDur + P.margin ≤ a.now + P.drift) →
       LeaseStep m P a (.demote p r) (withCore a (makeIneligible a.core p r))
   /-- Takeover: the replica waits until the primary's lease must have expired, measured
   from the last traffic it received from the primary. -/

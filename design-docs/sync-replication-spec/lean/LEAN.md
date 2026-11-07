@@ -132,6 +132,7 @@ theorem noWaitPrim_stale  : ∃ a, (leaseLTSNoWaitPrim 0 P0).CanReach (leaseInit
 theorem noWaitRead_stale  : ∃ a, (leaseLTSNoWaitRead 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
 theorem grantAny_stale    : ∃ a, (leaseLTSGrantAny 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
 theorem grantSync_stale   : ∃ a, (leaseLTSGrantSync 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
+theorem grantNoInc_stale  : ∃ a, (leaseLTSGrantNoInc 0 P2).CanReach (leaseInit 0) a ∧ ReplCanRead P2 a 1 ∧ a.core.log 1 ≠ a.core.hist
 theorem smallMargin_stale : ∃ a, LeaseReachable 0 P1 0 a ∧ PrimCanRead P1 a 0 ∧ a.core.log 0 ≠ a.core.hist
 theorem noIncWritable_oneCopy     : ∃ s, (ltsNoIncWritable 1).CanReach (init 0) s ∧
     ThinksPrimary s 0 ∧ 0 = s.cfg.primary ∧ WritableNoInc 1 s 0 ∧ s.commit 0 < (s.log 0).length ∧
@@ -217,7 +218,8 @@ lease `p` holds from `r`: send time of the data `r` last acknowledged), `ackRece
 acknowledgement `p` will echo), `readLease r` (start of `r`'s read lease), `primaryTraffic r` (when
 `r` last received traffic from its primary, learned a configuration, or restarted),
 `dataSent r` (send time of the latest data `r` received), `primarySince p` (when `p`'s primaryship
-began on this node, by takeover or restart). `LeaseStep m P` has:
+began on this node, by takeover or restart), `oldEligible p r` (`r` was eligible in the
+configuration `p`'s takeover replaced; every `r` after a restart). `LeaseStep m P` has:
 
 | Action | Guard | Effect |
 |---|---|---|
@@ -229,10 +231,10 @@ began on this node, by takeover or restart). `LeaseStep m P` has:
 | `ack r` | as `Step.ack` | the replication step; `primaryLease p r := max (primaryLease p r) (dataSent r)`, `ackReceived p r := now`, `ackEcho p r := now` |
 | `ack r` renewal | `r` does not consider itself primary; its log is a prefix of its primary's | the three lease updates; replication state unchanged |
 | `learn n` | as `Step.learn` | the replication step; `primaryTraffic n := now` |
-| `demote p r` | as `Step.makeIneligible`; `GrantorOver (ackReceived p r) readDur`; `primarySince p = some T → T + readDur + margin ≤ now + drift` | the replication step |
-| `takeover n` | as `Step.takeover`; `primaryTraffic n + primDur ≤ now + drift` | the replication step; `primarySince n := now`; `primaryLease n`, `ackReceived n`, `ackEcho n` cleared; `readLease n := none` |
+| `demote p r` | as `Step.makeIneligible`; `GrantorOver (ackReceived p r) readDur`; `primarySince p = some T → oldEligible p r = true → T + readDur + margin ≤ now + drift` | the replication step |
+| `takeover n` | as `Step.takeover`; `primaryTraffic n + primDur ≤ now + drift` | the replication step; `primarySince n := now`; `oldEligible n := cfg.eligible` (before the takeover); `primaryLease n`, `ackReceived n`, `ackEcho n` cleared; `readLease n := none` |
 | `resync r` | as `Step.resync` | the replication step; `committedView r := 0` |
-| the restarts | as the replication restarts | the replication step; `committedView n := 0`; `n`'s leases cleared; `primaryTraffic n := now`, `dataSent n := now`, `primarySince n := now` |
+| the restarts | as the replication restarts | the replication step; `committedView n := 0`; `n`'s leases cleared; `primaryTraffic n := now`, `dataSent n := now`, `primarySince n := now`, `oldEligible n := fun _ => true` |
 
 `leaseLTS m P` and `LeaseReachable m P i a` as for the replication model.
 
@@ -314,7 +316,13 @@ The two that carry the argument: `deposed` (a deposed primary has a witness, the
 that deposed it, eligible in its configuration and following someone else, whose
 lease to it is over for good) and `leaseAuth` (a valid read lease implies the holder is
 authoritative), with `leaseBound` (a read lease started no later than the current
-primary's last acknowledgement from its holder or its takeover) feeding the latter.
+primary's last acknowledgement from its holder, or no later than its takeover, and in
+the latter case the holder was eligible in the replaced configuration or the lease has
+already expired) feeding the latter. The last clause is what lets the post-takeover
+demotion wait apply only to replicas of the replaced configuration: a lease held by any
+other replica at takeover time was already invalid, since a valid one would have made
+its holder authoritative, and invalid leases stay invalid until renewed by the current
+primary, which puts them under the first bound.
 Then `selfPrimNoLease` (a node whose configuration names it primary holds no read
 lease; keeps a deposed primary out of the read-lease holders across Takeover and
 Learn), `committedViewLen` and `committedViewHist` (the committed view is within the log and a committed
@@ -397,6 +405,8 @@ and the robustness notes there:
 'SyncReplication.primCanRead_reachable' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.replCanRead_reachable' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.grantSync_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.grantNoInc_stale' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.demoteNew_reachable' depends on axioms: [propext, Classical.choice, Quot.sound]
 ```
 
 These are Lean's standard axioms. There is no `sorryAx`. `Classical.choice` enters
@@ -408,8 +418,8 @@ type; `Quot.sound` through function extensionality.
 | File | Lines |
 |---|---|
 | `SyncReplication/Model.lean` | 451 |
-| `SyncReplication/Leases.lean` | 322 |
-| `SyncReplication/LeaseInvariant.lean` | 1,085 |
+| `SyncReplication/Leases.lean` | 337 |
+| `SyncReplication/LeaseInvariant.lean` | 1,145 |
 | `SyncReplication/Replies.lean` | 113 |
 | `SyncReplication/Invariant.lean` | 444 |
 | `SyncReplication/Contracts.lean` | 616 |
@@ -421,10 +431,10 @@ type; `Quot.sound` through function extensionality.
 | `SyncReplication/Preserve.lean` | 56 |
 | `SyncReplication/Safety.lean` | 43 |
 | `SyncReplication/Durability.lean` | 248 |
-| `SyncReplication/Counterexamples/` (10 files) | 920 |
+| `SyncReplication/Counterexamples/` (10 files) | 1,048 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 7,268 (plus the two root imports, 15 lines) |
+| total | 7,456 (plus the two root imports, 15 lines) |
 
 `lake build` of the whole tree takes about 20 seconds warm on a laptop-class
 machine (1,030 jobs including Mathlib's and CSLib's prebuilt modules).
@@ -537,7 +547,7 @@ history is `[1]`, on n0 and n1).
 | `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
-| `Leases.lean` | `LeaseStepNoWaitPrim`, `LeaseStepNoWaitRead`, `LeaseStepGrantAny`, `LeaseStepGrantSync`, and `leaseLTS` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the sync set; echo to a counted but ineligible member, then early removal; margin 1 with drift 1 | shared prefix count 0 1, makeEligible 0 1, learn 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `leaseInit`) heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
+| `Leases.lean` | `LeaseStepNoWaitPrim`, `LeaseStepNoWaitRead`, `LeaseStepGrantAny`, `LeaseStepGrantSync`, `LeaseStepGrantNoInc` (with `P2`: read lease 10), and `leaseLTS` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the sync set; echo to a counted but ineligible member, then early removal; echo to a restarted-empty eligible member, then a takeover that never counts it; margin 1 with drift 1 | shared prefix count 0 1, makeEligible 0 1, learn 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `leaseInit`) heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
 | `Uncount.lean` | `StepUncountElig` | Uncount of an eligible counted replica | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **uncount 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, count 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
 | `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |

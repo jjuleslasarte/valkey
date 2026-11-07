@@ -87,10 +87,13 @@ structure LeaseInvariant (P : LeaseParams) (a : LeaseState Node) : Prop where
     ∃ t, t ≠ p ∧ (a.core.known p).eligible t = true ∧ (a.core.known t).primary ≠ p ∧
       ∀ x, a.primaryLease p t = some x → x + P.primDur ≤ a.now + P.drift
   /-- A read lease started no later than the current primary's last acknowledgement from
-  its holder, or no later than the current primary's takeover. -/
+  its holder, or no later than the current primary's takeover; in the latter case the
+  holder was eligible in the configuration the takeover replaced, or the lease has
+  already expired. -/
   leaseBound : ∀ r x, a.readLease r = some x →
     (∃ b, a.ackReceived a.core.cfg.primary r = some b ∧ x ≤ b) ∨
-    (∃ T, a.primarySince a.core.cfg.primary = some T ∧ x ≤ T)
+    (∃ T, a.primarySince a.core.cfg.primary = some T ∧ x ≤ T ∧
+      (a.oldEligible a.core.cfg.primary r = true ∨ ¬ HolderValid P a.now (some x) P.readDur))
   /-- A replica with a valid read lease is authoritative. -/
   leaseAuth  : ∀ r, ¬ ThinksPrimary a.core r → ReadLeaseValid P a r → IsAuthoritative a.core r
   /-- A node whose configuration names it primary holds no read lease. Keeps a deposed
@@ -207,7 +210,15 @@ theorem leaseInvariant_tick : LeaseInvariant P (tick a) where
     intro p hp hv
     obtain ⟨t, h1, h2, h3, h4⟩ := h.deposed p hp hv
     exact ⟨t, h1, h2, h3, fun x hx => by have := h4 x hx; show _ ≤ a.now + 1 + _; omega⟩
-  leaseBound := h.leaseBound
+  leaseBound := by
+    intro r x hx
+    rcases h.leaseBound r x hx with hb | ⟨T, hT, hxT, hold⟩
+    · exact Or.inl hb
+    · right; refine ⟨T, hT, hxT, ?_⟩
+      rcases hold with hold | hold
+      · exact Or.inl hold
+      · right; show ¬ HolderValid P (a.now + 1) (some x) P.readDur
+        exact fun hv => hold (holderValid_mono (Nat.le_succ _) hv)
   leaseAuth := fun r hnp hv => h.leaseAuth r hnp (holderValid_mono (Nat.le_succ _) hv)
   selfPrimNoLease := h.selfPrimNoLease
   committedViewLen := h.committedViewLen
@@ -240,7 +251,8 @@ theorem leaseInvariant_withCore {c : State Node} (hc : Invariant c)
     exact h.deposed p ((htp p).1 hp) hv'
   leaseBound := by
     intro r x hx; show (∃ b, a.ackReceived c.cfg.primary r = some b ∧ x ≤ b) ∨
-      (∃ T, a.primarySince c.cfg.primary = some T ∧ x ≤ T)
+      (∃ T, a.primarySince c.cfg.primary = some T ∧ x ≤ T ∧
+        (a.oldEligible c.cfg.primary r = true ∨ ¬ HolderValid P a.now (some x) P.readDur))
     rw [hcfg]; exact h.leaseBound r x hx
   leaseAuth := fun r hnp hv => (hau r).2 (h.leaseAuth r (fun hp => hnp ((htp r).2 hp)) hv)
   selfPrimNoLease := by
@@ -441,7 +453,8 @@ theorem leaseInvariant_recvData_noEcho {r : Node} {c : State Node} (hc : Invaria
     exact h.deposed p ((htp p).1 hp) hv'
   leaseBound := by
     intro x v hx; show (∃ b, a.ackReceived c.cfg.primary x = some b ∧ v ≤ b) ∨
-      (∃ T, a.primarySince c.cfg.primary = some T ∧ v ≤ T)
+      (∃ T, a.primarySince c.cfg.primary = some T ∧ v ≤ T ∧
+        (a.oldEligible c.cfg.primary x = true ∨ ¬ HolderValid P a.now (some v) P.readDur))
     rw [hcfg]; exact h.leaseBound x v hx
   leaseAuth := fun x hnp hv => (hau x).2 (h.leaseAuth x (fun hp => hnp ((htp x).2 hp)) hv)
   selfPrimNoLease := by
@@ -500,7 +513,7 @@ theorem leaseInvariant_heartbeatGrant {r : Node} (hne : primaryOf a.core r ≠ r
       cases hv : a.readLease r with
       | none => exact heb
       | some v =>
-        rcases h.leaseBound r v hv with ⟨b', hb', hvb⟩ | ⟨T, hT, hvT⟩
+        rcases h.leaseBound r v hv with ⟨b', hb', hvb⟩ | ⟨T, hT, hvT, _⟩
         · rw [← hpp, hb] at hb'; cases hb'; exact Nat.max_le.2 ⟨hvb, heb⟩
         · rw [← hpp] at hT
           exact Nat.max_le.2 ⟨Nat.le_trans hvT (h.primarySinceAck _ r T b hT hb), heb⟩
@@ -519,7 +532,8 @@ theorem leaseInvariant_heartbeatGrant {r : Node} (hne : primaryOf a.core r ≠ r
       intro x v hx
       change update a.readLease r (some (maxOpt (a.readLease r) e)) x = some v at hx
       show (∃ b, a.ackReceived a.core.cfg.primary x = some b ∧ v ≤ b) ∨
-        (∃ T, a.primarySince a.core.cfg.primary = some T ∧ v ≤ T)
+        (∃ T, a.primarySince a.core.cfg.primary = some T ∧ v ≤ T ∧
+          (a.oldEligible a.core.cfg.primary x = true ∨ ¬ HolderValid P a.now (some v) P.readDur))
       unfold update at hx; split_ifs at hx with ex
       · subst ex; cases hx; left; exact ⟨b, by rw [← hpp]; exact hb, hmax'⟩
       · exact h.leaseBound x v hx
@@ -600,7 +614,8 @@ theorem leaseInvariant_recvAck {r : Node} {c : State Node} (hc : Invariant c)
   leaseBound := by
     intro x v hx
     show (∃ b, update2 a.ackReceived p r (some a.now) c.cfg.primary x = some b ∧ v ≤ b) ∨
-      (∃ T, a.primarySince c.cfg.primary = some T ∧ v ≤ T)
+      (∃ T, a.primarySince c.cfg.primary = some T ∧ v ≤ T ∧
+        (a.oldEligible c.cfg.primary x = true ∨ ¬ HolderValid P a.now (some v) P.readDur))
     rw [hcfg]
     by_cases e : a.core.cfg.primary = p ∧ x = r
     · obtain ⟨e1, rfl⟩ := e; rw [e1, update2_self]; left; exact ⟨a.now, rfl, h.readLeaseLe x v hx⟩
@@ -689,24 +704,27 @@ theorem leaseInvariant_learn {n : Node} (hk : ¬ KnowsLatest a.core n) :
 omit h in
 include hM in
 /-- A read lease whose start is bounded by the demotion guards is not valid. -/
-theorem lease_over_of_guards {now v : Nat} {ackReceived primarySince : Option Nat}
-    (hb : (∃ b, ackReceived = some b ∧ v ≤ b) ∨ (∃ T, primarySince = some T ∧ v ≤ T))
+theorem lease_over_of_guards {now v : Nat} {ackReceived primarySince : Option Nat} {old : Bool}
+    (hb : (∃ b, ackReceived = some b ∧ v ≤ b) ∨
+      (∃ T, primarySince = some T ∧ v ≤ T ∧ (old = true ∨ ¬ HolderValid P now (some v) P.readDur)))
     (hgo : GrantorOver P now ackReceived P.readDur)
-    (hwo : ∀ T, primarySince = some T → T + P.readDur + P.margin ≤ now + P.drift) :
+    (hwo : ∀ T, primarySince = some T → old = true → T + P.readDur + P.margin ≤ now + P.drift) :
     ¬ HolderValid P now (some v) P.readDur := by
-  intro hv; unfold HolderValid at hv
-  rcases hb with ⟨b, hb, hvb⟩ | ⟨T, hT, hvT⟩
+  intro hv
+  rcases hb with ⟨b, hb, hvb⟩ | ⟨T, hT, hvT, hold | hold⟩
   · -- `now + margin < v + readDur + drift`, `v ≤ b`, `b + readDur ≤ now + drift`: needs
     -- `margin ≥ 2 · drift` (`hM`).
-    rw [hb] at hgo; unfold GrantorOver at hgo; omega
+    unfold HolderValid at hv; rw [hb] at hgo; unfold GrantorOver at hgo; omega
   · -- `v ≤ T`, `T + readDur + margin ≤ now + drift`: needs only `margin ≥ drift`.
-    have := hwo T hT; omega
+    unfold HolderValid at hv; have := hwo T hT hold; omega
+  · exact hold hv
 
 include hM in
 /-- Demotion. The demoted replica's read lease is over, by the two waits. -/
 theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hk : KnowsLatest a.core p)
     (he : a.core.cfg.eligible r = true) (hgo : GrantorOver P a.now (a.ackReceived p r) P.readDur)
-    (hwo : ∀ T, a.primarySince p = some T → T + P.readDur + P.margin ≤ a.now + P.drift) :
+    (hwo : ∀ T, a.primarySince p = some T → a.oldEligible p r = true →
+      T + P.readDur + P.margin ≤ a.now + P.drift) :
     LeaseInvariant P (withCore a (makeIneligible a.core p r)) := by
   have hkn : a.core.known p = a.core.cfg := h.core.knownEq p hk
   have hpp : p = a.core.cfg.primary := by have := hp.1; rw [hkn] at this; exact this.symm
@@ -852,12 +870,28 @@ theorem leaseInvariant_takeover {n : Node} (hk : KnowsLatest a.core n) (he : a.c
     intro x v hx
     change update a.readLease n none x = some v at hx
     show (∃ b, update a.ackReceived n (fun _ => none) (takeoverCfg a.core n).primary x = some b ∧ v ≤ b) ∨
-      (∃ T, update a.primarySince n (some a.now) (takeoverCfg a.core n).primary = some T ∧ v ≤ T)
+      (∃ T, update a.primarySince n (some a.now) (takeoverCfg a.core n).primary = some T ∧ v ≤ T ∧
+        (update a.oldEligible n a.core.cfg.eligible (takeoverCfg a.core n).primary x = true ∨
+          ¬ HolderValid P a.now (some v) P.readDur))
     by_cases ex : x = n
     · subst ex; rw [update_self] at hx; exact absurd hx (by simp)
     · rw [update_of_ne _ _ ex] at hx
-      right; refine ⟨a.now, ?_, h.readLeaseLe x v hx⟩
-      show update a.primarySince n (some a.now) n = some a.now; exact update_self _ _ _
+      right; refine ⟨a.now, update_self _ _ _, h.readLeaseLe x v hx, ?_⟩
+      show (update a.oldEligible n a.core.cfg.eligible n x = true) ∨ _
+      rw [update_self]
+      by_cases hel : a.core.cfg.eligible x = true
+      · exact Or.inl hel
+      · -- `x` was not eligible in the configuration being replaced: a valid lease would
+        -- make it authoritative, so its lease is not valid.
+        right; intro hv
+        have hnp : ¬ ThinksPrimary a.core x := by
+          intro hp; have := h.selfPrimNoLease x hp.1; rw [this] at hx; cases hx
+        have hvv : ReadLeaseValid P a x := by unfold ReadLeaseValid; rw [hx]; exact hv
+        obtain ⟨h1, _⟩ := h.leaseAuth x hnp hvv
+        rcases h1 with h1 | h1
+        · exact hel h1
+        · have := h.selfPrimNoLease x (by rw [h1, h.core.primKnows])
+          rw [this] at hx; cases hx
   leaseAuth := by
     intro x hnp' hv
     change HolderValid P a.now (update a.readLease n none x) P.readDur at hv
@@ -1001,14 +1035,17 @@ theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c)
     intro x v hx
     change update a.readLease n none x = some v at hx
     show (∃ b, update a.ackReceived n (fun _ => none) c.cfg.primary x = some b ∧ v ≤ b) ∨
-      (∃ T, update a.primarySince n (some a.now) c.cfg.primary = some T ∧ v ≤ T)
+      (∃ T, update a.primarySince n (some a.now) c.cfg.primary = some T ∧ v ≤ T ∧
+        (update a.oldEligible n (fun _ => true) c.cfg.primary x = true ∨
+          ¬ HolderValid P a.now (some v) P.readDur))
     rw [hcfg]
     by_cases ex : x = n
     · subst ex; rw [update_self] at hx; exact absurd hx (by simp)
     · rw [update_of_ne _ _ ex] at hx
       by_cases hpn : a.core.cfg.primary = n
-      · rw [hpn, update_self]; right; exact ⟨a.now, update_self _ _ _, h.readLeaseLe x v hx⟩
-      · rw [update_of_ne _ _ hpn, update_of_ne _ _ hpn]; exact h.leaseBound x v hx
+      · rw [hpn, update_self, update_self, update_self]
+        right; exact ⟨a.now, rfl, h.readLeaseLe x v hx, Or.inl rfl⟩
+      · rw [update_of_ne _ _ hpn, update_of_ne _ _ hpn, update_of_ne _ _ hpn]; exact h.leaseBound x v hx
   leaseAuth := by
     intro x hnp hv
     change HolderValid P a.now (update a.readLease n none x) P.readDur at hv

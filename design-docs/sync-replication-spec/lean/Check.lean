@@ -21,3 +21,5 @@ import SyncReplication
 #print axioms SyncReplication.primCanRead_reachable
 #print axioms SyncReplication.replCanRead_reachable
 #print axioms SyncReplication.grantSync_stale
+#print axioms SyncReplication.grantNoInc_stale
+#print axioms SyncReplication.demoteNew_reachable
