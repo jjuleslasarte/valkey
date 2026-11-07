@@ -1,0 +1,25 @@
+import SyncReplication
+#print axioms SyncReplication.safety
+#print axioms SyncReplication.commit_two_copies
+#print axioms SyncReplication.ackSafety
+#print axioms SyncReplication.ackedHeld
+#print axioms SyncReplication.noReconcile_unsafe
+#print axioms SyncReplication.noReplyFence_unsafe
+#print axioms SyncReplication.noRebuild_unsafe
+#print axioms SyncReplication.noIncCheck_unsafe
+#print axioms SyncReplication.noSurvivor_loses
+#print axioms SyncReplication.staleRestoreKeepsInc_unsafe
+#print axioms SyncReplication.staleRestoreKeepsInc_loses
+#print axioms SyncReplication.noIncWritable_oneCopy
+#print axioms SyncReplication.uncountElig_unsafe
+#print axioms SyncReplication.noStaleRead
+#print axioms SyncReplication.lease_safety
+#print axioms SyncReplication.noWaitPrim_stale
+#print axioms SyncReplication.noWaitRead_stale
+#print axioms SyncReplication.smallMargin_stale
+#print axioms SyncReplication.grantAny_stale
+#print axioms SyncReplication.primCanRead_reachable
+#print axioms SyncReplication.replCanRead_reachable
+#print axioms SyncReplication.grantSync_stale
+#print axioms SyncReplication.grantNoInc_stale
+#print axioms SyncReplication.demoteNew_reachable
