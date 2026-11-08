@@ -86,6 +86,12 @@ Lean counterexample without the fix: `SyncReplication.noReconcile_unsafe`
 and n1, has n0 count and promote n2, which has acknowledged nothing (8 steps).
 That Count is one the doc's own step 1 already forbids; F1 is about the case
 the doc's guard lets through.
+Full resync of an eligible replica is excluded by the model, as the doc says
+(eligible replicas ahead of the new primary are demoted first):
+`SyncReplication.resyncEligible_unsafe` (8 steps) resyncs one from a primary
+that restarted from a stale file. Requiring instead that the resync source
+thinks it is primary also works (a scratch Lean build), but the proof then
+needs one more invariant conjunct; the model keeps the doc's rule.
 
 ## F2. Held replies must be fenced by primaryship, not only by offset
 
