@@ -492,6 +492,15 @@ rule, a deposed primary that has not learned of the takeover echoes an
 acknowledgement to a replica still following it, after the new primary has
 committed without that replica (`grantWithoutPrimaryLease_stale`).
 
+The takeover half of the doc's restart rule ("takeover timers restart") is
+safe, and so is the opposite choice of persisting the timer across the restart:
+the proof builds with either. What is not safe is a restarted node that loses
+the timer and treats its primary as long silent: it takes over at once while
+the old primary still holds its lease from it, and the old primary serves a
+stale read (`restartForgetsTimer_stale`, 13 steps). **Proposed doc change:**
+say that a restarted node either keeps its takeover timer or restarts it, and
+never initialises it as "long ago".
+
 Rules the model adds to or narrows from the doc, all used by the proof: a
 restarted primary waits one read lease plus the margin before demoting anyone
 (the doc's restart rule covers takeover and reads, not demotion; a restarted
