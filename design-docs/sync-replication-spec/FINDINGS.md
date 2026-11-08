@@ -102,7 +102,8 @@ needs one more invariant conjunct; the model keeps the doc's rule.
 for any number of nodes and any log length. `SyncReplication.ackSafety` and
 `ackedHeld` prove it for every min-sync value, with restarts with and without
 data, given the F5 fix and the survival condition (see below). Neither covers
-forced failover. Writes are identified by offset and primaryship term, and the
+forced failover. Writes are identified by offset and the primaryship's
+replication ID, and the
 fence uses the node's local, possibly stale view of its primaryship. Without
 the reply fence, `CoreAck_noReplyFence` (TLC) and `SyncReplication.noReplyFence_unsafe`
 (Lean, 14 steps) acknowledge a write that is not in the history. Reviewed in
@@ -122,11 +123,13 @@ Section 5 says a primary that steps down "returns UNCOMMITTED" for held
 replies. It does not say this must happen before any other primary action.
 It also does not say the boundary carries the primaryship.
 
-**Proposed doc change:** every reply boundary carries the configuration
-epoch (or term) of the primaryship that set it. A reply is released as OK
-only while that primaryship is current. Once it ends, the reply is
-UNCOMMITTED. This supports the existing review comment about putting the
-shard epoch in REPLCONF COMMIT/ACK.
+**Proposed doc change:** every reply boundary carries the replication ID
+of the primaryship that set it. A reply is released as OK only while that
+node is still primary with the same replication ID. The ID needs no
+ordering, only freshness: the takeover gives the new primary a fresh
+replication ID, and any other change of a primary's ID also picks a fresh
+one. The Lean proof uses only that each such ID was never used before. Once
+the node stops being primary, or its ID changes, the reply is UNCOMMITTED.
 
 ## F3. The doc's reason for "no split brain" is wrong; the conclusion holds
 
