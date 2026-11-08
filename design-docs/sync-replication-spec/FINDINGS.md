@@ -52,8 +52,13 @@ remains, the section 5 rule freezes the committed offset, so
 **Proposed doc change:** after a takeover, promotion catch-up (step 1)
 and full resync are measured against the log the new primary inherited,
 not against its own committed offset. Following PacificA, that log holds
-every committed write. The new primary accepts client writes only once it
-has committed that log. The commit itself still follows the normal rule
+every committed write. ~~The new primary accepts client writes only once it
+has committed that log.~~ (Not needed for safety: the Lean proofs hold
+without it, and `SyncReplication.committed_inherited_first` shows a new
+primary still commits every inherited offset before any later one. Limits:
+the lemma is about offsets, not about which offsets the early writes take,
+and it does not cover a deposed node whose log a Resync truncated below its
+inherited end.) The commit itself still follows the normal rule
 (it needs min-sync-replicas acks). It must not bypass that rule, as
 reviewers pointed out in step 3. Otherwise a new primary left with no
 eligible replica could never reach the minimum again.
