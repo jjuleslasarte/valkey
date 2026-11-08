@@ -318,10 +318,10 @@ structure Invariant (s : State Node) : Prop
 theorem invariant_safety {s : State Node} (h : Invariant s) : Safety s :=
   ⟨h.eligibleHoldsCommitted, fun p => ⟨h.commitWithinLog p, h.committedIsHistoryPrefix p⟩⟩
 
-/-- The invariant does not mention replication IDs: changing `term` and `usedIds` alone
+/-- The invariant does not mention replication IDs: changing `replId` and `usedIds` alone
 keeps it. -/
-theorem Invariant.term_frame {s : State Node} (h : Invariant s) (t : Node → Nat) (u : Finset Nat) :
-    Invariant { s with term := t, usedIds := u } where
+theorem Invariant.replId_frame {s : State Node} (h : Invariant s) (t : Node → Nat) (u : Finset Nat) :
+    Invariant { s with replId := t, usedIds := u } where
   toConfigInvariant := ⟨h.knownLe, h.knownEq, h.primKnows, h.knownIncLe⟩
   toReplInvariant := ⟨h.noSelfSync, h.ackedPrim, h.ackedLe, h.ackHolds, h.ackedHigh, h.syncCommit⟩
   toMembershipInvariant := ⟨h.eligibleCounted, h.syncNew, h.eligibleInOldConfig⟩

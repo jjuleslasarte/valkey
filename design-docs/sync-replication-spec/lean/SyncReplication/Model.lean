@@ -125,7 +125,7 @@ structure State (Node : Type) [DecidableEq Node] where
   inheritedEnd : Node → Nat
   /-- The replication ID each node writes new entries with: an opaque value, compared
   only for equality, fresh at each takeover (Valkey's replication ID). -/
-  term   : Node → Nat
+  replId   : Node → Nat
   /-- Ghost variable: every replication ID used so far. A takeover or `newId` picks one
   outside it. -/
   usedIds : Finset Nat
@@ -155,7 +155,7 @@ def init (i : Node) : State Node where
   acked  := fun _ _ => 0
   commit := fun _ => 0
   inheritedEnd  := fun _ => 0
-  term   := fun n => if n = i then 1 else 0
+  replId   := fun n => if n = i then 1 else 0
   usedIds := {0, 1}
   ackHigh := fun _ => 0
   hist   := []
@@ -184,13 +184,13 @@ def PrimaryAuthoritative (s : State Node) : Prop := s.cfg.incarnation s.cfg.prim
 /-- AppendWrite(p): `p` appends one client write to its own log, tagged with its
 current replication ID. Nothing else changes. -/
 def appendWrite (s : State Node) (p : Node) : State Node :=
-  { s with log := update s.log p (s.log p ++ [s.term p]) }
+  { s with log := update s.log p (s.log p ++ [s.replId p]) }
 
 /-- Replicate(r): `r` copies the next entry of its primary's log onto its own and adopts
 its primary's replication ID, as a Valkey replica does on sync. -/
 def replicate (s : State Node) (r : Node) : State Node :=
   { s with log := update s.log r (s.log r ++ [(s.log (primaryOf s r)).getD (s.log r).length 0]),
-           term := update s.term r (s.term (primaryOf s r)) }
+           replId := update s.replId r (s.replId (primaryOf s r)) }
 
 /-- Ack(r): `r`'s primary records that `r` holds its whole log, and `r` records that it
 has acknowledged up to there. -/
@@ -278,7 +278,7 @@ def takeover (s : State Node) (n : Node) : State Node :=
            acked := update s.acked n (fun _ => 0),
            commit := update s.commit n 0,
            inheritedEnd := update s.inheritedEnd n (s.log n).length,
-           term := update s.term n (freshId s), usedIds := insert (freshId s) s.usedIds }
+           replId := update s.replId n (freshId s), usedIds := insert (freshId s) s.usedIds }
 
 /-- The point a replica must have acknowledged before `p` counts it: `p`'s catch-up
 point while it is still reconciling, otherwise its commit point. -/

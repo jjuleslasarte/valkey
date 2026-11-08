@@ -27,34 +27,34 @@ theorem getD_take {l : List Nat} {i k : Nat} (hi : i < k) :
 /-- Held-reply invariant: a reply whose primaryship is current points at its own
 entry in that primary's log. -/
 def HeldInvariant (s : State Node) (held : List (Held Node)) : Prop :=
-  ∀ x ∈ held, x.term ∈ s.usedIds ∧
+  ∀ x ∈ held, x.replId ∈ s.usedIds ∧
     (ReplyFenced s x → 1 ≤ x.offset ∧ x.offset ≤ (s.log x.primary).length ∧
-      (s.log x.primary).getD (x.offset - 1) 0 = x.term)
+      (s.log x.primary).getD (x.offset - 1) 0 = x.replId)
 
 /-- Every node's replication ID has been handed out: it is in `usedIds`. A takeover's
 fresh ID is therefore different from every ID a node or a held reply already carries. -/
-def TermsIssued (s : State Node) : Prop := ∀ n, s.term n ∈ s.usedIds
+def ReplIdsIssued (s : State Node) : Prop := ∀ n, s.replId n ∈ s.usedIds
 
 structure ReplyInvariant (a : ReplyState Node) : Prop where
   core  : Invariant a.core
   /-- Every node's replication ID has been handed out. -/
-  termsIssued : TermsIssued a.core
+  replIdsIssued : ReplIdsIssued a.core
   held  : HeldInvariant a.core a.held
   acked : AckedDurable a
 
 theorem replyInvariant_init (i : Node) : ReplyInvariant (replyInit i) where
   core := invariant_init i
-  termsIssued := by intro n; simp only [replyInit, init]; split <;> simp
+  replIdsIssued := by intro n; simp only [replyInit, init]; split <;> simp
   held := by intro x hx; simp [replyInit] at hx
   acked := by intro x hx; simp [replyInit] at hx
 
 /-- What a replication step other than a restart does to the parts the reply
 invariants read. -/
-theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermsIssued s) {m : Nat} {μ : Action Node}
+theorem step_facts {s s' : State Node} (h : Invariant s) (ht : ReplIdsIssued s) {m : Nat} {μ : Action Node}
     (hs : Step m s μ s') (hμ : μ.isRestart = false) :
-    s.hist <+: s'.hist ∧ s.usedIds ⊆ s'.usedIds ∧ TermsIssued s' ∧
-    ∀ x t, t ∈ s.usedIds → ThinksPrimary s' x → s'.term x = t →
-      ThinksPrimary s x ∧ s.term x = t ∧ s.log x <+: s'.log x := by
+    s.hist <+: s'.hist ∧ s.usedIds ⊆ s'.usedIds ∧ ReplIdsIssued s' ∧
+    ∀ x t, t ∈ s.usedIds → ThinksPrimary s' x → s'.replId x = t →
+      ThinksPrimary s x ∧ s.replId x = t ∧ s.log x <+: s'.log x := by
   cases hs with
   | append p _ _ =>
     exact ⟨List.prefix_refl _, Finset.Subset.refl _, ht, fun x _ _ hp e =>
@@ -62,14 +62,14 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermsIssued s) {m
   | replicate r hne _ _ =>
     refine ⟨List.prefix_refl _, Finset.Subset.refl _, ?_, fun x _ _ hp e => ?_⟩
     · -- the replica adopts its primary's replication ID, which is a used one
-      intro x; show update s.term r (s.term (primaryOf s r)) x ∈ s.usedIds
+      intro x; show update s.replId r (s.replId (primaryOf s r)) x ∈ s.usedIds
       by_cases hxr : x = r
       · subst hxr; rw [update_self]; exact ht _
       · rw [update_of_ne _ _ hxr]; exact ht x
     · -- a node that thinks it is primary is not the adopting replica
       have hxr : x ≠ r := fun hxr => by subst hxr; exact hne hp.1
       refine ⟨hp, ?_, grow_upd s.log r _ x⟩
-      change update s.term r _ x = _ at e; rwa [update_of_ne _ _ hxr] at e
+      change update s.replId r _ x = _ at e; rwa [update_of_ne _ _ hxr] at e
   | ack r _ _ _ =>
     exact ⟨List.prefix_refl _, Finset.Subset.refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
   | commit p _ _ _ _ =>
@@ -108,7 +108,7 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermsIssued s) {m
   | takeover n _ _ _ _ =>
     refine ⟨List.prefix_refl _, Finset.subset_insert _ _, ?_, ?_⟩
     · intro x
-      show update s.term n (freshId s) x ∈ insert (freshId s) s.usedIds
+      show update s.replId n (freshId s) x ∈ insert (freshId s) s.usedIds
       by_cases hxn : x = n
       · subst hxn; simp
       · rw [update_of_ne _ _ hxn]; exact Finset.mem_insert_of_mem (ht x)
@@ -149,12 +149,12 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermsIssued s) {m
 theorem replyInvariant_core {a : ReplyState Node} {c : State Node} (h : ReplyInvariant a) {m : Nat} {μ : Action Node}
     (hs : Step m a.core μ c) (hμ : μ.isRestart = false) :
     ReplyInvariant ⟨c, a.held, a.acknowledged⟩ := by
-  obtain ⟨hh, hv, ht', hx⟩ := step_facts h.core h.termsIssued hs hμ
+  obtain ⟨hh, hv, ht', hx⟩ := step_facts h.core h.replIdsIssued hs hμ
   refine ⟨invariant_step h.core hs, ht', ?_, ?_⟩
   · intro x hm
     obtain ⟨hb, hf⟩ := h.held x hm
     refine ⟨hv hb, fun hf' => ?_⟩
-    obtain ⟨htp, hte, hpre⟩ := hx x.primary x.term hb hf'.1 hf'.2
+    obtain ⟨htp, hte, hpre⟩ := hx x.primary x.replId hb hf'.1 hf'.2
     obtain ⟨h1, h2, h3⟩ := hf ⟨htp, hte⟩
     exact ⟨h1, Nat.le_trans h2 hpre.length_le, by rw [getD_prefix hpre (by omega)]; exact h3⟩
   · intro x hm
@@ -163,10 +163,10 @@ theorem replyInvariant_core {a : ReplyState Node} {c : State Node} (h : ReplyInv
 
 theorem replyInvariant_write {a : ReplyState Node} (h : ReplyInvariant a) (p : Node) : ReplyInvariant (write a p) := by
   have hlog : ∀ x, a.core.log x <+: (appendWrite a.core p).log x := grow_upd a.core.log p _
-  refine ⟨invariant_append h.core p, h.termsIssued, ?_, h.acked⟩
+  refine ⟨invariant_append h.core p, h.replIdsIssued, ?_, h.acked⟩
   intro x hm
   rcases List.mem_cons.mp hm with rfl | hm
-  · refine ⟨h.termsIssued p, fun _ => ⟨by simp, ?_, ?_⟩⟩
+  · refine ⟨h.replIdsIssued p, fun _ => ⟨by simp, ?_, ?_⟩⟩
     · simp [write, appendWrite]
     · simp [write, appendWrite, List.getD_eq_getElem?_getD]
   · obtain ⟨hb, hf⟩ := h.held x hm
@@ -178,7 +178,7 @@ theorem replyInvariant_write {a : ReplyState Node} (h : ReplyInvariant a) (p : N
 
 theorem replyInvariant_release {a : ReplyState Node} (h : ReplyInvariant a) (x : Held Node) (hm : x ∈ a.held)
     (hc : x.offset ≤ a.core.commit x.primary) (hf : ReplyFenced a.core x) : ReplyInvariant (release a x) := by
-  refine ⟨h.core, h.termsIssued, fun y hy => h.held y (List.mem_of_mem_erase hy), ?_⟩
+  refine ⟨h.core, h.replIdsIssued, fun y hy => h.held y (List.mem_of_mem_erase hy), ?_⟩
   intro y hy
   rcases List.mem_cons.mp hy with rfl | hy
   · obtain ⟨_, hfx⟩ := h.held x hm
@@ -186,29 +186,29 @@ theorem replyInvariant_release {a : ReplyState Node} (h : ReplyInvariant a) (x :
     have hhist := h.core.commitWithinHistory x.primary
     have heq := h.core.committedIsHistoryPrefix x.primary
     refine ⟨h1, Nat.le_trans hc hhist, ?_⟩
-    show a.core.hist.getD (x.offset - 1) 0 = x.term
+    show a.core.hist.getD (x.offset - 1) 0 = x.replId
     rw [← getD_take (k := a.core.commit x.primary) (by omega), ← heq, getD_take (by omega)]
     exact h3
   · exact h.acked y hy
 
 theorem replyInvariant_abort {a : ReplyState Node} (h : ReplyInvariant a) (x : Held Node) : ReplyInvariant (abort a x) :=
-  ⟨h.core, h.termsIssued, fun y hy => h.held y (List.mem_of_mem_erase hy), h.acked⟩
+  ⟨h.core, h.replIdsIssued, fun y hy => h.held y (List.mem_of_mem_erase hy), h.acked⟩
 
 /-- A restart of `n` keeps the layer invariant once `n`'s held replies are dropped: the
 surviving replies are on other nodes, whose logs, primaryship and replication IDs it leaves alone,
 and it changes neither the history nor the used replication IDs. -/
 theorem replyInvariant_restart {a : ReplyState Node} {c : State Node} (h : ReplyInvariant a) (hc : Invariant c) (n : Node)
-    (hhist : c.hist = a.core.hist) (hids : c.usedIds = a.core.usedIds) (hterm : c.term = a.core.term)
+    (hhist : c.hist = a.core.hist) (hids : c.usedIds = a.core.usedIds) (hreplId : c.replId = a.core.replId)
     (hlog : ∀ x, x ≠ n → c.log x = a.core.log x)
     (htp : ∀ x, x ≠ n → ThinksPrimary c x → ThinksPrimary a.core x) :
     ReplyInvariant ⟨c, dropHeld a.held n, a.acknowledged⟩ := by
-  refine ⟨hc, fun x => by rw [hterm, hids]; exact h.termsIssued x, ?_, ?_⟩
+  refine ⟨hc, fun x => by rw [hreplId, hids]; exact h.replIdsIssued x, ?_, ?_⟩
   · intro x hx
     obtain ⟨hm, hxn⟩ := List.mem_filter.mp hx
     have hxn' : x.primary ≠ n := by simpa using hxn
     obtain ⟨hb, hf⟩ := h.held x hm
     refine ⟨by rw [hids]; exact hb, fun hf' => ?_⟩
-    have : ReplyFenced a.core x := ⟨htp x.primary hxn' hf'.1, by rw [← hterm]; exact hf'.2⟩
+    have : ReplyFenced a.core x := ⟨htp x.primary hxn' hf'.1, by rw [← hreplId]; exact hf'.2⟩
     obtain ⟨h1, h2, h3⟩ := hf this
     rw [hlog x.primary hxn']; exact ⟨h1, h2, h3⟩
   · intro x hx; show _ ∧ x.1 ≤ c.hist.length ∧ c.hist.getD _ 0 = _; rw [hhist]; exact h.acked x hx
@@ -217,15 +217,15 @@ theorem replyInvariant_restart {a : ReplyState Node} {c : State Node} (h : Reply
 fence (they can only be aborted), every other reply is unchanged. -/
 theorem replyInvariant_newId {a : ReplyState Node} (h : ReplyInvariant a) (p : Node) :
     ReplyInvariant (newId a p) := by
-  refine ⟨h.core.term_frame _ _, ?_, ?_, h.acked⟩
-  · intro x; show update a.core.term p (freshId a.core) x ∈ insert (freshId a.core) a.core.usedIds
+  refine ⟨h.core.replId_frame _ _, ?_, ?_, h.acked⟩
+  · intro x; show update a.core.replId p (freshId a.core) x ∈ insert (freshId a.core) a.core.usedIds
     by_cases hx : x = p
     · subst hx; simp
-    · rw [update_of_ne _ _ hx]; exact Finset.mem_insert_of_mem (h.termsIssued x)
+    · rw [update_of_ne _ _ hx]; exact Finset.mem_insert_of_mem (h.replIdsIssued x)
   · intro x hm
     obtain ⟨hb, hf⟩ := h.held x hm
     refine ⟨Finset.mem_insert_of_mem hb, fun ⟨hp, he⟩ => ?_⟩
-    change update a.core.term p (freshId a.core) x.primary = x.term at he
+    change update a.core.replId p (freshId a.core) x.primary = x.replId at he
     by_cases hx : x.primary = p
     · rw [hx, update_self] at he; exact absurd (he ▸ hb) (freshId_not_mem _)
     · rw [update_of_ne _ _ hx] at he; exact hf ⟨hp, he⟩

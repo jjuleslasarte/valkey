@@ -223,7 +223,7 @@ See "Lease timing" below.
 | `acked` | `Node → Node → Nat` | `acked p r`: how far `p` believes `r` has acknowledged. |
 | `commit` | `Node → Nat` | Each node's committed offset. |
 | `inheritedEnd` | `Node → Nat` | The end of each node's inherited log: a new primary commits up to here before it commits anything it appends later. `catchUpPoint` is derived from it. |
-| `term` | `Node → Nat` | The replication ID each node writes new entries with: compared only for equality, fresh at each takeover, adopted by a replica from its primary. |
+| `replId` | `Node → Nat` | The replication ID each node writes new entries with: compared only for equality, fresh at each takeover, adopted by a replica from its primary. |
 | `usedIds` | `Finset Nat` | Ghost: every replication ID handed out so far. A takeover or `newId` picks `freshId s`, which is not in it. |
 | `ackHigh` | `Node → Nat` | Each node's acknowledgement high-water mark: the highest offset it has acknowledged as a replica (Ack) or as a primary (Commit). Survives a restart with data. |
 | `hist` | `List Nat` | Ghost: the committed history, extended the first time any node commits an offset. |
@@ -253,8 +253,8 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 
 | Action | Guard | Effect |
 |---|---|---|
-| `append p` | `p` thinks it is primary and is writable | appends `term p` to `log p` |
-| `replicate r` | `r` does not consider itself primary; its log is a strict prefix of its primary's | copies the next entry; `term r :=` its primary's ID |
+| `append p` | `p` thinks it is primary and is writable | appends `replId p` to `log p` |
+| `replicate r` | `r` does not consider itself primary; its log is a strict prefix of its primary's | copies the next entry; `replId r :=` its primary's ID |
 | `ack r` | `r` does not consider itself primary; its log is a prefix of its primary's and longer than its recorded ack | primary records `acked p r := (log r).length`; `ackHigh r` raised to it |
 | `commit p` | `p` thinks it is primary, is writable, has an uncommitted entry, and every sync member has acknowledged past `commit p` | `commit p + 1`; `hist` extended if this offset is new; `ackHigh p` raised to the new commit point |
 | `count p r` | `p` thinks it is primary; `r ≠ p` follows `p`, is not counted, and has acknowledged `catchUpPoint s p` | `sync p r := true` |
@@ -262,7 +262,7 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 | `makeEligible p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new version with `r` eligible and `inc r` recorded; `known p` updated |
 | `makeIneligible p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `known p` updated; `sync p r := false` |
 | `learn n` | `n` does not know the latest configuration | `known n := cfg`; `sync n` emptied unless `n` is primary there |
-| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.incarnation n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the eligible replicas of the new configuration; `acked n`, `commit n` reset; `inheritedEnd n := (log n).length`; `term n := freshId s`, added to `usedIds` |
+| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.incarnation n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the eligible replicas of the new configuration; `acked n`, `commit n` reset; `inheritedEnd n := (log n).length`; `replId n := freshId s`, added to `usedIds` |
 | `resync r` | `r` does not consider itself primary; its log is not a prefix of its primary's; `r` is neither counted nor eligible in its primary's configuration | `log r := (log p).take (catchUpPoint s p)`; `acked p r := 0`; `commit r` capped |
 | `restartEmpty n` | `n` knows the latest configuration; some other node is authoritative | `log n := []`, `incarnation n + 1`, volatile state and `ackHigh n` reset; the current primary drops `n` from its sync set and acks |
 | `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `inheritedEnd n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `known n`), else emptied |
@@ -304,17 +304,17 @@ configuration `p`'s takeover replaced; every `r` after a restart). `LeaseStep m 
 ### Held client replies (`Replies.lean`)
 
 `ReplyState` is a `State` plus `held : List (Held Node)` and `acknowledged : List (Nat × Nat)`.
-A held reply `h : Held` has fields `primary`, `offset` (1-based) and `term` (the primary's
+A held reply `h : Held` has fields `primary`, `offset` (1-based) and `replId` (the primary's
 replication ID at the append; since a log entry is the ID, it is also the value written).
 `ReplyStep m` has:
 
 | Action | Guard | Effect |
 |---|---|---|
 | `core μ` | `Step m` for a non-restart action `μ` | the replication step; `held`, `acknowledged` unchanged |
-| `write p` | as `append p` | `appendWrite` plus `⟨p, (log p).length + 1, term p⟩` held |
-| `release h` | `h` held, `h.offset ≤ commit h.primary`, and `ReplyFenced`: `h.primary` thinks it is primary with `term h.primary = h.term` | `h` removed; `(h.offset, h.term)` added to `acknowledged` |
+| `write p` | as `append p` | `appendWrite` plus `⟨p, (log p).length + 1, replId p⟩` held |
+| `release h` | `h` held, `h.offset ≤ commit h.primary`, and `ReplyFenced`: `h.primary` thinks it is primary with `replId h.primary = h.replId` | `h` removed; `(h.offset, h.replId)` added to `acknowledged` |
 | `abort h` | `h` held and not `ReplyFenced` | `h` removed (UNCOMMITTED) |
-| `newId p` | none | `term p := freshId`, added to `usedIds`: a fresh replication ID without a takeover; `p`'s held replies then fail the fence |
+| `newId p` | none | `replId p := freshId`, added to `usedIds`: a fresh replication ID without a takeover; `p`'s held replies then fail the fence |
 | `restartEmpty n`, `restartKeep n`, `restartPartial n k` | as the replication restarts | the replication restart; `n`'s held replies dropped |
 
 `replyLTS m`, `ReplyReachable m i a` as above.
@@ -418,16 +418,16 @@ in `_takeover`, the two demotion waits in `_demote`.
 
 ### Durability (`Durability.lean`)
 
-`ReplyInvariant a` is `Invariant a.core` plus `TermsIssued` (every node's replication ID
+`ReplyInvariant a` is `Invariant a.core` plus `ReplIdsIssued` (every node's replication ID
 is in `usedIds`), `HeldInvariant` (a held reply's ID is in `usedIds`, and a fenced
 reply points at its own entry in its primary's log) and `AckedDurable`. `step_facts`
 shows that every non-restart replication step extends `hist`, only adds to `usedIds`,
-keeps `TermsIssued`, and keeps fenced replies fenced with their log only grown;
+keeps `ReplIdsIssued`, and keeps fenced replies fenced with their log only grown;
 the cases that matter are Takeover (the new ID `freshId s` is not in `usedIds`, so no held
 reply matches it: `freshId_not_mem`), Replicate (the adopting replica does not think it is
 primary), Learn (can never make a node primary) and Resync (changes only a node that does
 not think it is primary). `replyInvariant_newId` handles `newId` the same way as Takeover.
-`Invariant.term_frame` says the replication invariant does not mention IDs. `release` reads its entry from `HeldInvariant`, and
+`Invariant.replId_frame` says the replication invariant does not mention IDs. `release` reads its entry from `HeldInvariant`, and
 `CommittedAgree` turns that into `hist[o] = t`.
 
 ## Proof style

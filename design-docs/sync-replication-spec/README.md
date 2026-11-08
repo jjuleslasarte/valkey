@@ -174,7 +174,7 @@ cannot arrive after it. Steps interleave arbitrarily, so any order of events acr
 nodes is covered.
 
 Each log entry records the **replication ID** of the primaryship that wrote it (the
-field `term`). IDs are compared only for equality, never ordered, and a takeover picks
+field `replId`). IDs are compared only for equality, never ordered, and a takeover picks
 one that has never been used (`freshId`; the ghost set `usedIds` records every ID
 handed out). A write is identified by its offset and ID. This is what lets the model
 tell apart two primaries that wrote different data at the same offset.
@@ -401,7 +401,7 @@ step); that is the strong form of "necessary", and it was not attempted.
 
 The acknowledged-write properties (3 and 4) extend `Invariant` with three more parts
 (`ReplyInvariant`, `Durability.lean`): every node's replication ID, and every held
-reply's, has been handed out (`TermsIssued`, and the first half of `HeldInvariant`); a
+reply's, has been handed out (`ReplIdsIssued`, and the first half of `HeldInvariant`); a
 held reply that passes the reply fence points at the write it was issued for; and
 AckedDurable itself. A takeover or `NewId` gives the node an ID never handed out before,
 so no held reply matches it and an old reply can never become releasable again.
@@ -535,7 +535,7 @@ encoding.
   the authoritative primary with an empty log. A stale file is
   modelled as a prefix of the log; a file that is not a prefix (a diverged tail) is not
   modelled.
-- **The reply fence uses Valkey's replication ID** (the field `term`). The model
+- **The reply fence uses Valkey's replication ID** (the field `replId`). The model
   assumes two things of it. Citations are to the Valkey source (`src/` at the fork's
   `sync-repl-lean` branch).
   (a) *Every ID a takeover or `NewId` picks is new.* The proof needs this for both
@@ -562,7 +562,7 @@ encoding.
   The model's `NewId` action covers these, and a primary's restart is the model's
   restart followed by `NewId`. The node's held replies fail the fence and are answered
   `UNCOMMITTED`, which is safe but costs availability. A restarted replica gets no new
-  ID; it restores its old primary's ID, as the model keeps `term` across a restart. A
+  ID; it restores its old primary's ID, as the model keeps `replId` across a restart. A
   replica adopts its primary's ID on sync (`replication.c:2879`, `:4232`). The model
   adopts on every `Replicate` step and not on resync; no proof reads a non-primary's ID,
   so the difference is inert. `PSYNC` accepts the secondary ID up to

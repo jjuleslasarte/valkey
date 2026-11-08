@@ -30,7 +30,7 @@ structure Held (Node : Type) where
   /-- The write's 1-based offset in `primary`'s log. -/
   offset  : Nat
   /-- `primary`'s replication ID at the append, which is also the value written. -/
-  term    : Nat
+  replId    : Nat
   deriving DecidableEq
 
 /-- The replication state plus the reply layer: the replies still held, and the
@@ -49,17 +49,17 @@ def replyInit (i : Node) : ReplyState Node := ⟨init i, [], []⟩
 
 /-- `Write(p)`: AppendWrite plus a held reply at the new length. -/
 def write (a : ReplyState Node) (p : Node) : ReplyState Node :=
-  ⟨appendWrite a.core p, ⟨p, (a.core.log p).length + 1, a.core.term p⟩ :: a.held, a.acknowledged⟩
+  ⟨appendWrite a.core p, ⟨p, (a.core.log p).length + 1, a.core.replId p⟩ :: a.held, a.acknowledged⟩
 
 /-- The reply fence: the primaryship that accepted the write is still current. A reply
 may be released as OK only while this holds. (Unrelated to `DeposedFenced`, the log
 fence of a deposed primary.) -/
 def ReplyFenced (s : State Node) (h : Held Node) : Prop :=
-  ThinksPrimary s h.primary ∧ s.term h.primary = h.term
+  ThinksPrimary s h.primary ∧ s.replId h.primary = h.replId
 
 /-- `Release(h)`: OK. -/
 def release (a : ReplyState Node) (h : Held Node) : ReplyState Node :=
-  ⟨a.core, a.held.erase h, (h.offset, h.term) :: a.acknowledged⟩
+  ⟨a.core, a.held.erase h, (h.offset, h.replId) :: a.acknowledged⟩
 
 /-- `Abort(h)`: UNCOMMITTED. -/
 def abort (a : ReplyState Node) (h : Held Node) : ReplyState Node :=
@@ -69,7 +69,7 @@ def abort (a : ReplyState Node) (h : Held Node) : ReplyState Node :=
 `changeReplicationId` when a primary creates or frees its backlog, on
 `DEBUG change-repl-id`, and at a primary's restart). -/
 def newId (a : ReplyState Node) (p : Node) : ReplyState Node :=
-  ⟨{ a.core with term := update a.core.term p (freshId a.core),
+  ⟨{ a.core with replId := update a.core.replId p (freshId a.core),
                  usedIds := insert (freshId a.core) a.core.usedIds }, a.held, a.acknowledged⟩
 
 /-- The held replies left after `n` restarts. -/
