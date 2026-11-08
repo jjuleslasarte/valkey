@@ -90,7 +90,8 @@ Full resync of an eligible replica is excluded by the model, as the doc says
 (eligible replicas ahead of the new primary are demoted first):
 `SyncReplication.resyncEligible_unsafe` (8 steps) resyncs one from a primary
 that restarted from a stale file. Requiring instead that the resync source
-thinks it is primary also works (a scratch Lean build), but the proof then
+thinks it is primary also works (a scratch Lean build, not in the
+repository), but the proof then
 needs one more invariant conjunct; the model keeps the doc's rule.
 
 ## F2. Held replies must be fenced by primaryship, not only by offset
@@ -319,9 +320,15 @@ TLC `Core_earlyDrop`, `CoreRecon_earlyDropMin1`, `CoreRestart_earlyDropMin1`).
 "Not yet eligible" is read in the primary's own configuration, and that is
 enough: the proofs hold with no requirement that the primary knows the latest
 configuration, so a deposed primary may drop such a replica too. (An earlier
-version of the model required it; the proof no longer does.)
-**Proposed doc change:** state that early removal applies to replicas not yet
-committed as eligible, as the primary itself sees it.
+version of the model required it; the proof no longer does.) This relies on
+the model's MakeEligible being atomic: the primary always learns the outcome
+of its own step-4 compare-and-set at once. In the real system the
+compare-and-set can commit while the primary has not seen the result, and
+dropping the replica then is `uncountElig_unsafe`.
+**Proposed doc change:** keep "before step 4" as written: early removal
+applies before the primary proposes the step-4 compare-and-set, or after it
+learns the compare-and-set failed. Knowing the latest shard configuration is
+not needed in addition.
 
 ## Survival condition (an assumption, not a defect)
 
@@ -488,14 +495,17 @@ rule, a deposed primary that has not learned of the takeover echoes an
 acknowledgement to a replica still following it, after the new primary has
 committed without that replica (`grantWithoutPrimaryLease_stale`).
 
-The takeover half of the doc's restart rule ("takeover timers restart") is
-safe, and so is the opposite choice of persisting the timer across the restart:
-the proof builds with either. What is not safe is a restarted node that loses
-the timer and treats its primary as long silent: it takes over at once while
-the old primary still holds its lease from it, and the old primary serves a
-stale read (`restartForgetsTimer_stale`, 13 steps). **Proposed doc change:**
-say that a restarted node either keeps its takeover timer or restarts it, and
-never initialises it as "long ago".
+The takeover half of the doc's restart rule ("A node that restarts waits one
+full lease duration before it attempts a takeover") is needed: a restarted
+node that skips the wait, treating its primary as long silent, takes over at
+once while the old primary still holds its lease from it, and the old primary
+serves a stale read (`restartForgetsTimer_stale`, 13 steps). The model
+implements the wait by restarting the takeover timer at the restart.
+Persisting the timer across the restart also kept every theorem in a scratch
+build (not in the repository), but the model has one clock that keeps running
+across a restart; a real node can rely on a persisted timer only with a clock
+comparable across the restart within the drift bound. No doc change: the
+rule as written is what the proof needs.
 
 Rules the model adds to or narrows from the doc, all used by the proof: a
 restarted primary waits one read lease plus the margin before demoting anyone
@@ -508,7 +518,7 @@ incarnation. The incarnation part is shown needed within the "Lease durations"
 rule (`grantNoIncRestart_stale`, primary lease 6, read lease 3, drift 1, margin
 2): a restarted-empty replica, still listed eligible, is granted a read lease; the
 primary then restarts with its data, rebuilds its sync replica set without it
-(stale recorded incarnation), and commits alone. A new primary, by contrast, may
+(stale recorded incarnation), and commits with n2 only. A new primary, by contrast, may
 count every eligible replica: leaving out stale-incarnation ones at takeover is
 an availability choice, not needed for safety. Not
 modelled: planned demotion (the
