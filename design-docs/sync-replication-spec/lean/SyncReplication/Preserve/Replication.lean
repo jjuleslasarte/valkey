@@ -23,7 +23,6 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
     (hL : ∀ x, s.log x <+: L x) : Invariant { s with log := L } where
   eligibleHoldsCommitted := fun n hn => (h.eligibleHoldsCommitted n hn).trans (hL n)
   commitWithinLog := fun p => Nat.le_trans (h.commitWithinLog p) (hL p).length_le
-  commitWithinHistory := h.commitWithinHistory
   committedIsHistoryPrefix := by
     intro p
     show (L p).take (s.commit p) = _
@@ -46,7 +45,6 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
   inheritedEndWithinLog := Nat.le_trans h.inheritedEndWithinLog (hL _).length_le
   syncCommit := h.syncCommit
   eligibleInOldConfig := h.eligibleInOldConfig
-  incLe := h.incLe
   knownIncLe := h.knownIncLe
   authEx := h.authEx
   historyWithinCommitOrInherited := h.historyWithinCommitOrInherited
@@ -132,7 +130,6 @@ theorem membership_ack : MembershipInvariant (ack s r) := by
 /-- Ack changes no commit point, catch-up point or history, and only raises a high-water mark. -/
 theorem commit_ack : CommitInvariant (ack s r) where
   commitWithinLog := h.commitWithinLog
-  commitWithinHistory := h.commitWithinHistory
   committedIsHistoryPrefix := h.committedIsHistoryPrefix
   inheritedEndWithinLog := h.inheritedEndWithinLog
   historyWithinCommitOrInherited := h.historyWithinCommitOrInherited
@@ -264,10 +261,6 @@ theorem commit_resync : CommitInvariant (resync s r) := by
     intro x; by_cases e : x = r
     · subst e; rw [hCr, hLr, List.length_take_of_le hcu]; omega
     · rw [hCo x e, hLo x e]; exact h.commitWithinLog x
-  commitWithinHistory := by
-    intro x; by_cases e : x = r
-    · subst e; rw [hCr]; exact Nat.le_trans (Nat.min_le_left _ _) (h.commitWithinHistory _)
-    · rw [hCo x e]; exact h.commitWithinHistory x
   committedIsHistoryPrefix := by
     intro x; by_cases e : x = r
     · subst e
@@ -310,7 +303,7 @@ theorem failover_resync : FailoverInvariant (resync s r) := by
     intro x hx hv
     have hxr := htpne x hx
     have hF := h.stale x hx hv
-    exact hF.transfer rfl (fun _ => rfl) (hAs x) (hLo x hxr) rfl id
+    exact hF.transfer rfl (fun _ => rfl) rfl (hAs x) (hLo x hxr) rfl id
       (fun hq => hF.fenceLeInheritedEnd hq) (fun hq => by rw [hLo _ (Ne.symm hrprim)]; exact hF.primHolds hq)
       (fun hq => hF.primAck hq)
       (fun m hm hi => Or.inl ⟨hm, hi, hLo m (hnotr m (Or.inl hm)), Nat.le_refl _⟩)

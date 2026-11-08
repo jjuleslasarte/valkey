@@ -41,7 +41,6 @@ theorem config_takeover : ConfigInvariant (takeover s n) := by
     · rfl
     · rw [if_neg e] at hx; have := h.knownLe x; omega
   primKnows := by show (takeover s n).known n = takeoverCfg s n; rw [hK, if_pos rfl]
-  incLe := h.incLe
   knownIncLe := by
     intro x y; rw [hK]; split
     · exact h.incLe y
@@ -105,17 +104,16 @@ theorem membership_takeover : MembershipInvariant (takeover s n) := by
   eligibleCounted := by
     intro x y hx hy hi
     rcases (htp x).1 hx with rfl | ⟨e, hx'⟩
-    · rw [hSn]; rw [hK, if_pos rfl] at hy hi
+    · rw [hSn]; rw [hK, if_pos rfl] at hy
       change takeoverEligible s x y = true at hy
-      change s.cfg.incarnation y = s.incarnation y at hi
-      exact (takeoverSync_iff y).2 ⟨hy, hi⟩
+      exact (takeoverSync_iff y).2 hy
     · rw [hSo x e]; rw [hKo x e] at hy hi; exact h.eligibleCounted x y hx' hy hi
   syncNew := by
     intro r hs he
     change (takeover s n).sync n r = true at hs
     rw [hSn] at hs
     change takeoverEligible s n r = false at he
-    rw [takeoverSync_iff, he] at hs; exact absurd hs.1 (by decide)
+    rw [takeoverSync_iff, he] at hs; exact absurd hs (by decide)
   eligibleInOldConfig := by
     intro m hm hf
     change takeoverEligible s n m = true at hm
@@ -141,10 +139,6 @@ theorem commit_takeover : CommitInvariant (takeover s n) := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
     · rw [hCo x e]; exact h.commitWithinLog x
-  commitWithinHistory := by
-    intro x; by_cases e : x = n
-    · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.commitWithinHistory x
   committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
@@ -183,19 +177,21 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
     have hAx := hAo x e
     have hL : (takeover s n).log = s.log := rfl
     have hleft : ∀ r, s.sync x r = true → ((takeover s n).known r).primary ≠ x →
-        r ∈ leftSync (takeover s n) x := fun r hr hf => ⟨by rw [hSx]; exact hr, hf⟩
+        (s.known x).eligible r = true → r ∈ leftSync (takeover s n) x :=
+      fun r hr hf he => ⟨by rw [hSx]; exact hr, hf, by rw [hKo x e]; exact he⟩
     by_cases hxq : x = s.cfg.primary
     · -- x is the primary n took over from. n was eligible, so x counts n, and n now
       -- follows itself: n has left x.
       subst hxq
       have hpa : PrimaryAuthoritative s := (thinksPrimary_primaryAuthoritative hx' h.primKnows).2
       have hxp := thinksPrimary_prim h hpa
-      by_cases hex : ∃ r, s.sync s.cfg.primary r = true ∧ (s.known r).primary ≠ s.cfg.primary ∧ r ≠ n
+      by_cases hex : ∃ r, s.sync s.cfg.primary r = true ∧ (s.known r).primary ≠ s.cfg.primary ∧
+          s.cfg.eligible r = true ∧ r ≠ n
       · -- Another sync replica had already left x. The current primary records no
         -- acknowledgement from such a replica, so the fence is 0.
-        obtain ⟨r, hr1, hr2, hr3⟩ := hex
+        obtain ⟨r, hr1, hr2, hr4, hr3⟩ := hex
         have h0 : (takeover s n).acked s.cfg.primary r = 0 := by rw [hAx]; exact h.ackedPrim r hr2
-        refine DeposedFenced.of_left (hleft r hr1 (by rw [hKo r hr3]; exact hr2)) ?_ ?_ ?_ ?_ <;> simp [h0]
+        refine DeposedFenced.of_left (hleft r hr1 (by rw [hKo r hr3]; exact hr2) (by rw [h.primKnows]; exact hr4)) ?_ ?_ ?_ ?_ <;> simp [h0]
       · -- n is the only replica that left x: the fence is n's acknowledgement, and n
         -- holds x's log up to it.
         have hsn : s.sync s.cfg.primary n = true :=
@@ -204,7 +200,7 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
         have hlen := h.ackedLe s.cfg.primary n hxp
         have hnx : ((takeover s n).known n).primary ≠ s.cfg.primary := by
           rw [hK, if_pos rfl]; exact hnp
-        refine DeposedFenced.of_left (hleft n hsn hnx) ?_ ?_ ?_ ?_
+        refine DeposedFenced.of_left (hleft n hsn hnx (by rw [h.primKnows]; exact hel)) ?_ ?_ ?_ ?_
         · intro _
           change (takeover s n).acked s.cfg.primary n ≤ (takeover s n).inheritedEnd n
           rw [hAx, hRn]
@@ -227,7 +223,7 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
           rw [hKo m hm3]
           by_cases hf : (s.known m).primary = s.cfg.primary
           · exact hf
-          · exact absurd ⟨m, hsm, hf, hm3⟩ hex
+          · exact absurd ⟨m, hsm, hf, hm1, hm3⟩ hex
     · -- x was already deposed. Its old fence still works: the replica that set it has
       -- still left x, and n, being eligible, already held x's log up to the fence.
       have hv' : (s.known x).version < s.cfg.version := by
@@ -245,7 +241,7 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
       have hw' : w ∈ leftSync (takeover s n) x := hleft w hw1 (by
         rw [hK]; split
         · show n ≠ x; exact fun c => e c.symm
-        · exact hw2)
+        · exact hw2.1) hw2.2
       refine DeposedFenced.of_left hw' ?_ ?_ ?_ ?_
       · intro _
         change (takeover s n).acked x w ≤ (takeover s n).inheritedEnd n

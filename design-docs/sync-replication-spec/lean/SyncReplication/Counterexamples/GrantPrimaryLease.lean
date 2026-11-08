@@ -76,8 +76,7 @@ theorem grantWithoutPrimaryLease_run : (leaseLTSGrantWithoutPrimaryLease 0 P0).M
   .stepL (.step (LeaseStep.tick lq12)) <|
   .stepL (.step (LeaseStep.demote lq13 1 2 (by decide) (by decide) (by decide) (by decide)
     (by decide))) <|
-  .stepL (.step (LeaseStep.core lq14 _ _ (Step.append lq14.core 1 (by decide) (writable_zero _ _)
-    (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lq14 _ _ (Step.append lq14.core 1 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.core lq15 _ _ (Step.commit lq15.core 1 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (LeaseStep.ackRenew lq16 2 (by decide) (by decide))) <|

@@ -40,7 +40,6 @@ theorem config_learn : ConfigInvariant (learn s n) := by
     · rfl
     · rw [if_neg e] at hx; exact h.knownEq x hx
   primKnows := by show (learn s n).known s.cfg.primary = s.cfg; rw [hK, if_neg (Ne.symm hnp)]; exact h.primKnows
-  incLe := h.incLe
   knownIncLe := by
     intro x y; rw [hK]; split
     · exact h.incLe y
@@ -158,12 +157,13 @@ theorem failover_learn : FailoverInvariant (learn s n) := by
       · subst e; simp; exact fun x => hprim x.symm
       · simp [e]
     have hSp : (learn s n).sync p = s.sync p := hS p hpn
-    by_cases hsw : s.sync p n = true ∧ (s.known n).primary = p ∧ s.acked p n < fence s p
+    by_cases hsw : s.sync p n = true ∧ (s.known n).primary = p ∧ s.acked p n < fence s p ∧
+        (s.known p).eligible n = true
     · -- n followed p with an acknowledgement below the fence. Having learned the new
       -- configuration it has left p, and its acknowledgement is the new fence.
-      obtain ⟨hs1, hs2, hs3⟩ := hsw
+      obtain ⟨hs1, hs2, hs3, hs4⟩ := hsw
       have hnp' : n ≠ p := fun e => hpn e.symm
-      refine DeposedFenced.of_left (w := n) ⟨by rw [hSp]; exact hs1, (hfz n).2 (Or.inl rfl)⟩ ?_ ?_ ?_ ?_
+      refine DeposedFenced.of_left (w := n) ⟨by rw [hSp]; exact hs1, (hfz n).2 (Or.inl rfl), by rw [hK, if_neg hpn]; exact hs4⟩ ?_ ?_ ?_ ?_
       · intro hpa; show s.acked p n ≤ s.inheritedEnd s.cfg.primary; have := hF.fenceLeInheritedEnd hpa; omega
       · intro hpa; exact take_mono_prefix (Nat.le_of_lt hs3) (hF.primHolds hpa)
       · intro hpa; show s.acked p n ≤ s.ackHigh s.cfg.primary; have := hF.primAck hpa; omega
@@ -175,7 +175,7 @@ theorem failover_learn : FailoverInvariant (learn s n) := by
           · right; rw [hSp]; refine ⟨d1, ?_⟩
             show (if m = n then s.cfg else s.known m).primary = p; rw [if_neg e]; exact d2
     · -- Otherwise the old fence still holds.
-      refine DeposedFenced.of_left (w := w) ⟨by rw [hSp]; exact hw1, (hfz w).2 (Or.inr hw2)⟩ ?_ ?_ ?_ ?_
+      refine DeposedFenced.of_left (w := w) ⟨by rw [hSp]; exact hw1, (hfz w).2 (Or.inr hw2.1), by rw [hK, if_neg hpn]; exact hw2.2⟩ ?_ ?_ ?_ ?_
       · intro hpa; show s.acked p w ≤ s.inheritedEnd s.cfg.primary; rw [hwF]; exact hF.fenceLeInheritedEnd hpa
       · intro hpa
         show (s.log p).take (s.acked p w) <+: s.log s.cfg.primary; rw [hwF]; exact hF.primHolds hpa
@@ -188,7 +188,10 @@ theorem failover_learn : FailoverInvariant (learn s n) := by
         · by_cases e : m = n
           · subst e
             have hnp' : m ≠ p := fun e => hpn e.symm
-            have hle : fence s p ≤ s.acked p m := Nat.le_of_not_lt (fun hl => hsw ⟨d1, d2, hl⟩)
+            have hel : (s.known p).eligible m = true := by
+              have := h.eligibleInOldConfig m hm (by rw [d2]; exact hprim)
+              rwa [d2] at this
+            have hle : fence s p ≤ s.acked p m := Nat.le_of_not_lt (fun hl => hsw ⟨d1, d2, hl, hel⟩)
             exact Or.inl ⟨take_mono_prefix hle (h.ackHolds p m hp' hnp' d2),
               hle.trans (h.ackedHigh p m hp' hnp' d2)⟩
           · right; rw [hSp]; refine ⟨d1, ?_⟩
@@ -240,10 +243,6 @@ theorem config_makeEligible (hs : s.sync p r = true) (hel : s.cfg.eligible r = f
     · rfl
     · rw [if_neg e] at hx; have := h.knownLe x; omega
   primKnows := by show (makeEligible s s.cfg.primary r).known s.cfg.primary = _; rw [hK, if_pos rfl]; rfl
-  incLe := by
-    intro x; show (makeEligible s s.cfg.primary r).cfg.incarnation x ≤ s.incarnation x; rw [hI]; split_ifs with e
-    · subst e; exact Nat.le_refl _
-    · exact h.incLe x
   knownIncLe := by
     intro x y; rw [hK]; split
     · show update s.cfg.incarnation r (s.incarnation r) y ≤ s.incarnation y
@@ -332,7 +331,6 @@ theorem commit_makeEligible (hs : s.sync p r = true) (hel : s.cfg.eligible r = f
   have hsc := h.syncCommit _ _ (thinksPrimary_prim h hpa) hs
   exact {
   commitWithinLog := h.commitWithinLog
-  commitWithinHistory := h.commitWithinHistory
   committedIsHistoryPrefix := h.committedIsHistoryPrefix
   inheritedEndWithinLog := h.inheritedEndWithinLog
   historyWithinCommitOrInherited := fun _ => h.historyWithinCommitOrInherited hpa
@@ -378,7 +376,7 @@ theorem failover_makeEligible (hs : s.sync p r = true) (hel : s.cfg.eligible r =
     -- The fence does not move; the newly eligible r holds x's log up to it because r
     -- caught up past the reconciliation point, which is past the fence.
     have hF := h.stale x hx' hv'
-    refine hF.transfer rfl hKp (fun _ _ => rfl) rfl rfl (fun _ => hpa)
+    refine hF.transfer rfl hKp (by rw [hK, if_neg hxp]) (fun _ _ => rfl) rfl rfl (fun _ => hpa)
       (fun _ => hF.fenceLeInheritedEnd hpa) (fun _ => hF.primHolds hpa) (fun _ => hF.primAck hpa) ?_
     intro m hm hi
     by_cases e : m = r
@@ -452,7 +450,6 @@ theorem config_makeIneligible (_he : s.cfg.eligible r = true) :
     · rfl
     · rw [if_neg e] at hx; have := h.knownLe x; omega
   primKnows := by show (makeIneligible s s.cfg.primary r).known s.cfg.primary = _; rw [hK, if_pos rfl]; rfl
-  incLe := h.incLe
   knownIncLe := by
     intro x y; rw [hK]; split
     · exact h.incLe y
@@ -532,7 +529,7 @@ commit facts only mention the current primary. -/
 theorem commit_makeIneligible (_he : s.cfg.eligible r = true) : CommitInvariant (makeIneligible s p r) := by
   obtain ⟨_, hpp⟩ := thinksPrimary_knowsLatest h hp hkl
   subst hpp
-  exact { commitWithinLog := h.commitWithinLog, commitWithinHistory := h.commitWithinHistory, committedIsHistoryPrefix := h.committedIsHistoryPrefix, inheritedEndWithinLog := h.inheritedEndWithinLog,
+  exact { commitWithinLog := h.commitWithinLog, committedIsHistoryPrefix := h.committedIsHistoryPrefix, inheritedEndWithinLog := h.inheritedEndWithinLog,
           historyWithinCommitOrInherited := h.historyWithinCommitOrInherited, histAck := fun n hn => h.histAck n (makeIneligible_isAuthoritative hn) }
 
 /-- Fences do not move, and no node becomes authoritative. -/
@@ -563,7 +560,7 @@ theorem failover_makeIneligible (_he : s.cfg.eligible r = true) :
     have hSx : (makeIneligible s s.cfg.primary r).sync x = s.sync x := by
       funext y; rw [hS, if_neg (fun c => hxp c.1)]
     have hF := h.stale x hx' hv'
-    exact hF.transfer hSx hKp (fun _ _ => rfl) rfl rfl (fun _ => hpa)
+    exact hF.transfer hSx hKp (by rw [hK, if_neg hxp]) (fun _ _ => rfl) rfl rfl (fun _ => hpa)
       (fun _ => hF.fenceLeInheritedEnd hpa) (fun _ => hF.primHolds hpa) (fun _ => hF.primAck hpa)
       (fun m hm hi => Or.inl ⟨(hEle m hm).2, hi, rfl, Nat.le_refl _⟩)
   authEx := ⟨s.cfg.primary, Or.inr rfl, hpa⟩ }

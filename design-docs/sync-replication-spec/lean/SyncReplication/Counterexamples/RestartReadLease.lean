@@ -52,8 +52,7 @@ theorem restartKeepsReadLease_run : (leaseLTSRestartKeepsReadLease 0 P0).MTr l0
      .core (.append 0), .replicate 1, .ack 1, .core (.commit 0), .heartbeat 1, .restartEmpty 1] lk11 :=
   LTS.MTr.comp (leaseLTSRestartKeepsReadLease 0 P0)
     (leaseMtr_of_step LeaseStepRestartKeepsReadLease.step (leases_prefix P0)) <|
-  .stepL (.step (LeaseStep.core l5 _ _ (Step.append l5.core 0 (by decide) (writable_zero _ _)
-    (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core l5 _ _ (Step.append l5.core 0 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.replicate lk6 1 (by decide) (by decide) (by decide))) <|
   .stepL (.step (LeaseStep.ack lk7 1 (by decide) (by decide) (by decide))) <|
   .stepL (.step (LeaseStep.core lk8 _ _ (Step.commit lk8.core 0 (by decide) (writable_zero _ _)

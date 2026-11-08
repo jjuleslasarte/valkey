@@ -43,7 +43,7 @@ def counted4 := count counted3 0 1
 theorem countedDiverged_run : (lts 0).MTr c0
     [.count 0 1, .append 0, .replicate 1, .restartPartial 0 0, .count 0 1] counted4 :=
   .stepL (Step.count c0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (Step.append counted0 0 (by decide) (writable_zero counted0 0) (by decide)) <|
+  .stepL (Step.append counted0 0 (by decide) (writable_zero counted0 0)) <|
   .stepL (Step.replicate counted1 1 (by decide) (by decide) (by decide)) <|
   .stepL (Step.restartPartialKeep counted2 0 0 (by decide) (by decide) (by decide)) <|
   .stepL (Step.count counted3 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|

@@ -55,8 +55,7 @@ theorem restartNoDemotionWait_run : (leaseLTSRestartNoDemotionWait 0 P0).MTr l0
   .stepL (LeaseStepRestartNoDemotionWait.restartKeep l6 0 (by decide)) <|
   .stepL (.step (LeaseStep.demote lp7 0 1 (by decide) (by decide) (by decide) (by decide)
     (by decide))) <|
-  .stepL (.step (LeaseStep.core lp8 _ _ (Step.append lp8.core 0 (by decide) (writable_zero _ _)
-    (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lp8 _ _ (Step.append lp8.core 0 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.core lp9 _ _ (Step.commit lp9.core 0 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .refl

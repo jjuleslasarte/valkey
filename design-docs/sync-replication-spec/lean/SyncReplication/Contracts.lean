@@ -22,9 +22,10 @@ variable {Node : Type} [DecidableEq Node] {s : State Node}
 /-! ## Takeover(n)
 
 An eligible replica `n` becomes primary in a new configuration. Logs do not move. `n`
-starts a new primaryship: its sync replica set is the matching eligible replicas,
+starts a new primaryship: its sync replica set is the eligible replicas,
 its acknowledgements and commit point are reset, and its catch-up point is the end of
-its log, so it reconciles before it serves. Every other node keeps its state,
+its log, so it commits what it inherited before anything it appends afterwards, and
+serves no linearizable read before that. Every other node keeps its state,
 including the old primary, which is
 not told. -/
 
@@ -57,10 +58,9 @@ theorem takeover_commit_other {x : Node} (hx : x ≠ n) : (takeover s n).commit 
 /-- The new primary must commit its whole inherited log before it serves. -/
 theorem takeover_inheritedEnd_self : (takeover s n).inheritedEnd n = (s.log n).length := by simp [takeover]
 
-/-- The new primary counts exactly the eligible replicas of the new configuration
-whose recorded incarnation matches. -/
+/-- The new primary counts exactly the eligible replicas of the new configuration. -/
 theorem takeoverSync_iff (x : Node) :
-    takeoverSync s n x = true ↔ takeoverEligible s n x = true ∧ s.cfg.incarnation x = s.incarnation x := by
+    takeoverSync s n x = true ↔ takeoverEligible s n x = true := by
   simp [takeoverSync]
 
 /-- The new primary does not count itself. -/

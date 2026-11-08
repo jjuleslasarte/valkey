@@ -53,7 +53,7 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermLe s) {m : Na
     ∀ x t, t ≤ s.cfg.version → ThinksPrimary s' x → s'.term x = t →
       ThinksPrimary s x ∧ s.term x = t ∧ s.log x <+: s'.log x := by
   cases hs with
-  | append p _ _ _ =>
+  | append p _ _ =>
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e =>
       ⟨hp, e, grow_upd s.log p _ x⟩⟩
   | replicate r _ _ _ =>
@@ -67,7 +67,7 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (ht : TermLe s) {m : Na
     split
     · exact List.prefix_append _ _
     · exact List.prefix_refl _
-  | uncount p r _ _ _ _ =>
+  | uncount p r _ _ _ =>
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
   | count p r _ _ _ _ _ =>
     exact ⟨List.prefix_refl _, Nat.le_refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
@@ -206,7 +206,7 @@ theorem replyInvariant_step {a a' : ReplyState Node} (h : ReplyInvariant a) {m :
     {μ : ReplyAction Node} (hs : ReplyStep m a μ a') : ReplyInvariant a' := by
   cases hs with
   | core _ c hc hμ => exact replyInvariant_core h hc hμ
-  | write p _ _ _ => exact replyInvariant_write h p
+  | write p _ _ => exact replyInvariant_write h p
   | release x hm hc hf => exact replyInvariant_release h x hm hc hf
   | abort x _ _ => exact replyInvariant_abort h x
   | restartEmpty n hkl hsurv =>

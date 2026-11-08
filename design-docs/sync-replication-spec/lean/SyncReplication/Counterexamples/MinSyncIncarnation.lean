@@ -31,7 +31,7 @@ def WritableNoInc (m : Nat) (s : State N) (p : N) : Prop :=
 /-- `Step`, with AppendWrite and Commit guarded by `WritableNoInc`. -/
 inductive StepNoIncWritable (m : Nat) : State N → Action N → State N → Prop
   | step {s μ s'} : Step m s μ s' → StepNoIncWritable m s μ s'
-  | append (s : State N) (p : N) : ThinksPrimary s p → WritableNoInc m s p → Reconciled s p →
+  | append (s : State N) (p : N) : ThinksPrimary s p → WritableNoInc m s p →
       StepNoIncWritable m s (.append p) (appendWrite s p)
   | commit (s : State N) (p : N) : ThinksPrimary s p → WritableNoInc m s p →
       s.commit p < (s.log p).length → (∀ r, s.sync p r = true → s.commit p < s.acked p r) →
@@ -69,7 +69,7 @@ theorem noIncWritable_run : (ltsNoIncWritable 1).MTr c0
   .stepL (.step (Step.ack w9 1 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.count w10 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (StepNoIncWritable.append w11 0 (by decide)
-    (writableNoInc_one (s := w11) (r := 1) (by decide) (by decide)) (by decide)) <|
+    (writableNoInc_one (s := w11) (r := 1) (by decide) (by decide))) <|
   .stepL (.step (Step.replicate w12 1 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.ack w13 1 (by decide) (by decide) (by decide))) <|
   .refl

@@ -170,10 +170,8 @@ theorem grantSync_run : (leaseLTSGrantSync 0 P0).MTr l0
   .stepL (.step (LeaseStep.ackRenew lu2 2 (by decide) (by decide))) <|
   .stepL (LeaseStepGrantSync.heartbeatGrant lu3 2 (by decide) (by decide) (by decide) (by decide)
     (by decide)) <|
-  .stepL (.step (LeaseStep.core lu4 _ _ (Step.uncount lu4.core 0 2 (by decide) (by decide) (by decide)
-    (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core lu5 _ _ (Step.append lu5.core 0 (by decide) (writable_zero _ _)
-    (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lu4 _ _ (Step.uncount lu4.core 0 2 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lu5 _ _ (Step.append lu5.core 0 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.core lu6 _ _ (Step.commit lu6.core 0 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .refl
@@ -188,17 +186,16 @@ theorem grantSync_stale : ∃ a, (leaseLTSGrantSync 0 P0).CanReach (leaseInit 0)
 /-! ## Granting a read lease to an eligible sync member with a stale incarnation
 
 A replica that restarted empty stays listed as eligible until demoted, and may be
-counted again once it catches up. It is not authoritative: a takeover does not count it
-and so never waits for it. If it could be granted a read lease, a new primary could
-commit without it while the lease is still valid.
+counted again once it catches up. It is not authoritative: a primary that restarts with
+its data rebuilds its sync replica set from the eligible replicas with a matching
+incarnation (`rebuiltSync`), so it drops that replica and never waits for it. If it
+could be granted a read lease, the restarted primary could commit without it while the
+lease is still valid.
 
 The run uses `P3`: primary lease 6, read lease 3, drift 1, margin 2, which satisfies
 the design's "Lease durations" rule (`readDur + margin < primDur`) and the margin bound.
-The grant must come as late as the granting primary's own lease allows: at time `g` the
-primary needs `g + margin < traffic + primDur + drift` from the future taker, and the
-taker may move once `traffic + primDur ≤ T + drift`, so the gap between grant and
-takeover is only `margin - 2 · drift`. With integer ticks the stale read then needs
-`readDur ≥ 3` and nothing about `primDur`. -/
+`P3` is what lets the old primary still hold its lease from n2 at time 4, when it grants;
+with `P0` (primary lease 5) the grant is refused. -/
 
 /-- Primary lease 6, read lease 3, drift 1, margin 2: within the design's duration rule. -/
 def P3 : LeaseParams := ⟨6, 3, 1, 2⟩
@@ -232,16 +229,26 @@ def li14 := tick li13                               -- now = 4: the last tick at
 def li15 := recvData li14 1 li14.core none          -- a heartbeat reaches n1
 def li16 := recvAck li15 1 li15.core                -- n1 acknowledges
 def li17 := recvData li16 1 li16.core (li16.ackEcho 0 1)  -- n0 echoes it: n1's read lease starts at 4
-def li18 := tick li17                               -- now = 5
-def li19 := leaseTakeover li18 2                        -- n2's wait is over: 0 + 6 ≤ 5 + 1; n1 is not counted
-def li20 := withCore li19 (appendWrite li19.core 2) -- n2 writes
-def li21 := withCore li20 (commitNext li20.core 2)  -- n2 commits alone: the history is [4]
+/-- n0 restarts with its data: its sync replica set is rebuilt as `{n2}`, since n1's
+recorded incarnation is stale. -/
+def li18 := leaseRestart li17 0 (restartKeep li17.core 0)
+/-- n0 writes. -/
+def li19 := withCore li18 (appendWrite li18.core 0)
+/-- n2 copies the write. -/
+def li20 := recvData li19 2 (replicate li19.core 2) none
+/-- n2 acknowledges it. -/
+def li21 := recvAck li20 2 (ack li20.core 2)
+/-- n0 commits with n2 alone, at time 4: the history is `[1]`, and n1's read lease is
+still valid. -/
+def li22 := withCore li21 (commitNext li21.core 0)
 
-theorem grantNoInc_run : (leaseLTSGrantNoInc 0 P3).MTr l0
+/-- The run; the label list is its trace. Only `heartbeat 1` (the grant to n1) is the
+weakened action. -/
+theorem grantNoIncRestart_run : (leaseLTSGrantNoInc 0 P3).MTr l0
     [.core (.count 0 1), .core (.makeEligible 0 1), .core (.count 0 2), .core (.makeEligible 0 2),
      .learn 1, .learn 2, .heartbeat 2, .ack 2, .restartEmpty 1, .core (.count 0 1),
-     .tick, .tick, .tick, .tick, .heartbeat 1, .ack 1, .heartbeat 1, .tick,
-     .takeover 2, .core (.append 2), .core (.commit 2)] li21 :=
+     .tick, .tick, .tick, .tick, .heartbeat 1, .ack 1, .heartbeat 1,
+     .restartKeep 0, .core (.append 0), .replicate 2, .ack 2, .core (.commit 0)] li22 :=
   .stepL (.step (LeaseStep.core l0 _ _ (Step.count l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (LeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
@@ -263,20 +270,21 @@ theorem grantNoInc_run : (leaseLTSGrantNoInc 0 P3).MTr l0
   .stepL (.step (LeaseStep.ackRenew li15 1 (by decide) (by decide))) <|
   .stepL (LeaseStepGrantNoInc.heartbeatGrant li16 1 (by decide) (by decide) (by decide) (by decide)
     (by decide) (by decide)) <|
-  .stepL (.step (LeaseStep.tick li17)) <|
-  .stepL (.step (LeaseStep.takeover li18 2 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.core li19 _ _ (Step.append li19.core 2 (by decide) (writable_zero _ _)
-    (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li20 _ _ (Step.commit li20.core 2 (by decide) (writable_zero _ _)
+  .stepL (.step (LeaseStep.restartKeep li17 0 (by decide))) <|
+  .stepL (.step (LeaseStep.core li18 _ _ (Step.append li18.core 0 (by decide) (writable_zero _ _)) rfl)) <|
+  .stepL (.step (LeaseStep.replicate li19 2 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (LeaseStep.ack li20 2 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (LeaseStep.core li21 _ _ (Step.commit li21.core 0 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .refl
 
 /-- The incarnation match in `MayGrant` is needed, within the design's duration rule: a
-restarted-empty replica that is granted a read lease is never waited for by a new
-primary, and serves a stale read. -/
-theorem grantNoInc_stale : ∃ a, (leaseLTSGrantNoInc 0 P3).CanReach (leaseInit 0) a ∧
+restarted-empty replica that is granted a read lease is dropped from the sync replica
+set by a primary that restarts with its data, and serves a stale read once that primary
+commits without it. -/
+theorem grantNoIncRestart_stale : ∃ a, (leaseLTSGrantNoInc 0 P3).CanReach (leaseInit (0 : N)) a ∧
     ReplCanRead P3 a 1 ∧ a.core.log 1 ≠ a.core.hist :=
-  ⟨li21, ⟨_, grantNoInc_run⟩, by decide, by decide⟩
+  ⟨li22, ⟨_, grantNoIncRestart_run⟩, by decide, by decide⟩
 
 /-! ## Takeover without waiting out the primary lease -/
 
@@ -299,7 +307,7 @@ theorem noWaitPrim_run : (leaseLTSNoWaitPrim 0 P0).MTr l0
      .takeover 1, .core (.append 1), .core (.commit 1)] lw8 :=
   LTS.MTr.comp (leaseLTSNoWaitPrim 0 P0) (leaseMtr_of_step LeaseStepNoWaitPrim.step (leases_prefix P0)) <|
   .stepL (LeaseStepNoWaitPrim.takeover l5 1 (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (.step (LeaseStep.core lw6 _ _ (Step.append lw6.core 1 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lw6 _ _ (Step.append lw6.core 1 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.core lw7 _ _ (Step.commit lw7.core 1 (by decide) (writable_zero _ _) (by decide)
     (by decide)) rfl)) <|
   .refl
@@ -333,7 +341,7 @@ theorem noWaitRead_run : (leaseLTSNoWaitRead 0 P0).MTr l0
   LTS.MTr.comp (leaseLTSNoWaitRead 0 P0) (leaseMtr_of_step LeaseStepNoWaitRead.step (leases_prefix P0)) <|
   .stepL (.step (LeaseStep.heartbeatGrant l5 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (LeaseStepNoWaitRead.demote ld6 0 1 (by decide) (by decide) (by decide)) <|
-  .stepL (.step (LeaseStep.core ld7 _ _ (Step.append ld7.core 0 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core ld7 _ _ (Step.append ld7.core 0 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.core ld8 _ _ (Step.commit ld8.core 0 (by decide) (writable_zero _ _) (by decide)
     (by decide)) rfl)) <|
   .refl
@@ -364,7 +372,7 @@ theorem smallMargin_run : (leaseLTS 0 P1).MTr l0
   LTS.MTr.comp (leaseLTS 0 P1) (leases_prefix P1) <|
   .stepL (LeaseStep.tick l5) <| .stepL (LeaseStep.tick ls6) <| .stepL (LeaseStep.tick ls7) <| .stepL (LeaseStep.tick ls8) <|
   .stepL (LeaseStep.takeover ls9 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (LeaseStep.core ls10 _ _ (Step.append ls10.core 1 (by decide) (writable_zero _ _) (by decide)) rfl) <|
+  .stepL (LeaseStep.core ls10 _ _ (Step.append ls10.core 1 (by decide) (writable_zero _ _)) rfl) <|
   .stepL (LeaseStep.core ls11 _ _ (Step.commit ls11.core 1 (by decide) (writable_zero _ _) (by decide)
     (by decide)) rfl) <|
   .refl
@@ -399,7 +407,7 @@ theorem grantAny_run : (leaseLTSGrantAny 0 P0).MTr l0
   .stepL (.step (LeaseStep.heartbeat l0 2 (by decide) (by decide))) <|
   .stepL (.step (LeaseStep.ackRenew lg1 2 (by decide) (by decide))) <|
   .stepL (LeaseStepGrantAny.heartbeatGrant lg2 2 (by decide) (by decide) (by decide) (by decide)) <|
-  .stepL (.step (LeaseStep.core lg3 _ _ (Step.append lg3.core 0 (by decide) (writable_zero _ _) (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lg3 _ _ (Step.append lg3.core 0 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.core lg4 _ _ (Step.commit lg4.core 0 (by decide) (writable_zero _ _) (by decide)
     (by decide)) rfl)) <|
   .refl

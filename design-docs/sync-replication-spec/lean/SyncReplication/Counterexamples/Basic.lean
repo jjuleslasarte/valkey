@@ -28,8 +28,6 @@ instance (s : State N) (p : N) : Decidable (KnowsLatest s p) := by
   unfold KnowsLatest; infer_instance
 instance (s : State N) (n : N) : Decidable (IsAuthoritative s n) := by
   unfold IsAuthoritative; infer_instance
-instance (s : State N) (p : N) : Decidable (Reconciled s p) := by
-  unfold Reconciled; infer_instance
 
 /-- `Writable 1` from one counted replica. -/
 theorem writable_one {s : State N} {p r : N} (hs : s.sync p r = true)
@@ -67,7 +65,7 @@ theorem committed_run : (lts 1).MTr c0
   .stepL (Step.count c0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.makeEligible c1 0 1 (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.append c2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
-    (by decide)) (by decide)) <|
+    (by decide))) <|
   .stepL (Step.replicate c3 1 (by decide) (by decide) (by decide)) <|
   .stepL (Step.ack c4 1 (by decide) (by decide) (by decide)) <|
   .stepL (Step.commit c5 0 (by decide) (writable_one (r := 1) (by decide) (by decide)

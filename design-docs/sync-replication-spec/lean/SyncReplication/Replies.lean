@@ -82,7 +82,7 @@ inductive ReplyStep (m : Nat) : ReplyState Node → ReplyAction Node → ReplySt
   | core (a : ReplyState Node) (μ : Action Node) (c : State Node) : Step m a.core μ c →
       μ.isRestart = false → ReplyStep m a (.core μ) ⟨c, a.held, a.acknowledged⟩
   | write (a : ReplyState Node) (p : Node) : ThinksPrimary a.core p → Writable m a.core p →
-      Reconciled a.core p → ReplyStep m a (.write p) (write a p)
+      ReplyStep m a (.write p) (write a p)
   | release (a : ReplyState Node) (h : Held Node) : h ∈ a.held → h.offset ≤ a.core.commit h.primary →
       ReplyFenced a.core h → ReplyStep m a (.release h) (release a h)
   | abort (a : ReplyState Node) (h : Held Node) : h ∈ a.held → ¬ ReplyFenced a.core h →

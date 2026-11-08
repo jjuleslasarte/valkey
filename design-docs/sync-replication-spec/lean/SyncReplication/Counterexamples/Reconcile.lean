@@ -51,7 +51,7 @@ theorem noReconcile_run : (ltsNoReconcile 1).MTr r0
   .stepL (.step (Step.count r0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible r1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append r2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
-    (by decide)) (by decide))) <|
+    (by decide)))) <|
   .stepL (.step (Step.learn r3 1 (by decide))) <|
   .stepL (.step (Step.replicate r4 1 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.ack r5 1 (by decide) (by decide) (by decide))) <|

@@ -22,7 +22,7 @@ namespace SyncReplication
 /-- `Step`, plus Uncount of any counted replica, eligible or not. -/
 inductive StepUncountElig (m : Nat) : State N → Action N → State N → Prop
   | step {s μ s'} : Step m s μ s' → StepUncountElig m s μ s'
-  | uncount (s : State N) (p r : N) : ThinksPrimary s p → KnowsLatest s p → s.sync p r = true →
+  | uncount (s : State N) (p r : N) : ThinksPrimary s p → s.sync p r = true →
       StepUncountElig m s (.uncount p r) (uncount s p r)
 
 /-- The weakened protocol as a transition system. -/
@@ -50,10 +50,10 @@ theorem uncountElig_run : (ltsUncountElig 1).MTr u0
   .stepL (.step (Step.count u2 0 2 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible u3 0 2 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append u4 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
-    (by decide)) (by decide))) <|
+    (by decide)))) <|
   .stepL (.step (Step.replicate u5 2 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.ack u6 2 (by decide) (by decide) (by decide))) <|
-  .stepL (StepUncountElig.uncount u7 0 1 (by decide) (by decide) (by decide)) <|
+  .stepL (StepUncountElig.uncount u7 0 1 (by decide) (by decide)) <|
   .stepL (.step (Step.commit u8 0 (by decide) (writable_one (r := 2) (by decide) (by decide)
     (by decide)) (by decide) (by decide))) <|
   .refl

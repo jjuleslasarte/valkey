@@ -93,8 +93,7 @@ theorem takeoverNoDemotionWait_run : (leaseLTSTakeoverNoDemotionWait 0 P3).MTr l
     (by decide) (by decide)) <|
   .stepL (.step (LeaseStep.demote lt19 1 2 (by decide) (by decide) (by decide) (by decide)
     (by decide))) <|
-  .stepL (.step (LeaseStep.core lt20 _ _ (Step.append lt20.core 1 (by decide) (writable_zero _ _)
-    (by decide)) rfl)) <|
+  .stepL (.step (LeaseStep.core lt20 _ _ (Step.append lt20.core 1 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.core lt21 _ _ (Step.commit lt21.core 1 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .refl

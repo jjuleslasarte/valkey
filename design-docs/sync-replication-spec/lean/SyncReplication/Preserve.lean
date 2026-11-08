@@ -27,12 +27,12 @@ variable {Node : Type} [DecidableEq Node]
 theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Invariant s) (hs : Step m s μ s') :
     Invariant s' := by
   cases hs with
-  | append p _ _ _ => exact invariant_append h p
+  | append p _ _ => exact invariant_append h p
   | replicate r _ _ _ => exact invariant_replicate h r
   | ack r hne hpre hlt => exact invariant_ack h r hne hpre hlt
   | commit p hp _ hlen hcap => exact invariant_commit h p hp hlen hcap
   | count p r hp hrp hf _ hle => exact invariant_count h p r hp hrp hf hle
-  | uncount p r hp hkl hsy hel => exact invariant_uncount h p r hp hkl hsy hel
+  | uncount p r hp hsy hel => exact invariant_uncount h p r hp hsy hel
   | makeEligible p r hp hkl hsy hel => exact invariant_makeEligible h hp hkl hsy hel
   | makeIneligible p r hp hkl hel => exact invariant_makeIneligible h hp hkl hel
   | learn n hnkl => exact invariant_learn h n hnkl

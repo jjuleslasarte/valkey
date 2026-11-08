@@ -109,7 +109,6 @@ structure LeaseInvariant (P : LeaseParams) (a : LeaseState Node) : Prop where
   /-- Every recorded time is in the past. -/
   primaryTrafficLe : ∀ r, a.primaryTraffic r ≤ a.now
   ackReceivedLe  : ∀ p r b, a.ackReceived p r = some b → b ≤ a.now
-  readLeaseLe       : ∀ r x, a.readLease r = some x → x ≤ a.now
   primarySinceLe      : ∀ p T, a.primarySince p = some T → T ≤ a.now
   /-- The data a replica would acknowledge was sent no later than its last traffic. -/
   dataSentLe    : ∀ r, a.dataSent r ≤ a.primaryTraffic r
@@ -146,11 +145,20 @@ structure LeaseInvariant (P : LeaseParams) (a : LeaseState Node) : Prop where
   committedViewLen   : ∀ r, a.committedView r ≤ (a.core.log r).length
   committedViewHist  : ∀ r, a.committedView r ≤ a.core.hist.length ∧ (a.core.log r).take (a.committedView r) <+: a.core.hist
 
+/-- Every read lease started in the past. A lease is bounded by an acknowledgement time
+or a primaryship start (`leaseBound`), and both are in the past (`ackReceivedLe`,
+`primarySinceLe`). Formerly a conjunct of `LeaseInvariant`. -/
+theorem LeaseInvariant.readLeaseLe {P : LeaseParams} {a : LeaseState Node} (h : LeaseInvariant P a) :
+    ∀ r x, a.readLease r = some x → x ≤ a.now := by
+  intro r x hx
+  rcases h.leaseBound r x hx with ⟨b, hb, hxb⟩ | ⟨T, hT, hxT, _⟩
+  · exact hxb.trans (h.ackReceivedLe _ r b hb)
+  · exact hxT.trans (h.primarySinceLe _ T hT)
+
 theorem leaseInvariant_init (P : LeaseParams) (i : Node) : LeaseInvariant P (leaseInit i) where
   core := invariant_init i
   primaryTrafficLe := fun _ => Nat.le_refl _
   ackReceivedLe := by intro _ _ _ h; simp [leaseInit] at h
-  readLeaseLe := by intro _ _ h; simp [leaseInit] at h
   primarySinceLe := by intro _ _ h; simp [leaseInit] at h
   dataSentLe := fun _ => Nat.le_refl _
   primaryLeaseLe := by intro _ _ _ h; simp [leaseInit] at h
@@ -240,7 +248,6 @@ theorem leaseInvariant_tick : LeaseInvariant P (tick a) where
   core := h.core
   primaryTrafficLe := fun r => Nat.le_succ_of_le (h.primaryTrafficLe r)
   ackReceivedLe := fun p r b hb => Nat.le_succ_of_le (h.ackReceivedLe p r b hb)
-  readLeaseLe := fun r x hx => Nat.le_succ_of_le (h.readLeaseLe r x hx)
   primarySinceLe := fun p T hT => Nat.le_succ_of_le (h.primarySinceLe p T hT)
   dataSentLe := h.dataSentLe
   primaryLeaseLe := h.primaryLeaseLe
@@ -344,16 +351,13 @@ keeps the bookkeeping conjuncts about lease, acknowledgement and primaryship tim
 theorem cleared_rows {a' : LeaseState Node} (n : Node) (hnow : a'.now = a.now)
     (hAR : a'.ackReceived = update a.ackReceived n (fun _ => none))
     (hAE : a'.ackEcho = update a.ackEcho n (fun _ => none))
-    (hRL : a'.readLease = update a.readLease n none)
     (hPS : a'.primarySince = update a.primarySince n (some a.now)) :
     (∀ p r b, a'.ackReceived p r = some b → b ≤ a'.now) ∧
-    (∀ r x, a'.readLease r = some x → x ≤ a'.now) ∧
     (∀ p T, a'.primarySince p = some T → T ≤ a'.now) ∧
     (∀ p r e, a'.ackEcho p r = some e → ∃ b, a'.ackReceived p r = some b ∧ e ≤ b) ∧
     (∀ p r T b, a'.primarySince p = some T → a'.ackReceived p r = some b → T ≤ b) := by
-  rw [hnow, hAR, hAE, hRL, hPS]
-  refine ⟨fun q x b hb => h.ackReceivedLe q x b (update_row_some _ _ _ _ hb).2,
-    fun x v hx => h.readLeaseLe x v (update_none_some _ _ _ hx).2, ?_, ?_, ?_⟩
+  rw [hnow, hAR, hAE, hPS]
+  refine ⟨fun q x b hb => h.ackReceivedLe q x b (update_row_some _ _ _ _ hb).2, ?_, ?_, ?_⟩
   · intro q T hT
     by_cases e : q = n
     · subst e; rw [update_self] at hT; cases hT; exact Nat.le_refl _
@@ -385,7 +389,6 @@ theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core)
   core := hc
   primaryTrafficLe := fun r => by rw [hnow]; exact (hPT r).2
   ackReceivedLe := by rw [hAR, hnow]; exact h.ackReceivedLe
-  readLeaseLe := by rw [hRL, hnow]; exact h.readLeaseLe
   primarySinceLe := by rw [hPS, hnow]; exact h.primarySinceLe
   dataSentLe := hDS
   primaryLeaseLe := by
@@ -442,7 +445,7 @@ theorem leaseInvariant_makeEligible {p r : Node} (hp : ThinksPrimary a.core p)
   have htp := makeEligible_thinksPrimary (s := a.core) (r := r) hkp hrp
   exact {
   core := invariant_makeEligible h.core hp hkl hs hel
-  primaryTrafficLe := h.primaryTrafficLe, ackReceivedLe := h.ackReceivedLe, readLeaseLe := h.readLeaseLe, primarySinceLe := h.primarySinceLe
+  primaryTrafficLe := h.primaryTrafficLe, ackReceivedLe := h.ackReceivedLe, primarySinceLe := h.primarySinceLe
   dataSentLe := h.dataSentLe, primaryLeaseLe := h.primaryLeaseLe, echoLe := h.echoLe, primarySinceAck := h.primarySinceAck
   deposed := fun q hq hv => deposed_cfgBump h rfl makeEligible_known rfl rfl htp hq hv
   leaseBound := h.leaseBound
@@ -466,7 +469,7 @@ theorem leaseInvariant_makeEligible {p r : Node} (hp : ThinksPrimary a.core p)
 theorem leaseInvariant_core {m : Nat} {μ : Action Node} {c : State Node} (hs : Step m a.core μ c)
     (hpl : μ.isPlain = true) : LeaseInvariant P (withCore a c) := by
   cases hs
-  case append p _ _ _ =>
+  case append p _ _ =>
     refine leaseInvariant_withCore h (invariant_append h.core p) rfl rfl rfl ?_ (List.prefix_refl _)
     intro x; show a.core.log x <+: update a.core.log p (a.core.log p ++ _) x
     unfold update; split_ifs with e
@@ -482,8 +485,8 @@ theorem leaseInvariant_core {m : Nat} {μ : Action Node} {c : State Node} (hs : 
   case count p r hp hrp hf _ hle =>
     exact leaseInvariant_withCore h (invariant_count h.core p r hp hrp hf hle) rfl rfl rfl
       (fun _ => List.prefix_refl _) (List.prefix_refl _)
-  case uncount p r hp hkl hsy hel =>
-    exact leaseInvariant_withCore h (invariant_uncount h.core p r hp hkl hsy hel) rfl rfl rfl
+  case uncount p r hp hsy hel =>
+    exact leaseInvariant_withCore h (invariant_uncount h.core p r hp hsy hel) rfl rfl rfl
       (fun _ => List.prefix_refl _) (List.prefix_refl _)
   case makeEligible p r hp hkl hsy hel => exact leaseInvariant_makeEligible h hp hkl hsy hel
   -- the remaining actions are not plain
@@ -607,12 +610,6 @@ theorem leaseInvariant_heartbeatGrant {r : Node} (hne : primaryOf a.core r ≠ r
     primaryTrafficLe := hbase.primaryTrafficLe, ackReceivedLe := hbase.ackReceivedLe, primarySinceLe := hbase.primarySinceLe
     dataSentLe := hbase.dataSentLe, primaryLeaseLe := hbase.primaryLeaseLe, echoLe := hbase.echoLe, primarySinceAck := hbase.primarySinceAck
     deposed := hbase.deposed
-    readLeaseLe := by
-      intro x v hx; show v ≤ a.now
-      change update a.readLease r (some (maxOpt (a.readLease r) e)) x = some v at hx
-      unfold update at hx; split_ifs at hx
-      · cases hx; exact Nat.le_trans hmax' hbn
-      · exact h.readLeaseLe x v hx
     leaseBound := by
       intro x v hx
       change update a.readLease r (some (maxOpt (a.readLease r) e)) x = some v at hx
@@ -654,7 +651,7 @@ theorem leaseInvariant_recvAck {r : Node} {c : State Node} (hc : Invariant c)
   have hPL : (recvAck a r c).primaryLease = update2 a.primaryLease p r (some (maxOpt (a.primaryLease p r) (a.dataSent r))) := rfl
   exact {
   core := hc
-  primaryTrafficLe := h.primaryTrafficLe, readLeaseLe := h.readLeaseLe, primarySinceLe := h.primarySinceLe, dataSentLe := h.dataSentLe
+  primaryTrafficLe := h.primaryTrafficLe, primarySinceLe := h.primarySinceLe, dataSentLe := h.dataSentLe
   ackReceivedLe := by
     intro q x b hb; rw [hAR] at hb
     by_cases e : q = p ∧ x = r
@@ -732,7 +729,7 @@ theorem leaseInvariant_learn {n : Node} (hnkl : ¬ KnowsLatest a.core n) :
   exact {
   core := invariant_learn h.core n hnkl
   primaryTrafficLe := fun x => (hPT x).2
-  ackReceivedLe := h.ackReceivedLe, readLeaseLe := h.readLeaseLe, primarySinceLe := h.primarySinceLe
+  ackReceivedLe := h.ackReceivedLe, primarySinceLe := h.primarySinceLe
   dataSentLe := fun x => Nat.le_trans (h.dataSentLe x) (hPT x).1
   primaryLeaseLe := fun p x v hv => Nat.le_trans (h.primaryLeaseLe p x v hv) (hPT x).1
   echoLe := h.echoLe, primarySinceAck := h.primarySinceAck
@@ -796,7 +793,7 @@ theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hkl : 
   have htp := makeIneligible_thinksPrimary (s := a.core) (r := r) hkp
   exact {
   core := invariant_makeIneligible h.core hp hkl hel
-  primaryTrafficLe := h.primaryTrafficLe, ackReceivedLe := h.ackReceivedLe, readLeaseLe := h.readLeaseLe, primarySinceLe := h.primarySinceLe
+  primaryTrafficLe := h.primaryTrafficLe, ackReceivedLe := h.ackReceivedLe, primarySinceLe := h.primarySinceLe
   dataSentLe := h.dataSentLe, primaryLeaseLe := h.primaryLeaseLe, echoLe := h.echoLe, primarySinceAck := h.primarySinceAck
   deposed := fun q hq hv => deposed_cfgBump h rfl makeIneligible_known rfl rfl htp hq hv
   leaseBound := h.leaseBound
@@ -828,11 +825,11 @@ theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a
     LeaseInvariant P (leaseTakeover a n) := by
   have hK := takeover_known (s := a.core) (n := n)
   have htp := takeover_thinksPrimary (s := a.core) hin
-  obtain ⟨hAR, hRL, hPS, hAE, hPA⟩ := cleared_rows h (a' := leaseTakeover a n) n rfl rfl rfl rfl rfl
+  obtain ⟨hAR, hPS, hAE, hPA⟩ := cleared_rows h (a' := leaseTakeover a n) n rfl rfl rfl rfl
   exact {
   core := invariant_takeover h.core n hkl hel hnp hin
   primaryTrafficLe := h.primaryTrafficLe, dataSentLe := h.dataSentLe
-  ackReceivedLe := hAR, readLeaseLe := hRL, primarySinceLe := hPS, echoLe := hAE, primarySinceAck := hPA
+  ackReceivedLe := hAR, primarySinceLe := hPS, echoLe := hAE, primarySinceAck := hPA
   primaryLeaseLe := fun q x v hv => h.primaryLeaseLe q x v (update_row_some _ _ _ _ hv).2
   deposed := by
     intro q hq hv
@@ -930,12 +927,12 @@ theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c)
     (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hhist : c.hist = a.core.hist) :
     LeaseInvariant P (leaseRestart a n c) := by
   have hPT := primaryTraffic_bump h n
-  obtain ⟨hAR, hRL, hPS, hAE, hPA⟩ := cleared_rows h (a' := leaseRestart a n c) n rfl rfl rfl rfl rfl
+  obtain ⟨hAR, hPS, hAE, hPA⟩ := cleared_rows h (a' := leaseRestart a n c) n rfl rfl rfl rfl
   obtain ⟨hCV, hCH⟩ := committedView_reset h n hlog hhist
   exact {
   core := hc
   primaryTrafficLe := fun x => (hPT x).2
-  ackReceivedLe := hAR, readLeaseLe := hRL, primarySinceLe := hPS, echoLe := hAE, primarySinceAck := hPA
+  ackReceivedLe := hAR, primarySinceLe := hPS, echoLe := hAE, primarySinceAck := hPA
   primaryLeaseLe := fun q x v hv =>
     Nat.le_trans (h.primaryLeaseLe q x v (update_row_some _ _ _ _ hv).2) (hPT x).1
   dataSentLe := by

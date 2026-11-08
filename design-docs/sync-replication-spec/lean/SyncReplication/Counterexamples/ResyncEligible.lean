@@ -18,8 +18,10 @@ recorded incarnation, so it is authoritative and lacks the committed write.
 The resync source n0 is still the configuration's primary but no longer thinks it is
 primary (its recorded incarnation is stale); the model's Resync does not ask the source
 to think it is primary. So the run shows that some guard is needed, not that it must be
-this one: with Resync also requiring that the source thinks it is primary, this run is
-blocked, and whether the eligibility guard is then still needed is open.
+this one: Resync requiring a source that thinks it is primary, with no eligibility
+guard, also keeps every theorem (a scratch build, not in the repository), at the cost of one more invariant
+conjunct (a deposed primary's configuration records the current incarnation of each
+authoritative eligible replica that follows it).
 -/
 
 open Cslib

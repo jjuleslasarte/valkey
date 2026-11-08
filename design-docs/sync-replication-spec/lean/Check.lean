@@ -1,6 +1,7 @@
 import SyncReplication
 #print axioms SyncReplication.safety
 #print axioms SyncReplication.commit_two_copies
+#print axioms SyncReplication.committed_inherited_first
 #print axioms SyncReplication.ackSafety
 #print axioms SyncReplication.ackedHeld
 #print axioms SyncReplication.noReconcile_unsafe
@@ -14,7 +15,6 @@ import SyncReplication
 #print axioms SyncReplication.uncountElig_unsafe
 #print axioms SyncReplication.noCatchUp_unsafe
 #print axioms SyncReplication.resyncEligible_unsafe
-#print axioms SyncReplication.uncountDeposed_unsafe
 #print axioms SyncReplication.countedDiverged_reachable
 #print axioms SyncReplication.noStaleRead
 #print axioms SyncReplication.lease_safety
@@ -25,9 +25,10 @@ import SyncReplication
 #print axioms SyncReplication.primCanRead_reachable
 #print axioms SyncReplication.replCanRead_reachable
 #print axioms SyncReplication.grantSync_stale
-#print axioms SyncReplication.grantNoInc_stale
+#print axioms SyncReplication.grantNoIncRestart_stale
 #print axioms SyncReplication.demoteNew_reachable
 #print axioms SyncReplication.restartKeepsReadLease_stale
 #print axioms SyncReplication.restartNoDemotionWait_stale
+#print axioms SyncReplication.restartForgetsTimer_stale
 #print axioms SyncReplication.takeoverNoDemotionWait_stale
 #print axioms SyncReplication.grantWithoutPrimaryLease_stale

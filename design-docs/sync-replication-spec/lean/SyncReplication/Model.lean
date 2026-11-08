@@ -33,7 +33,10 @@ restart without data empties it, and a restart from a stale persistence file kee
 prefix of it. So "holds" is what survives whichever restart the node takes.
 
 The model is the design with its reconciliation and restart rules in place: a new
-primary commits its inherited log before it writes (`Reconciled`), a primary that
+primary counts a replica only once it has acknowledged the inherited log
+(`catchUpPoint`), and since the commit point moves one offset at a time the inherited
+entries commit before any later write commits (`committed_inherited_first`; it may
+accept writes before that), a primary that
 restarts with its data recomputes its sync replica set, the in-memory set of replicas
 whose acknowledgements it waits for, from the eligible set in its configuration rather
 than starting from an empty set (`rebuiltSync`; no data moves), a node keeps its incarnation across a restart only if the data it restores covers
@@ -51,8 +54,8 @@ shows what each of these rules prevents.
   with its current incarnation: `IsAuthoritative s n` is
   `(cfg.eligible n ∨ n = cfg.primary) ∧ cfg.incarnation n = inc n`.
 - Writable counts eligible sync members with a matching incarnation; Takeover checks the new
-  primary's incarnation and counts only the matching eligible replicas; MakeEligible
-  records the replica's incarnation.
+  primary's incarnation and counts every eligible replica (a stale one costs availability,
+  not safety); MakeEligible records the replica's incarnation.
 - Every restart requires KnowsLatest: a node syncs the Cluster V2 log before it
   rejoins (design §6). RestartEmpty is guarded by the survival assumption
   `∃ m, m ≠ n ∧ IsAuthoritative s m`, so it leaves the committed history on some
@@ -117,8 +120,8 @@ structure State (Node : Type) [DecidableEq Node] where
   acked  : Node → Node → Nat
   /-- Each node's commit point. -/
   commit : Node → Nat
-  /-- End of the inherited log: a new primary must commit up to here before taking
-  writes (design §5, reconciliation). `catchUpPoint` is derived from it. -/
+  /-- End of the inherited log: a new primary commits up to here before anything it
+  appends after it (design §5, reconciliation). `catchUpPoint` is derived from it. -/
   inheritedEnd : Node → Nat
   /-- The term each node writes new entries with. -/
   term   : Node → Nat
@@ -163,9 +166,6 @@ def KnowsLatest (s : State Node) (n : Node) : Prop := (s.known n).version = s.cf
 /-- The node `n` believes is primary, according to the configuration `n` knows; the
 one it replicates from. -/
 def primaryOf (s : State Node) (n : Node) : Node := (s.known n).primary
-/-- `p` is reconciled: it has committed up to its catch-up point, so it has committed
-everything it inherited. -/
-def Reconciled (s : State Node) (p : Node) : Prop := s.inheritedEnd p ≤ s.commit p
 /-- `n` is authoritative: in the latest configuration, `n` is the primary or an eligible
 replica, and the incarnation recorded for it is its actual one. These are the nodes
 that must hold the committed history. -/
@@ -245,15 +245,16 @@ def takeoverEligible (s : State Node) (n : Node) : Node → Bool :=
 recorded incarnations unchanged. -/
 def takeoverCfg (s : State Node) (n : Node) : Cfg Node := ⟨s.cfg.version + 1, n, takeoverEligible s n, s.cfg.incarnation⟩
 
-/-- The new primary's sync replica set: the eligible replicas of the new configuration
-whose recorded incarnation matches. -/
+/-- The new primary's sync replica set: every eligible replica of the new configuration.
+A replica whose recorded incarnation is stale is counted too; the new primary then waits
+for it, which costs availability but not safety (it cannot count toward `Writable`). -/
 def takeoverSync (s : State Node) (n : Node) : Node → Bool :=
-  fun x => takeoverEligible s n x && decide (s.cfg.incarnation x = s.incarnation x)
+  fun x => takeoverEligible s n x
 
 /-- Takeover(n): eligible replica `n` becomes primary in a new configuration. Its
-sync set is the matching eligible replicas, its acks and commit point are reset, its
-catch-up point is the end of its log (so it commits what it inherited before it
-writes), and it writes with a new term. -/
+sync set is the eligible replicas of the new configuration, its acks and commit point are reset, its
+catch-up point is the end of its log (so it commits what it inherited before anything
+it writes afterwards), and it writes with a new term. -/
 def takeover (s : State Node) (n : Node) : State Node :=
   { s with cfg := takeoverCfg s n, known := update s.known n (takeoverCfg s n),
            sync := update s.sync n (takeoverSync s n),
@@ -313,7 +314,7 @@ def rebuiltSync (s : State Node) (n : Node) : Node → Bool :=
   fun r => (s.known n).eligible r && decide ((s.known n).incarnation r = s.incarnation r) && decide (r ≠ n)
 
 /-- RestartKeep(n): data and incarnation kept, volatile state lost. `n` must commit
-its whole log again before it serves. If `n` is primary, its sync set is rebuilt from
+its whole log again before it serves reads. If `n` is primary, its sync set is rebuilt from
 the configuration it knows (`rebuiltSync`); otherwise it is empty. -/
 def restartKeep (s : State Node) (n : Node) : State Node :=
   { s with commit := update s.commit n 0,
@@ -357,9 +358,10 @@ def Action.isRestart : Action Node → Bool
 action: its arguments after the state are the guard, and its result is the action's
 label and the post-state. -/
 inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
-  /-- A node that thinks it is primary, has enough sync replicas and has reconciled
-  may append a write. -/
-  | append (s p) : ThinksPrimary s p → Writable m s p → Reconciled s p → Step m s (.append p) (appendWrite s p)
+  /-- A node that thinks it is primary and has enough sync replicas may append a write.
+  It need not have committed its inherited log first: Count and Commit already order
+  the inherited entries before any new one (`committed_inherited_first`). -/
+  | append (s p) : ThinksPrimary s p → Writable m s p → Step m s (.append p) (appendWrite s p)
   /-- A replica whose log is a strict prefix of its primary's may copy the next entry. -/
   | replicate (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
       (s.log r).length < (s.log (primaryOf s r)).length → Step m s (.replicate r) (replicate s r)
@@ -375,12 +377,13 @@ inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
   | count (s p r) : (hp : ThinksPrimary s p) → (hrp : r ≠ p) → (hfollows : primaryOf s r = p) →
       (hsy : s.sync p r = false) → (hcaught : catchUpPoint s p ≤ s.acked p r) →
       Step m s (.count p r) (count s p r)
-  /-- A primary that knows the latest configuration may drop a counted replica that is
-  not yet eligible (design §4: "if the replica falls behind or fails before step 4, the
-  primary simply removes it from the commit calculation"). A deposed primary may not:
-  the member it would drop may be the one whose frozen acknowledgement fences it. -/
-  | uncount (s p r) : (hp : ThinksPrimary s p) → (hkl : KnowsLatest s p) → (hsy : s.sync p r = true) →
-      (hel : s.cfg.eligible r = false) → Step m s (.uncount p r) (uncount s p r)
+  /-- A primary may drop a counted replica that is not eligible in its own configuration
+  (design §4: "if the replica falls behind or fails before step 4, the primary simply
+  removes it from the commit calculation"). It need not know the latest configuration:
+  a deposed primary is fenced only by departed members it lists as eligible, and it
+  cannot drop those. -/
+  | uncount (s p r) : (hp : ThinksPrimary s p) → (hsy : s.sync p r = true) →
+      (hel : (s.known p).eligible r = false) → Step m s (.uncount p r) (uncount s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
   | makeEligible (s p r) : (hp : ThinksPrimary s p) → (hkl : KnowsLatest s p) → (hsy : s.sync p r = true) →
       (hel : s.cfg.eligible r = false) → Step m s (.makeEligible p r) (makeEligible s p r)

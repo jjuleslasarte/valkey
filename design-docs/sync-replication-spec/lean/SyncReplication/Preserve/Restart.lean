@@ -32,10 +32,6 @@ theorem config_restartEmpty : ConfigInvariant (restartEmpty s n) := by
   knownLe := h.knownLe
   knownEq := h.knownEq
   primKnows := h.primKnows
-  incLe := by
-    intro x; show s.cfg.incarnation x ≤ (restartEmpty s n).incarnation x; rw [hI]; split_ifs with e
-    · subst e; have := h.incLe x; omega
-    · exact h.incLe x
   knownIncLe := by
     intro x y; show (s.known x).incarnation y ≤ (restartEmpty s n).incarnation y; rw [hI]; split_ifs with e
     · subst e; have := h.knownIncLe x y; omega
@@ -151,10 +147,6 @@ theorem commit_restartEmpty : CommitInvariant (restartEmpty s n) := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
     · rw [hCo x e, hLo x e]; exact h.commitWithinLog x
-  commitWithinHistory := by
-    intro x; by_cases e : x = n
-    · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.commitWithinHistory x
   committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
@@ -201,7 +193,7 @@ theorem failover_restartEmpty : FailoverInvariant (restartEmpty s n) := by
     have hAp : ∀ r, (restartEmpty s n).acked p r = s.acked p r := by
       intro r; rw [hA, if_neg hpn, if_neg (fun c => hpp c.1)]
     have hF := h.stale p hp' hv
-    refine hF.transfer hSp (fun _ => rfl) (fun r _ => hAp r) (hLo p hpn) rfl
+    refine hF.transfer hSp (fun _ => rfl) rfl (fun r _ => hAp r) (hLo p hpn) rfl
       (fun hq => (hpa hq).2) (fun hq => by rw [hRo _ (hpa hq).1]; exact hF.fenceLeInheritedEnd (hpa hq).2)
       (fun hq => by rw [hLo _ (hpa hq).1]; exact hF.primHolds (hpa hq).2)
       (fun hq => by rw [restartEmpty_ackHigh_other (hpa hq).1]; exact hF.primAck (hpa hq).2) ?_
@@ -345,10 +337,6 @@ theorem commit_restartKeep : CommitInvariant (restartKeep s n) := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
     · rw [hCo x e]; exact h.commitWithinLog x
-  commitWithinHistory := by
-    intro x; by_cases e : x = n
-    · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.commitWithinHistory x
   committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
@@ -382,7 +370,7 @@ theorem failover_restartKeep : FailoverInvariant (restartKeep s n) := by
       have hv' : (s.known p).version < s.cfg.version := hv
       rw [c] at hv'; unfold KnowsLatest at hkl; omega
     have hF := h.stale p hp hv
-    refine hF.transfer (hSo p hpn) (fun _ => rfl)
+    refine hF.transfer (hSo p hpn) (fun _ => rfl) rfl
       (fun r _ => by rw [hAo p hpn]) rfl rfl id ?_ (fun hq => hF.primHolds hq) (fun hq => hF.primAck hq)
       (fun m hm hi => Or.inl ⟨hm, hi, rfl, Nat.le_refl _⟩)
     -- the primary's catch-up point only moves up, to the end of its log
@@ -535,10 +523,6 @@ theorem commit_restartPartialKeep : CommitInvariant (restartPartialKeep s n k) :
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
     · rw [hCo x e, hLo x e]; exact h.commitWithinLog x
-  commitWithinHistory := by
-    intro x; by_cases e : x = n
-    · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.commitWithinHistory x
   committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
@@ -580,7 +564,7 @@ theorem failover_restartPartialKeep : FailoverInvariant (restartPartialKeep s n 
       rw [c] at hv'; unfold KnowsLatest at hkl; omega
     have hF := h.stale p hp hv
     have hpp := stale_ne_prim h hv
-    refine hF.transfer (hSo p hpn) (fun _ => rfl) (fun r _ => by rw [hAo p hpn]) (hLo p hpn) rfl id
+    refine hF.transfer (hSo p hpn) (fun _ => rfl) rfl (fun r _ => by rw [hAo p hpn]) (hLo p hpn) rfl id
       ?_ ?_ (fun hq => hF.primAck hq) ?_
     · -- the fence is within the primary's high-water mark, hence within the kept prefix
       intro hq
@@ -652,10 +636,6 @@ theorem config_restartPartialFresh : ConfigInvariant (restartPartialFresh s n k)
   knownLe := h.knownLe
   knownEq := h.knownEq
   primKnows := h.primKnows
-  incLe := by
-    intro x; show s.cfg.incarnation x ≤ (restartPartialFresh s n k).incarnation x; rw [hI]; split_ifs with e
-    · subst e; have := h.incLe x; omega
-    · exact h.incLe x
   knownIncLe := by
     intro x y; show (s.known x).incarnation y ≤ (restartPartialFresh s n k).incarnation y; rw [hI]; split_ifs with e
     · subst e; have := h.knownIncLe x y; omega
@@ -771,10 +751,6 @@ theorem commit_restartPartialFresh : CommitInvariant (restartPartialFresh s n k)
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; exact Nat.zero_le _
     · rw [hCo x e, hLo x e]; exact h.commitWithinLog x
-  commitWithinHistory := by
-    intro x; by_cases e : x = n
-    · subst e; rw [hCn]; exact Nat.zero_le _
-    · rw [hCo x e]; exact h.commitWithinHistory x
   committedIsHistoryPrefix := by
     intro x; by_cases e : x = n
     · subst e; rw [hCn]; rfl
@@ -821,7 +797,7 @@ theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s 
     have hAp : ∀ r, (restartPartialFresh s n k).acked p r = s.acked p r := by
       intro r; rw [hA, if_neg hpn, if_neg (fun c => hpp c.1)]
     have hF := h.stale p hp' hv
-    refine hF.transfer hSp (fun _ => rfl) (fun r _ => hAp r) (hLo p hpn) rfl
+    refine hF.transfer hSp (fun _ => rfl) rfl (fun r _ => hAp r) (hLo p hpn) rfl
       (fun hq => (hpa hq).2) (fun hq => by rw [hRo _ (hpa hq).1]; exact hF.fenceLeInheritedEnd (hpa hq).2)
       (fun hq => by rw [hLo _ (hpa hq).1]; exact hF.primHolds (hpa hq).2)
       (fun hq => by rw [restartPartialFresh_ackHigh_other (hpa hq).1]; exact hF.primAck (hpa hq).2) ?_

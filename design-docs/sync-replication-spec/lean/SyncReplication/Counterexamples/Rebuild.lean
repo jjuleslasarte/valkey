@@ -49,7 +49,7 @@ theorem noRebuild_run : (ltsNoRebuild 1).MTr d0
   .stepL (.step (Step.count d0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible d1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append d2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
-    (by decide)) (by decide))) <|
+    (by decide)))) <|
   .stepL (StepNoRebuild.restartKeep d3 0 (by decide)) <|
   .stepL (.step (Step.replicate d4 2 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.ack d5 2 (by decide) (by decide) (by decide))) <|

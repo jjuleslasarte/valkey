@@ -54,7 +54,7 @@ theorem noReplyFence_run : (replyLTSNoFence 0).MTr b0
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (ReplyStep.core b1 _ _ (Step.makeEligible b1.core 0 1 (by decide) (by decide) (by decide)
     (by decide)) rfl)) <|
-  .stepL (.step (ReplyStep.write b2 0 (by decide) (writable_zero _ _) (by decide))) <|
+  .stepL (.step (ReplyStep.write b2 0 (by decide) (writable_zero _ _))) <|
   .stepL (.step (ReplyStep.core b3 _ _ (Step.learn b3.core 1 (by decide)) rfl)) <|
   .stepL (.step (ReplyStep.core b4 _ _ (Step.takeover b4.core 1 (by decide) (by decide) (by decide)
     (by decide)) rfl)) <|
@@ -68,7 +68,7 @@ theorem noReplyFence_run : (replyLTSNoFence 0).MTr b0
   .stepL (.step (ReplyStep.core b9 _ _ (Step.learn b9.core 0 (by decide)) rfl)) <|
   .stepL (.step (ReplyStep.core b10 _ _ (Step.takeover b10.core 0 (by decide) (by decide) (by decide)
     (by decide)) rfl)) <|
-  .stepL (.step (ReplyStep.write b11 0 (by decide) (writable_zero _ _) (by decide))) <|
+  .stepL (.step (ReplyStep.write b11 0 (by decide) (writable_zero _ _))) <|
   .stepL (.step (ReplyStep.core b12 _ _ (Step.commit b12.core 0 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .stepL (ReplyStepNoFence.release b13 ⟨0, 1, 1⟩ (by decide) (by decide)) <|

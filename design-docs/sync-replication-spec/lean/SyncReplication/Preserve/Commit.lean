@@ -106,13 +106,6 @@ theorem commit_commit : CommitInvariant (commitNext s p) := by
     intro x; show (commitNext s p).commit x ≤ _; rw [hC]; split_ifs with hx
     · subst hx; exact hlen
     · exact h.commitWithinLog x
-  commitWithinHistory := by
-    intro x; show (commitNext s p).commit x ≤ (commitNext s p).hist.length; rw [hC]; split_ifs with hx
-    · subst hx
-      have := hH1; have hl := congrArg List.length this
-      rw [List.length_take_of_le hlen] at hl
-      simp only [List.length_take] at hl; omega
-    · exact Nat.le_trans (h.commitWithinHistory x) hH2.length_le
   committedIsHistoryPrefix := by
     intro x; show (s.log x).take ((commitNext s p).commit x) = (commitNext s p).hist.take _; rw [hC]
     split_ifs with hx
@@ -323,15 +316,10 @@ end count
 
 section uncount
 
-variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p) (hkl : KnowsLatest s p)
-  (hs : s.sync p r = true) (hel : s.cfg.eligible r = false)
+variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p)
+  (hs : s.sync p r = true) (hel : (s.known p).eligible r = false)
 
-include h hp hkl hs hel
-
-/-- `p` knows the latest configuration, so it is the current primary. -/
-theorem uncount_prim : p = s.cfg.primary := by
-  have hkn : s.known p = s.cfg := h.knownEq p hkl
-  have := hp.1; rw [hkn] at this; exact this.symm
+include h hp hs hel
 
 /-- Uncount changes no configuration. -/
 theorem config_uncount : ConfigInvariant (uncount s p r) :=
@@ -364,7 +352,7 @@ theorem membership_uncount : MembershipInvariant (uncount s p r) := by
     show (uncount s p r).sync q x = true
     rw [hS]; simp only [Bool.and_eq_true, h.eligibleCounted q x hq hex hi, Bool.not_eq_true', decide_eq_false_iff_not, true_and]
     rintro ⟨e1, e2⟩; subst e1; subst e2
-    rw [h.knownEq _ hkl] at hex; rw [hex] at hel; exact absurd hel (by decide)
+    rw [hex] at hel; exact absurd hel (by decide)
   syncNew := by
     intro x hx hex
     change (uncount s p r).sync s.cfg.primary x = true at hx
@@ -376,8 +364,10 @@ theorem membership_uncount : MembershipInvariant (uncount s p r) := by
 theorem commit_uncount : CommitInvariant (uncount s p r) :=
   (h.toCommitInvariant).frame rfl rfl rfl rfl rfl rfl rfl
 
-/-- Only the current primary drops members, and the current primary is not deposed, so
-every fence is untouched. -/
+/-- A deposed primary may drop members, but only ones it does not list as eligible, and
+only those it lists as eligible fence it: the member that sets its fence stays. An
+eligible member that still follows it is not the dropped one either
+(`eligibleInOldConfig`). -/
 theorem failover_uncount : FailoverInvariant (uncount s p r) := by
   have hS := uncount_sync (s := s) p r
   exact {
@@ -387,8 +377,8 @@ theorem failover_uncount : FailoverInvariant (uncount s p r) := by
     have hF := h.stale q hq hv'
     obtain ⟨w, ⟨hw1, hw2⟩, hwF⟩ := hF.attained
     have hwr : ¬ (q = p ∧ w = r) := by
-      rintro ⟨e1, _⟩; subst e1
-      exact absurd hv' (by unfold KnowsLatest at hkl; omega)
+      rintro ⟨e1, e2⟩; subst e1; subst e2
+      rw [hel] at hw2; exact absurd hw2.2 (by decide)
     refine DeposedFenced.of_left (w := w) ⟨by rw [hS, hw1]; simp only [Bool.true_and, Bool.not_eq_true', decide_eq_false_iff_not]; exact hwr, hw2⟩ ?_ ?_ ?_ ?_
     · intro hpa; show s.acked q w ≤ s.inheritedEnd s.cfg.primary; rw [hwF]; exact hF.fenceLeInheritedEnd hpa
     · intro hpa; show (s.log q).take (s.acked q w) <+: s.log s.cfg.primary; rw [hwF]; exact hF.primHolds hpa
@@ -401,20 +391,21 @@ theorem failover_uncount : FailoverInvariant (uncount s p r) := by
       · exact Or.inl d
       · right; refine ⟨?_, d2⟩
         rw [hS, d1]; simp only [Bool.true_and, Bool.not_eq_true', decide_eq_false_iff_not]
-        rintro ⟨e1, _⟩; subst e1
-        exact absurd hv' (by unfold KnowsLatest at hkl; omega)
+        rintro ⟨e1, e2⟩; subst e1; subst e2
+        have hold := h.eligibleInOldConfig m hm (by rw [d2]; exact stale_ne_prim h hv')
+        rw [d2, hel] at hold; exact absurd hold (by decide)
   authEx := h.authEx }
 
 /-- Uncount moves no log. -/
 theorem eligibleHoldsCommitted_uncount : EligibleHoldsCommitted (uncount s p r) := h.eligibleHoldsCommitted
 
 theorem invariant_uncount : Invariant (uncount s p r) where
-  toConfigInvariant := config_uncount h p r hp hkl hs hel
-  toReplInvariant := repl_uncount h p r hp hkl hs hel
-  toMembershipInvariant := membership_uncount h p r hp hkl hs hel
-  toCommitInvariant := commit_uncount h p r hp hkl hs hel
-  toFailoverInvariant := failover_uncount h p r hp hkl hs hel
-  eligibleHoldsCommitted := eligibleHoldsCommitted_uncount h p r hp hkl hs hel
+  toConfigInvariant := config_uncount h p r hp hs hel
+  toReplInvariant := repl_uncount h p r hp hs hel
+  toMembershipInvariant := membership_uncount h p r hp hs hel
+  toCommitInvariant := commit_uncount h p r hp hs hel
+  toFailoverInvariant := failover_uncount h p r hp hs hel
+  eligibleHoldsCommitted := eligibleHoldsCommitted_uncount h p r hp hs hel
 
 end uncount
 
