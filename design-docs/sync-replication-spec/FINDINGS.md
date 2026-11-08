@@ -471,7 +471,7 @@ first three and the last match TLC's `Leases_noWaitPrim`, `_noWaitRead`,
 read leases only to sync members (F10) and only to eligible ones (a counted,
 not-yet-eligible member can be dropped by early removal without a wait), and
 the margin bound. The proof also requires a matching incarnation; that part is
-shown needed by a sixth run, `grantNoInc_stale` (below).
+shown needed by a sixth run, `grantNoIncRestart_stale` (below).
 
 Further runs settle lease rules the proof uses. A restart must clear the
 restarted node's read lease, which is how the model reads "Lease state is kept
@@ -500,9 +500,12 @@ configuration it took over from, so the wait covers every replica, where after
 a takeover it covers only replicas of the replaced configuration as the doc
 says); and read leases go only to eligible sync members with a matching
 incarnation. The incarnation part is shown needed within the "Lease durations"
-rule (`grantNoInc_stale`, primary lease 6, read lease 3, drift 1, margin 2): the
-gap between the old primary's last possible grant and the earliest takeover is
-only `margin - 2 * drift`, so the rule does not protect against it. Not
+rule (`grantNoIncRestart_stale`, primary lease 6, read lease 3, drift 1, margin
+2): a restarted-empty replica, still listed eligible, is granted a read lease; the
+primary then restarts with its data, rebuilds its sync replica set without it
+(stale recorded incarnation), and commits alone. A new primary, by contrast, may
+count every eligible replica: leaving out stale-incarnation ones at takeover is
+an availability choice, not needed for safety. Not
 modelled: planned demotion (the
 replica drops its lease on request). One observation: the model does not delay
 reads after a restart, only clears the restarted node's leases, and the proof
