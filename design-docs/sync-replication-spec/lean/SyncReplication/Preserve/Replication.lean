@@ -61,7 +61,7 @@ theorem invariant_append {s : State Node} (h : Invariant s) (p : Node) : Invaria
   invariant_grow h _ (grow_upd s.log p _)
 
 theorem invariant_replicate {s : State Node} (h : Invariant s) (r : Node) : Invariant (replicate s r) :=
-  invariant_grow h _ (grow_upd s.log r _)
+  (invariant_grow h _ (grow_upd s.log r _)).term_frame _ _
 
 section ack
 

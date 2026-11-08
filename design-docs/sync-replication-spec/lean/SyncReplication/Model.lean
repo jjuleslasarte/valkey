@@ -64,8 +64,8 @@ shows what each of these rules prevents.
 ## Encoding conventions
 
 - Sets of nodes are `Node → Bool`.
-- A log entry is the term it was written in, so a write is identified by its
-  offset and term.
+- A log entry is the replication ID of the primaryship that wrote it, so a write is
+  identified by its offset and that ID. IDs are compared only for equality.
 - Each action is a function `State → State` returning the post-state; fields it
   does not mention keep their value. Its guard lives in the
   matching `Step` constructor.
@@ -106,7 +106,7 @@ structure Cfg (Node : Type) where
 
 /-- The state of the whole shard, plus the ghost history. -/
 structure State (Node : Type) [DecidableEq Node] where
-  /-- Each node's replication log; an entry is the term it was written in. -/
+  /-- Each node's replication log; an entry is the replication ID it was written with. -/
   log    : Node → List Nat
   /-- Each node's actual incarnation; restarting empty increments it. -/
   incarnation    : Node → Nat
@@ -123,8 +123,12 @@ structure State (Node : Type) [DecidableEq Node] where
   /-- End of the inherited log: a new primary commits up to here before anything it
   appends after it (design §5, reconciliation). `catchUpPoint` is derived from it. -/
   inheritedEnd : Node → Nat
-  /-- The term each node writes new entries with. -/
+  /-- The replication ID each node writes new entries with: an opaque value, compared
+  only for equality, fresh at each takeover (Valkey's replication ID). -/
   term   : Node → Nat
+  /-- Ghost variable: every replication ID used so far. A takeover or `newId` picks one
+  outside it. -/
+  usedIds : Finset Nat
   /-- `ackHigh n`: the highest offset `n` has ever acknowledged, as a replica to a
   primary (Ack) or as a primary to its clients (Commit). Node-local, and it must
   survive a restart with data: a node that restarts from a persistence file covering
@@ -141,7 +145,7 @@ every incarnation is 1. -/
 def initCfg (i : Node) : Cfg Node := ⟨1, i, fun _ => false, fun _ => 1⟩
 
 /-- The initial state: empty logs and history, every node knows `initCfg i`, and `i`
-writes with term 1. -/
+writes with replication ID 1; IDs 0 and 1 are in use. -/
 def init (i : Node) : State Node where
   log    := fun _ => []
   incarnation    := fun _ => 1
@@ -152,6 +156,7 @@ def init (i : Node) : State Node where
   commit := fun _ => 0
   inheritedEnd  := fun _ => 0
   term   := fun n => if n = i then 1 else 0
+  usedIds := {0, 1}
   ackHigh := fun _ => 0
   hist   := []
 
@@ -177,13 +182,15 @@ def PrimaryAuthoritative (s : State Node) : Prop := s.cfg.incarnation s.cfg.prim
 /-! ### Post-states of the actions. Fields an action does not mention keep their value. -/
 
 /-- AppendWrite(p): `p` appends one client write to its own log, tagged with its
-current term. Nothing else changes. -/
+current replication ID. Nothing else changes. -/
 def appendWrite (s : State Node) (p : Node) : State Node :=
   { s with log := update s.log p (s.log p ++ [s.term p]) }
 
-/-- Replicate(r): `r` copies the next entry of its primary's log onto its own. -/
+/-- Replicate(r): `r` copies the next entry of its primary's log onto its own and adopts
+its primary's replication ID, as a Valkey replica does on sync. -/
 def replicate (s : State Node) (r : Node) : State Node :=
-  { s with log := update s.log r (s.log r ++ [(s.log (primaryOf s r)).getD (s.log r).length 0]) }
+  { s with log := update s.log r (s.log r ++ [(s.log (primaryOf s r)).getD (s.log r).length 0]),
+           term := update s.term r (s.term (primaryOf s r)) }
 
 /-- Ack(r): `r`'s primary records that `r` holds its whole log, and `r` records that it
 has acknowledged up to there. -/
@@ -251,17 +258,27 @@ for it, which costs availability but not safety (it cannot count toward `Writabl
 def takeoverSync (s : State Node) (n : Node) : Node → Bool :=
   fun x => takeoverEligible s n x
 
+/-- A replication ID not used before. Any choice outside `s.usedIds` would do; the proofs
+use only `freshId_not_mem`. This one takes the largest used value plus one, the only
+place an ordering on IDs appears. -/
+def freshId (s : State Node) : Nat := s.usedIds.sup id + 1
+
+/-- The fresh ID is not among the used ones. -/
+theorem freshId_not_mem (s : State Node) : freshId s ∉ s.usedIds := fun h => by
+  have := Finset.le_sup (f := id) h
+  simp only [freshId, id] at this; omega
+
 /-- Takeover(n): eligible replica `n` becomes primary in a new configuration. Its
 sync set is the eligible replicas of the new configuration, its acks and commit point are reset, its
 catch-up point is the end of its log (so it commits what it inherited before anything
-it writes afterwards), and it writes with a new term. -/
+it writes afterwards), and it writes with a fresh replication ID. -/
 def takeover (s : State Node) (n : Node) : State Node :=
   { s with cfg := takeoverCfg s n, known := update s.known n (takeoverCfg s n),
            sync := update s.sync n (takeoverSync s n),
            acked := update s.acked n (fun _ => 0),
            commit := update s.commit n 0,
            inheritedEnd := update s.inheritedEnd n (s.log n).length,
-           term := update s.term n (s.cfg.version + 1) }
+           term := update s.term n (freshId s), usedIds := insert (freshId s) s.usedIds }
 
 /-- The point a replica must have acknowledged before `p` counts it: `p`'s catch-up
 point while it is still reconciling, otherwise its commit point. -/

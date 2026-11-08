@@ -9,8 +9,8 @@ the held replies of the restarted node: they are lost with the client connection
 they are neither acknowledged nor answered.
 
 A held reply (`Held`) names the primary that accepted the write, the write's 1-based
-offset, and the primary's term at the append. A log entry is the appending primary's
-term, so the term is also the value written. `acknowledged` holds the acknowledged
+offset, and the primary's replication ID at the append. A log entry is the appending
+primary's ID, so the ID is also the value written. `acknowledged` holds the acknowledged
 `(offset, value)` pairs.
 
 `ReplyStep.core` allows every replication step other than a restart with `held`/`acknowledged`
@@ -29,7 +29,7 @@ structure Held (Node : Type) where
   primary : Node
   /-- The write's 1-based offset in `primary`'s log. -/
   offset  : Nat
-  /-- `primary`'s term at the append, which is also the value written. -/
+  /-- `primary`'s replication ID at the append, which is also the value written. -/
   term    : Nat
   deriving DecidableEq
 
@@ -65,6 +65,13 @@ def release (a : ReplyState Node) (h : Held Node) : ReplyState Node :=
 def abort (a : ReplyState Node) (h : Held Node) : ReplyState Node :=
   ⟨a.core, a.held.erase h, a.acknowledged⟩
 
+/-- `NewId(p)`: `p` takes a fresh replication ID without a takeover (Valkey's
+`changeReplicationId` when a primary creates or frees its backlog, on
+`DEBUG change-repl-id`, and at a primary's restart). -/
+def newId (a : ReplyState Node) (p : Node) : ReplyState Node :=
+  ⟨{ a.core with term := update a.core.term p (freshId a.core),
+                 usedIds := insert (freshId a.core) a.core.usedIds }, a.held, a.acknowledged⟩
+
 /-- The held replies left after `n` restarts. -/
 def dropHeld (held : List (Held Node)) (n : Node) : List (Held Node) :=
   held.filter (fun x => x.primary != n)
@@ -74,6 +81,8 @@ own actions on held replies. -/
 inductive ReplyAction (Node : Type)
   | core (μ : Action Node) | write (p : Node) | release (h : Held Node) | abort (h : Held Node)
   | restartEmpty (n : Node) | restartKeep (n : Node) | restartPartial (n : Node) (k : Nat)
+  /-- `p` takes a fresh replication ID without a takeover. -/
+  | newId (p : Node)
 
 /-- The layer's `Next`. `m` = MinSync. A reply is released as OK only once its offset
 is committed and while the primaryship that accepted the write is still current. -/
@@ -87,6 +96,8 @@ inductive ReplyStep (m : Nat) : ReplyState Node → ReplyAction Node → ReplySt
       ReplyFenced a.core h → ReplyStep m a (.release h) (release a h)
   | abort (a : ReplyState Node) (h : Held Node) : h ∈ a.held → ¬ ReplyFenced a.core h →
       ReplyStep m a (.abort h) (abort a h)
+  /-- Any node may take a fresh replication ID at any time. -/
+  | newId (a : ReplyState Node) (p : Node) : ReplyStep m a (.newId p) (newId a p)
   | restartEmpty (a : ReplyState Node) (n : Node) : (hkl : KnowsLatest a.core n) → (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       ReplyStep m a (.restartEmpty n) ⟨restartEmpty a.core n, dropHeld a.held n, a.acknowledged⟩
   | restartKeep (a : ReplyState Node) (n : Node) : (hkl : KnowsLatest a.core n) →

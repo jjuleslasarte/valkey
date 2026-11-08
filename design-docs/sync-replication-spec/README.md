@@ -64,7 +64,8 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   versions, each change a compare-and-set on the previous one (design §6). Each node
   also keeps the configuration it last learned, which may be stale.
 - **Replication.** A replica receives its primary's replication stream, applies the
-  entries in log order, and sends `REPLCONF ACK` with its replication offset.
+  entries in log order, and sends `REPLCONF ACK` with its replication offset. It
+  adopts its primary's replication ID as it copies.
 - **Commit rule.** The primary's **committed offset** advances only past entries every
   member of its **sync replica set** has acknowledged, and only while at least
   `min-sync-replicas` of those members are eligible with a matching incarnation. Only a
@@ -93,7 +94,7 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   latest configuration. The new configuration drops the old primary from the eligible
   set. The new primary starts with the eligible replicas of the new configuration as
   its sync replica set, with no acknowledgements and
-  committed offset 0, and writes with a new term. Until it has committed the log it
+  committed offset 0, and writes with a fresh replication ID. Until it has committed the log it
   inherited, it measures promotion catch-up and full resync (below) against the end of
   that log. It may accept client writes before then, which relaxes the design's "only
   then serves clients" (design §2) for writes; it serves no linearizable read until
@@ -140,12 +141,14 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   where the design holds only reads of keys with uncommitted writes. Property 6
   therefore says nothing about reads of clean keys made while other keys are dirty.
 - **Reply blocking.** A write's reply is held until it commits. Each held reply
-  carries the term of the primaryship that accepted the write. The reply is released
-  as OK only while the node that accepted it still considers itself primary, in that
-  term; otherwise it is answered `UNCOMMITTED` (design §5, "Write behavior during
+  carries the replication ID of the primaryship that accepted the write. The reply is
+  released as OK only while the node that accepted it still considers itself primary,
+  with that same ID; otherwise it is answered `UNCOMMITTED` (design §5, "Write behavior during
   faults"). We call this check the **reply fence**. It is the node's own view, which
   may be stale; a deposed primary that has not learned of the takeover passes it, and
-  is kept safe by the commit rule instead.
+  is kept safe by the commit rule instead. A node may also take a fresh replication ID
+  at any time without a takeover; its held replies then fail the fence and are
+  answered `UNCOMMITTED`.
 - **Restarts.** A node may restart with its data, without it, or from a stale
   persistence file holding only a prefix of its log. A restart without data gives the
   node a new incarnation. It stays in the eligible set with a stale recorded
@@ -170,10 +173,11 @@ been closed by a full resync or a restart: an acknowledgement sent before a resy
 cannot arrive after it. Steps interleave arbitrarily, so any order of events across
 nodes is covered.
 
-Each log entry records the **term** of the primary that wrote it: the version of the
-shard configuration that made it primary. A write is identified by its offset and
-term. This is what lets the model tell apart two primaries that wrote different data
-at the same offset.
+Each log entry records the **replication ID** of the primaryship that wrote it (the
+field `term`). IDs are compared only for equality, never ordered, and a takeover picks
+one that has never been used (`freshId`; the ghost set `usedIds` records every ID
+handed out). A write is identified by its offset and ID. This is what lets the model
+tell apart two primaries that wrote different data at the same offset.
 
 ## 2. The guarantee
 
@@ -396,10 +400,12 @@ conjunct (one that meets all the others, breaks this one, and reaches a violatio
 step); that is the strong form of "necessary", and it was not attempted.
 
 The acknowledged-write properties (3 and 4) extend `Invariant` with three more parts
-(`ReplyInvariant`, `Durability.lean`): terms never exceed the configuration version;
-a held reply that passes the reply fence points at the write it was issued for; and
-AckedDurable itself. A takeover gives the new primary a term larger than the term of
-any held reply, so an old reply can never become releasable again.
+(`ReplyInvariant`, `Durability.lean`): every node's replication ID, and every held
+reply's, has been handed out (`TermsIssued`, and the first half of `HeldInvariant`); a
+held reply that passes the reply fence points at the write it was issued for; and
+AckedDurable itself. A takeover or `NewId` gives the node an ID never handed out before,
+so no held reply matches it and an old reply can never become releasable again.
+Freshness is all the proof uses; no ordering of IDs is needed.
 
 ### 3.2 Lease timing
 
@@ -441,8 +447,8 @@ What these say about the design's own wording is in Appendix B.
 | A new primary may demote a replica it promoted itself without the post-takeover wait | `SyncReplication.demoteNew_reachable` |
 | Resync's guard that the replica is not counted excludes a reachable state (no counterexample without it) | `SyncReplication.countedDiverged_reachable` |
 
-Size: the model is 902 lines (459 for the protocol, 129 for the held-reply layer,
-314 for the lease layer), the invariants and their lemmas 1,518 (462 for replication,
+Size: the model is 930 lines (476 for the protocol, 140 for the held-reply layer,
+314 for the lease layer), the invariants and their lemmas 1,531 (475 for replication,
 1,056 for leases, which includes their preservation), the per-action contracts 616,
 and the replication preservation proofs 2,551. Lean checks the whole of
 `SyncReplication` in about 20 seconds on a laptop-class machine.
@@ -529,14 +535,43 @@ encoding.
   the authoritative primary with an empty log. A stale file is
   modelled as a prefix of the log; a file that is not a prefix (a diverged tail) is not
   modelled.
-- **The term a write is tagged with** (`term`, used only by the reply fence) is the
-  version of the configuration under which the node became primary. For safety the
-  design's shard configuration epoch is enough: with writes and held replies tagged by
-  the node's current configuration version instead, every theorem still holds (a scratch
-  build, not in the repository). Not checked: that version also moves on the primary's
-  own promotions and demotions, so a reply held across one would never pass the fence
-  and could never be released as OK. Tagging with the version the node became primary
-  under avoids that, and the design does not name that value.
+- **The reply fence uses Valkey's replication ID** (the field `term`). The model
+  assumes two things of it. Citations are to the Valkey source (`src/` at the fork's
+  `sync-repl-lean` branch).
+  (a) *Every ID a takeover or `NewId` picks is new.* The proof needs this for both
+  actions. What Valkey must actually give is narrower: a node's new ID differs from
+  every ID that node has tagged a still-held reply with. `REPLICAOF NO ONE`, cluster
+  failover and the failover handshake go through `replicationUnsetPrimary`
+  (`replication.c:5162`), which calls `shiftReplicationId` (`:5187`, defined `:2565`);
+  that calls `changeReplicationId` (`:2546`), which draws 40 random hex characters
+  (`getRandomHexChars`, `util.c:1204`). The model's freshness is exact; Valkey's holds
+  with overwhelming probability. One path skips the change: `replicationUnsetPrimary`
+  returns at once when the node has no primary address (`:5163`), which is the state of a
+  cluster replica just after a restart. Such a replica has restored its old primary's ID
+  from the RDB (`server.c:7749`), and `CLUSTER FAILOVER TAKEOVER`
+  (`cluster_legacy.c:9056-9077`, through `clusterSetNodeAsPrimary`, `:3249`) can promote
+  it in that window, so it writes under its old primary's ID. The narrower property
+  still holds there, because the restart dropped every held reply. The design's takeover
+  through Cluster V2 is not in the source yet; it must call `shiftReplicationId` (or
+  `changeReplicationId`) unconditionally, not through the guarded function.
+  (b) *Equality only; other ID changes are `NewId`.* The fence compares for equality, so
+  no ordering of IDs is needed. Valkey also changes a primary's ID without a role change:
+  when it creates or frees its backlog (`replication.c:1619`, `:6102`), on
+  `DEBUG change-repl-id` (`debug.c:1056`), and at startup (`server.c:2439`; a restarted
+  primary keeps that new ID and stores the RDB's as its secondary ID, `server.c:7760`).
+  The model's `NewId` action covers these, and a primary's restart is the model's
+  restart followed by `NewId`. The node's held replies fail the fence and are answered
+  `UNCOMMITTED`, which is safe but costs availability. A restarted replica gets no new
+  ID; it restores its old primary's ID, as the model keeps `term` across a restart. A
+  replica adopts its primary's ID on sync (`replication.c:2879`, `:4232`). The model
+  adopts on every `Replicate` step and not on resync; no proof reads a non-primary's ID,
+  so the difference is inert. `PSYNC` accepts the secondary ID up to
+  `second_replid_offset` (`:1174`), so replicas continue across a promotion or a
+  primary's restart; the other changes clear the secondary ID (`:1620`, `:6103`,
+  `debug.c:1057`) and replicas need a full sync. The fence reads only the primary's own
+  current ID, so the secondary ID plays no part in it. The ID is persisted in the RDB
+  (`rdb.c:1388`, loaded `:3941`), but held replies are not: they go with the client
+  connections at every restart, as in the model.
 - **Leases carry three assumptions.** (a) A restarted primary waits one read lease
   plus the margin before demoting anyone, as a new primary does after its takeover for
   replicas of the configuration it replaced. The design's restart rule covers takeover
@@ -589,14 +624,14 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 
 | Path | Contents | Lines |
 |---|---|---|
-| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 459 |
-| `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 129 |
+| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 476 |
+| `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 140 |
 | `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 314 |
-| `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 462 |
+| `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 475 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
 | `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,551 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies`, `committed_inherited_first` | 107 |
-| `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 249 |
+| `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 278 |
 | `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,056 |
 | `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,718 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
@@ -881,8 +916,8 @@ because the offset can be reused by a later primaryship. Scenario: n0 writes at
 offset 1 and holds the reply. n1 takes over with an empty log and n0 is fully
 resynced. n0 is promoted, takes over again, writes different data at offset 1 and
 commits it. The old reply is then released as OK for a write that was replaced.
-Rule: release OK only while the node still considers itself primary, in the term the
-write was tagged with; otherwise answer `UNCOMMITTED`. Counterexample:
+Rule: release OK only while the node still considers itself primary, with the
+replication ID the write was tagged with; otherwise answer `UNCOMMITTED`. Counterexample:
 `noReplyFence_unsafe` (14 steps, `min-sync-replicas = 0`). No run shows the fence is
 needed at `min-sync-replicas ≥ 1`; the proof uses it there too.
 

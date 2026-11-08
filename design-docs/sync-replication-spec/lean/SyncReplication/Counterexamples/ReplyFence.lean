@@ -40,8 +40,8 @@ def b8 : ReplyState N := ⟨count b7.core 1 0, b7.held, b7.acknowledged⟩      
 def b9 : ReplyState N := ⟨makeEligible b8.core 1 0, b8.held, b8.acknowledged⟩    -- n0 eligible (version 4)
 def b10 : ReplyState N := ⟨learn b9.core 0, b9.held, b9.acknowledged⟩        -- n0 learns version 4
 def b11 : ReplyState N := ⟨takeover b10.core 0, b10.held, b10.acknowledged⟩  -- n0 takes over (version 5)
-def b12 : ReplyState N := write b11 0                               -- n0 writes term 5 at offset 1
-def b13 : ReplyState N := ⟨commitNext b12.core 0, b12.held, b12.acknowledged⟩   -- commits alone: the history is [5]
+def b12 : ReplyState N := write b11 0                               -- n0 writes with replication ID 3 at offset 1
+def b13 : ReplyState N := ⟨commitNext b12.core 0, b12.held, b12.acknowledged⟩   -- commits alone: the history is [3]
 def b14 : ReplyState N := release b13 ⟨0, 1, 1⟩                     -- the old reply is released as OK
 
 /-- The run; the label list is its trace. Only the final Release is the weakened
@@ -75,7 +75,7 @@ theorem noReplyFence_run : (replyLTSNoFence 0).MTr b0
   .refl
 
 /-- The fence is needed: without it a reachable state has acknowledged `(1, 1)` while
-the committed history holds `[5]` at offset 1. -/
+the committed history holds `[3]` at offset 1. -/
 theorem noReplyFence_unsafe : ∃ a, (replyLTSNoFence 0).CanReach (replyInit 0) a ∧ ¬ AckedDurable a := by
   refine ⟨b14, ⟨_, noReplyFence_run⟩, ?_⟩
   intro hd
