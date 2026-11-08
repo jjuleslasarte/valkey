@@ -442,9 +442,9 @@ What these say about the design's own wording is in Appendix B.
 | Resync's guard that the replica is not counted excludes a reachable state (no counterexample without it) | `SyncReplication.countedDiverged_reachable` |
 
 Size: the model is 902 lines (459 for the protocol, 129 for the held-reply layer,
-314 for the lease layer), the invariants and their lemmas 1,514 (462 for replication,
-1,052 for leases, which includes their preservation), the per-action contracts 616,
-and the replication preservation proofs 2,519. Lean checks the whole of
+314 for the lease layer), the invariants and their lemmas 1,518 (462 for replication,
+1,056 for leases, which includes their preservation), the per-action contracts 616,
+and the replication preservation proofs 2,551. Lean checks the whole of
 `SyncReplication` in about 20 seconds on a laptop-class machine.
 
 [lean/LEAN.md](lean/LEAN.md) has every theorem statement and the details of the
@@ -519,9 +519,24 @@ encoding.
   needed for safety: the proof holds either way, since `Writable` never counts them.
   (d) The acknowledgement high-water mark
   `ackHigh` survives a restart with data and is lost with a new incarnation; the model
-  assumes the implementation persists it with the data it covers. A stale file is
+  assumes the implementation persists it with the data it covers. The design needs
+  this field: it cannot be derived from the fields the design has, because `commit` and
+  the primary's `acked` row are volatile (a restart resets both) and `acked` lives at the
+  primary, not on the node. With the stale-restore guard stated over `max (commit n)
+  (acked (primaryOf n) n)` instead, a scratch run (not in the repository) breaks
+  property 1 in 8 steps: a write commits on n0 and n1, n0 restarts with its data (both
+  values reset to 0), then restarts from an empty file keeping its incarnation, and is
+  the authoritative primary with an empty log. A stale file is
   modelled as a prefix of the log; a file that is not a prefix (a diverged tail) is not
   modelled.
+- **The term a write is tagged with** (`term`, used only by the reply fence) is the
+  version of the configuration under which the node became primary. For safety the
+  design's shard configuration epoch is enough: with writes and held replies tagged by
+  the node's current configuration version instead, every theorem still holds (a scratch
+  build, not in the repository). Not checked: that version also moves on the primary's
+  own promotions and demotions, so a reply held across one would never pass the fence
+  and could never be released as OK. Tagging with the version the node became primary
+  under avoids that, and the design does not name that value.
 - **Leases carry three assumptions.** (a) A restarted primary waits one read lease
   plus the margin before demoting anyone, as a new primary does after its takeover for
   replicas of the configuration it replaced. The design's restart rule covers takeover
@@ -579,10 +594,10 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 | `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 314 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 462 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
-| `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,519 |
+| `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,551 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies`, `committed_inherited_first` | 107 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 249 |
-| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,052 |
+| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,056 |
 | `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,718 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |

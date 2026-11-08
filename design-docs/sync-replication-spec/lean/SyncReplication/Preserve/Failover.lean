@@ -16,14 +16,13 @@ section takeover
 
 /-! Every lemma below takes the takeover's guard as hypotheses: `n` knows the latest
 configuration, is eligible in it, is not its primary, and its recorded incarnation
-matches. They all take the same arguments, so some lemmas take a guard part they do
-not use. -/
-set_option linter.unusedSectionVars false
+matches. A lemma that does not use part of it says so with `omit ... in`. -/
 
 variable {s : State Node} (h : Invariant s) (n : Node) (hkl : KnowsLatest s n)
     (hel : s.cfg.eligible n = true) (hnp : n ≠ s.cfg.primary) (hin : s.cfg.incarnation n = s.incarnation n)
 include h hkl hel hnp hin
 
+omit hkl hel hnp hin in
 /-- Configuration: the takeover's configuration becomes the latest one, `n`'s copy is it,
 and recorded incarnations do not change. -/
 theorem config_takeover : ConfigInvariant (takeover s n) := by
@@ -279,7 +278,7 @@ theorem eligibleHoldsCommitted_takeover :
   · exact hehn
 /-- Takeover preserves the invariant, layer by layer. -/
 theorem invariant_takeover : Invariant (takeover s n) where
-  toConfigInvariant := config_takeover h n hkl hel hnp hin
+  toConfigInvariant := config_takeover h n
   toReplInvariant := repl_takeover h n hkl hel hnp hin
   toMembershipInvariant := membership_takeover h n hkl hel hnp hin
   toCommitInvariant := commit_takeover h n hkl hel hnp hin

@@ -12,9 +12,8 @@ namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
--- Every layer lemma takes the action's whole guard, so some take a part they
--- do not use.
-set_option linter.unusedSectionVars false
+-- Every layer lemma takes the action's guard; a lemma that does not use part of it
+-- says so with `omit ... in`.
 
 theorem upd_eq_ite {α β : Type} [DecidableEq α] (f : α → β) (a : α) (b : β) (x : α) :
     update f a b x = if x = a then b else f x := rfl
@@ -129,9 +128,11 @@ theorem membership_learn : MembershipInvariant (learn s n) := by
       · exact he
       · exact h.eligibleInOldConfig m he hf }
 
+omit hnkl in
 /-- Learn changes no commit point, catch-up point or history. -/
 theorem commit_learn : CommitInvariant (learn s n) :=
-  (h.toCommitInvariant).frame rfl rfl rfl rfl rfl rfl rfl
+  (h.toCommitInvariant).frame
+    (hcommit := rfl) (hinherited := rfl) (hlog := rfl) (hhist := rfl) (hcfg := rfl) (hinc := rfl) (hah := rfl)
 
 /-- A deposed primary stays fenced. If `n` leaves it with an acknowledgement below the old fence, that acknowledgement is the new fence. -/
 theorem failover_learn : FailoverInvariant (learn s n) := by
@@ -198,6 +199,7 @@ theorem failover_learn : FailoverInvariant (learn s n) := by
             show (if m = n then s.cfg else s.known m).primary = p; rw [if_neg e]; exact d2
   authEx := h.authEx }
 
+omit hnkl in
 /-- Learn moves no log and changes no authoritative node. -/
 theorem eligibleHoldsCommitted_learn : EligibleHoldsCommitted (learn s n) :=
   h.eligibleHoldsCommitted
@@ -206,9 +208,9 @@ theorem invariant_learn : Invariant (learn s n) where
   toConfigInvariant := config_learn h n hnkl
   toReplInvariant := repl_learn h n hnkl
   toMembershipInvariant := membership_learn h n hnkl
-  toCommitInvariant := commit_learn h n hnkl
+  toCommitInvariant := commit_learn h n
   toFailoverInvariant := failover_learn h n hnkl
-  eligibleHoldsCommitted := eligibleHoldsCommitted_learn h n hnkl
+  eligibleHoldsCommitted := eligibleHoldsCommitted_learn h n
 
 end learn
 
@@ -376,7 +378,8 @@ theorem failover_makeEligible (hs : s.sync p r = true) (hel : s.cfg.eligible r =
     -- The fence does not move; the newly eligible r holds x's log up to it because r
     -- caught up past the reconciliation point, which is past the fence.
     have hF := h.stale x hx' hv'
-    refine hF.transfer rfl hKp (by rw [hK, if_neg hxp]) (fun _ _ => rfl) rfl rfl (fun _ => hpa)
+    refine hF.transfer (hsync := rfl) (hkn := hKp) (hke := by rw [hK, if_neg hxp])
+      (hack := fun _ _ => rfl) (hlog := rfl) (hprim := rfl) (fun _ => hpa)
       (fun _ => hF.fenceLeInheritedEnd hpa) (fun _ => hF.primHolds hpa) (fun _ => hF.primAck hpa) ?_
     intro m hm hi
     by_cases e : m = r
@@ -560,7 +563,8 @@ theorem failover_makeIneligible (_he : s.cfg.eligible r = true) :
     have hSx : (makeIneligible s s.cfg.primary r).sync x = s.sync x := by
       funext y; rw [hS, if_neg (fun c => hxp c.1)]
     have hF := h.stale x hx' hv'
-    exact hF.transfer hSx hKp (by rw [hK, if_neg hxp]) (fun _ _ => rfl) rfl rfl (fun _ => hpa)
+    exact hF.transfer (hsync := hSx) (hkn := hKp) (hke := by rw [hK, if_neg hxp])
+      (hack := fun _ _ => rfl) (hlog := rfl) (hprim := rfl) (fun _ => hpa)
       (fun _ => hF.fenceLeInheritedEnd hpa) (fun _ => hF.primHolds hpa) (fun _ => hF.primAck hpa)
       (fun m hm hi => Or.inl ⟨(hEle m hm).2, hi, rfl, Nat.le_refl _⟩)
   authEx := ⟨s.cfg.primary, Or.inr rfl, hpa⟩ }

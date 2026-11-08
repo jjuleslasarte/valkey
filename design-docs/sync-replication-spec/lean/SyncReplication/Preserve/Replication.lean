@@ -14,9 +14,8 @@ namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
--- Every layer lemma takes the action's whole guard, so some take a part they
--- do not use.
-set_option linter.unusedSectionVars false
+-- Every layer lemma takes the action's guard; a lemma that does not use part of it
+-- says so with `omit ... in`.
 
 /-- Any step that only extends logs preserves the invariant (AppendWrite, Replicate). -/
 theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat)
@@ -48,7 +47,8 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
   knownIncLe := h.knownIncLe
   authEx := h.authEx
   historyWithinCommitOrInherited := h.historyWithinCommitOrInherited
-  stale := fun p hp hv => (h.stale p hp hv).mono rfl rfl rfl rfl hL (fun _ => Nat.le_refl _)
+  stale := fun p hp hv => (h.stale p hp hv).mono (hcfg := rfl) (hknown := rfl) (hinherited := rfl) (hinc := rfl)
+      hL (fun _ => Nat.le_refl _)
     (fun r => h.ackedLe p r hp) (fun _ x => x) (fun _ _ => rfl)
 
 theorem grow_upd (L : Node → List Nat) (p : Node) (m : List Nat) :
@@ -69,9 +69,10 @@ variable {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ 
 
 include h hne hpre hlt
 
+omit hne hpre hlt in
 /-- Ack changes no configuration. -/
 theorem config_ack : ConfigInvariant (ack s r) :=
-  (h.toConfigInvariant).frame rfl rfl rfl
+  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
 
 /-- The recorded acknowledgement becomes the replica's log length, and the replica's log is a prefix of its primary's, so the record is real. -/
 theorem repl_ack : ReplInvariant (ack s r) := by
@@ -127,6 +128,7 @@ theorem membership_ack : MembershipInvariant (ack s r) := by
     · exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
+omit hne hpre hlt in
 /-- Ack changes no commit point, catch-up point or history, and only raises a high-water mark. -/
 theorem commit_ack : CommitInvariant (ack s r) where
   commitWithinLog := h.commitWithinLog
@@ -143,7 +145,8 @@ theorem failover_ack : FailoverInvariant (ack s r) := by
   stale := by
     -- Ack moves only the acknowledgement of a replica that follows its primary.
     intro p hp hv
-    refine (h.stale p hp hv).mono rfl rfl rfl rfl (fun _ => List.prefix_refl _) (ack_ackHigh_le r)
+    refine (h.stale p hp hv).mono (hcfg := rfl) (hknown := rfl) (hinherited := rfl) (hinc := rfl)
+      (fun _ => List.prefix_refl _) (ack_ackHigh_le r)
       (fun x => h.ackedLe p x hp) (fun _ x => x) ?_
     intro x hx
     show (ack s r).acked p x = s.acked p x
@@ -152,17 +155,18 @@ theorem failover_ack : FailoverInvariant (ack s r) := by
     · rfl
   authEx := h.authEx }
 
+omit hne hpre hlt in
 /-- Ack moves no log. -/
 theorem eligibleHoldsCommitted_ack : EligibleHoldsCommitted (ack s r) := by
   exact h.eligibleHoldsCommitted
 
 theorem invariant_ack : Invariant (ack s r) where
-  toConfigInvariant := config_ack h r hne hpre hlt
+  toConfigInvariant := config_ack h r
   toReplInvariant := repl_ack h r hne hpre hlt
   toMembershipInvariant := membership_ack h r hne hpre hlt
-  toCommitInvariant := commit_ack h r hne hpre hlt
+  toCommitInvariant := commit_ack h r
   toFailoverInvariant := failover_ack h r hne hpre hlt
-  eligibleHoldsCommitted := eligibleHoldsCommitted_ack h r hne hpre hlt
+  eligibleHoldsCommitted := eligibleHoldsCommitted_ack h r
 
 end ack
 
@@ -191,9 +195,10 @@ theorem resync_facts :
       change (s.known (primaryOf s r)).eligible r = true at this
       rw [hke] at this; exact absurd this (by decide)
 
+omit hne hsy hke in
 /-- Resync changes no configuration. -/
 theorem config_resync : ConfigInvariant (resync s r) :=
-  (h.toConfigInvariant).frame rfl rfl rfl
+  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
 
 /-- `r`'s log becomes a prefix of its primary's and its acknowledgement is reset to 0, so recorded acknowledgements stay real. -/
 theorem repl_resync : ReplInvariant (resync s r) := by
@@ -231,6 +236,7 @@ theorem repl_resync : ReplInvariant (resync s r) := by
     intro q x hq hs
     rw [hCo q (htpne q hq), hAs q x hs]; exact h.syncCommit q x hq hs }
 
+omit hne hke in
 /-- `r` was not counted, so the acknowledgements primaries count are untouched and every
 counted replica stays caught up. -/
 theorem membership_resync : MembershipInvariant (resync s r) := by
@@ -303,7 +309,8 @@ theorem failover_resync : FailoverInvariant (resync s r) := by
     intro x hx hv
     have hxr := htpne x hx
     have hF := h.stale x hx hv
-    exact hF.transfer rfl (fun _ => rfl) rfl (hAs x) (hLo x hxr) rfl id
+    exact hF.transfer (hsync := rfl) (hkn := fun _ => rfl) (hke := rfl)
+      (hack := (hAs x)) (hlog := (hLo x hxr)) (hprim := rfl) id
       (fun hq => hF.fenceLeInheritedEnd hq) (fun hq => by rw [hLo _ (Ne.symm hrprim)]; exact hF.primHolds hq)
       (fun hq => hF.primAck hq)
       (fun m hm hi => Or.inl ⟨hm, hi, hLo m (hnotr m (Or.inl hm)), Nat.le_refl _⟩)
@@ -324,9 +331,9 @@ theorem eligibleHoldsCommitted_resync : EligibleHoldsCommitted (resync s r) := b
 /-- Resync copies the primary's log up to its CatchUpPoint (the inherited log while it
 is unreconciled). -/
 theorem invariant_resync : Invariant (resync s r) where
-  toConfigInvariant := config_resync h r hne hsy hke
+  toConfigInvariant := config_resync h r
   toReplInvariant := repl_resync h r hne hsy hke
-  toMembershipInvariant := membership_resync h r hne hsy hke
+  toMembershipInvariant := membership_resync h r hsy
   toCommitInvariant := commit_resync h r hne hsy hke
   toFailoverInvariant := failover_resync h r hne hsy hke
   eligibleHoldsCommitted := eligibleHoldsCommitted_resync h r hne hsy hke

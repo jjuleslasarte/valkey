@@ -398,7 +398,7 @@ theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core)
   deposed := by
     intro p hp hv
     obtain ⟨t, h1, h2, h3, h4⟩ :=
-      deposed_frame h hcfg hknown ((thinksPrimary_congr hknown (congrFun hinc p)).1 hp) hv
+      deposed_frame h (hcfg := hcfg) (hknown := hknown) ((thinksPrimary_congr hknown (congrFun hinc p)).1 hp) hv
     exact ⟨t, h1, h2, h3, by rw [hPL, hnow]; exact h4⟩
   leaseBound := by
     intro r x hx; rw [hRL] at hx; rw [hAR, hPS, hOE, hcfg, hnow]; exact h.leaseBound r x hx
@@ -422,7 +422,8 @@ theorem leaseInvariant_withCore {c : State Node} (hc : Invariant c)
     (hinc : c.incarnation = a.core.incarnation)
     (hlog : ∀ x, a.core.log x <+: c.log x) (hhist : a.core.hist <+: c.hist) :
     LeaseInvariant P (withCore a c) :=
-  leaseInvariant_frame h hc hcfg hknown hinc rfl rfl rfl rfl rfl rfl rfl
+  leaseInvariant_frame h hc (hcfg := hcfg) (hknown := hknown) (hinc := hinc)
+    (hnow := rfl) (hPL := rfl) (hAR := rfl) (hAE := rfl) (hRL := rfl) (hPS := rfl) (hOE := rfl)
     (fun r => ⟨Nat.le_refl _, h.primaryTrafficLe r⟩) h.dataSentLe
     (fun r => Nat.le_trans (h.committedViewLen r) (hlog r).length_le)
     (fun r => by
@@ -546,7 +547,8 @@ theorem leaseInvariant_recvData_noEcho {r : Node} {c : State Node} (hc : Invaria
     (hpre : c.log r <+: a.core.log (primaryOf a.core r)) (hgrow : a.core.log r <+: c.log r) :
     LeaseInvariant P (recvData a r c none) := by
   obtain ⟨hv1, hv2, hv3⟩ := rview_data_ok h hpre hgrow
-  refine leaseInvariant_frame h hc hcfg hknown hinc rfl rfl rfl rfl rfl rfl rfl
+  refine leaseInvariant_frame h hc (hcfg := hcfg) (hknown := hknown) (hinc := hinc)
+    (hnow := rfl) (hPL := rfl) (hAR := rfl) (hAE := rfl) (hRL := rfl) (hPS := rfl) (hOE := rfl)
     (primaryTraffic_bump h r) ?_ ?_ ?_
   · intro x; show update a.dataSent r a.now x ≤ update a.primaryTraffic r a.now x
     unfold update; split_ifs
@@ -679,7 +681,7 @@ theorem leaseInvariant_recvAck {r : Node} {c : State Node} (hc : Invariant c)
   deposed := by
     intro q hq hv
     obtain ⟨t, h1, h2, h3, h4⟩ :=
-      deposed_frame h hcfg hknown ((thinksPrimary_congr hknown (congrFun hinc q)).1 hq) hv
+      deposed_frame h (hcfg := hcfg) (hknown := hknown) ((thinksPrimary_congr hknown (congrFun hinc q)).1 hq) hv
     refine ⟨t, h1, h2, h3, fun x hx => ?_⟩
     rw [hPL] at hx
     by_cases e : q = p ∧ t = r
@@ -912,7 +914,9 @@ theorem leaseInvariant_resync {r : Node} (hne : primaryOf a.core r ≠ r)
     (hke : (a.core.known (primaryOf a.core r)).eligible r = false) :
     LeaseInvariant P (leaseResync a r) := by
   obtain ⟨hCV, hCH⟩ := committedView_reset h (c := resync a.core r) r (fun _ e => resync_log_other e) rfl
-  exact leaseInvariant_frame h (invariant_resync h.core r hne hsy hke) rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
+  exact leaseInvariant_frame h (invariant_resync h.core r hne hsy hke)
+    (hcfg := rfl) (hknown := rfl) (hinc := rfl) (hnow := rfl) (hPL := rfl)
+    (hAR := rfl) (hAE := rfl) (hRL := rfl) (hPS := rfl) (hOE := rfl)
     (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe hCV hCH
 
 /-! ### Restarts -/
@@ -947,7 +951,7 @@ theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c)
       intro e; subst e; change (c.known q).version < c.cfg.version at hv
       rw [hknown, hcfg] at hv; unfold KnowsLatest at hkl; omega
     obtain ⟨t, h1, h2, h3, h4⟩ :=
-      deposed_frame h hcfg hknown ((thinksPrimary_congr hknown (hinc q hqn)).1 hq) hv
+      deposed_frame h (hcfg := hcfg) (hknown := hknown) ((thinksPrimary_congr hknown (hinc q hqn)).1 hq) hv
     exact ⟨t, h1, h2, h3, fun x hx => h4 x (update_row_some _ _ _ _ hx).2⟩
   leaseBound := by
     intro x v hx

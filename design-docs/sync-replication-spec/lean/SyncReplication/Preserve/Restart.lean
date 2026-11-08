@@ -14,9 +14,8 @@ namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
--- Every layer lemma takes the action's whole guard, so some take a part they
--- do not use.
-set_option linter.unusedSectionVars false
+-- Every layer lemma takes the action's guard; a lemma that does not use part of it
+-- says so with `omit ... in`.
 
 section restartEmpty
 
@@ -193,7 +192,8 @@ theorem failover_restartEmpty : FailoverInvariant (restartEmpty s n) := by
     have hAp : ∀ r, (restartEmpty s n).acked p r = s.acked p r := by
       intro r; rw [hA, if_neg hpn, if_neg (fun c => hpp c.1)]
     have hF := h.stale p hp' hv
-    refine hF.transfer hSp (fun _ => rfl) rfl (fun r _ => hAp r) (hLo p hpn) rfl
+    refine hF.transfer (hsync := hSp) (hkn := fun _ => rfl) (hke := rfl)
+      (hack := fun r _ => hAp r) (hlog := (hLo p hpn)) (hprim := rfl)
       (fun hq => (hpa hq).2) (fun hq => by rw [hRo _ (hpa hq).1]; exact hF.fenceLeInheritedEnd (hpa hq).2)
       (fun hq => by rw [hLo _ (hpa hq).1]; exact hF.primHolds (hpa hq).2)
       (fun hq => by rw [restartEmpty_ackHigh_other (hpa hq).1]; exact hF.primAck (hpa hq).2) ?_
@@ -208,6 +208,7 @@ theorem failover_restartEmpty : FailoverInvariant (restartEmpty s n) := by
     refine ⟨m, hm1, ?_⟩
     show s.cfg.incarnation m = (restartEmpty s n).incarnation m; rw [hIo m hmn]; exact hm2 }
 
+omit hkl hsurv in
 /-- `n` stops being authoritative, and every other node keeps its log. -/
 theorem eligibleHoldsCommitted_restartEmpty : EligibleHoldsCommitted (restartEmpty s n) := by
   have hLo : ∀ x, x ≠ n → (restartEmpty s n).log x = s.log x := fun _ => restartEmpty_log_other
@@ -224,7 +225,7 @@ theorem invariant_restartEmpty : Invariant (restartEmpty s n) where
   toMembershipInvariant := membership_restartEmpty h n hkl hsurv
   toCommitInvariant := commit_restartEmpty h n hkl hsurv
   toFailoverInvariant := failover_restartEmpty h n hkl hsurv
-  eligibleHoldsCommitted := eligibleHoldsCommitted_restartEmpty h n hkl hsurv
+  eligibleHoldsCommitted := eligibleHoldsCommitted_restartEmpty h n
 
 end restartEmpty
 
@@ -234,9 +235,10 @@ variable {s : State Node} (h : Invariant s) (n : Node) (hkl : KnowsLatest s n)
 
 include h hkl
 
+omit hkl in
 /-- RestartKeep changes no configuration or incarnation. -/
 theorem config_restartKeep : ConfigInvariant (restartKeep s n) :=
-  (h.toConfigInvariant).frame rfl rfl rfl
+  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
 
 /-- `n`'s acknowledgements are reset and its commit point is 0, so it is below every acknowledgement. -/
 theorem repl_restartKeep : ReplInvariant (restartKeep s n) := by
@@ -370,8 +372,8 @@ theorem failover_restartKeep : FailoverInvariant (restartKeep s n) := by
       have hv' : (s.known p).version < s.cfg.version := hv
       rw [c] at hv'; unfold KnowsLatest at hkl; omega
     have hF := h.stale p hp hv
-    refine hF.transfer (hSo p hpn) (fun _ => rfl) rfl
-      (fun r _ => by rw [hAo p hpn]) rfl rfl id ?_ (fun hq => hF.primHolds hq) (fun hq => hF.primAck hq)
+    refine hF.transfer (hsync := (hSo p hpn)) (hkn := fun _ => rfl) (hke := rfl)
+      (hack := fun r _ => by rw [hAo p hpn]) (hlog := rfl) (hprim := rfl) id ?_ (fun hq => hF.primHolds hq) (fun hq => hF.primAck hq)
       (fun m hm hi => Or.inl ⟨hm, hi, rfl, Nat.le_refl _⟩)
     -- the primary's catch-up point only moves up, to the end of its log
     intro hq
@@ -381,18 +383,19 @@ theorem failover_restartKeep : FailoverInvariant (restartKeep s n) := by
     · rw [hRo _ e]; exact hF.fenceLeInheritedEnd hq
   authEx := h.authEx }
 
+omit hkl in
 /-- No log or incarnation changes. -/
 theorem eligibleHoldsCommitted_restartKeep : EligibleHoldsCommitted (restartKeep s n) := by
   have htp := restartKeep_thinksPrimary (s := s) (n := n)
   exact h.eligibleHoldsCommitted
 
 theorem invariant_restartKeep : Invariant (restartKeep s n) where
-  toConfigInvariant := config_restartKeep h n hkl
+  toConfigInvariant := config_restartKeep h n
   toReplInvariant := repl_restartKeep h n hkl
   toMembershipInvariant := membership_restartKeep h n hkl
   toCommitInvariant := commit_restartKeep h n hkl
   toFailoverInvariant := failover_restartKeep h n hkl
-  eligibleHoldsCommitted := eligibleHoldsCommitted_restartKeep h n hkl
+  eligibleHoldsCommitted := eligibleHoldsCommitted_restartKeep h n
 
 end restartKeep
 
@@ -408,9 +411,10 @@ the truncated log safe is that it covers `n`'s high-water mark: everything `n`'s
 recorded as acknowledged (`ackedHigh`), the whole committed history (`histAck`), and
 every deposed primary's fence (`DeposedFenced.eligHolds`, `DeposedFenced.primAck`). -/
 
+omit hkl hk hkeep in
 /-- RestartPartial changes no configuration or incarnation. -/
 theorem config_restartPartialKeep : ConfigInvariant (restartPartialKeep s n k) :=
-  (h.toConfigInvariant).frame rfl rfl rfl
+  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
 
 /-- `n`'s acknowledgements are reset. The acknowledgement its primary recorded from it is
 within `n`'s high-water mark, which the kept prefix covers, so it is still real. -/
@@ -564,7 +568,8 @@ theorem failover_restartPartialKeep : FailoverInvariant (restartPartialKeep s n 
       rw [c] at hv'; unfold KnowsLatest at hkl; omega
     have hF := h.stale p hp hv
     have hpp := stale_ne_prim h hv
-    refine hF.transfer (hSo p hpn) (fun _ => rfl) rfl (fun r _ => by rw [hAo p hpn]) (hLo p hpn) rfl id
+    refine hF.transfer (hsync := (hSo p hpn)) (hkn := fun _ => rfl) (hke := rfl)
+      (hack := fun r _ => by rw [hAo p hpn]) (hlog := (hLo p hpn)) (hprim := rfl) id
       ?_ ?_ (fun hq => hF.primAck hq) ?_
     · -- the fence is within the primary's high-water mark, hence within the kept prefix
       intro hq
@@ -609,7 +614,7 @@ theorem eligibleHoldsCommitted_restartPartialKeep : EligibleHoldsCommitted (rest
     rw [restartPartialKeep_log_other e]; exact h.eligibleHoldsCommitted x hx'
 
 theorem invariant_restartPartialKeep : Invariant (restartPartialKeep s n k) where
-  toConfigInvariant := config_restartPartialKeep h n k hkl hk hkeep
+  toConfigInvariant := config_restartPartialKeep h n k
   toReplInvariant := repl_restartPartialKeep h n k hkl hk hkeep
   toMembershipInvariant := membership_restartPartialKeep h n k hkl hk hkeep
   toCommitInvariant := commit_restartPartialKeep h n k hkl hk hkeep
@@ -772,6 +777,7 @@ theorem commit_restartPartialFresh : CommitInvariant (restartPartialFresh s n k)
     show s.hist.length ≤ (restartPartialFresh s n k).ackHigh m
     rw [restartPartialFresh_ackHigh_other hmn]; exact h.histAck m hm' }
 
+omit hk hfresh in
 /-- Other nodes' fences do not move, and the survival guard keeps some other node authoritative. -/
 theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s n k) := by
   have hkn : s.known n = s.cfg := h.knownEq n hkl
@@ -797,7 +803,8 @@ theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s 
     have hAp : ∀ r, (restartPartialFresh s n k).acked p r = s.acked p r := by
       intro r; rw [hA, if_neg hpn, if_neg (fun c => hpp c.1)]
     have hF := h.stale p hp' hv
-    refine hF.transfer hSp (fun _ => rfl) rfl (fun r _ => hAp r) (hLo p hpn) rfl
+    refine hF.transfer (hsync := hSp) (hkn := fun _ => rfl) (hke := rfl)
+      (hack := fun r _ => hAp r) (hlog := (hLo p hpn)) (hprim := rfl)
       (fun hq => (hpa hq).2) (fun hq => by rw [hRo _ (hpa hq).1]; exact hF.fenceLeInheritedEnd (hpa hq).2)
       (fun hq => by rw [hLo _ (hpa hq).1]; exact hF.primHolds (hpa hq).2)
       (fun hq => by rw [restartPartialFresh_ackHigh_other (hpa hq).1]; exact hF.primAck (hpa hq).2) ?_
@@ -812,6 +819,7 @@ theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s 
     refine ⟨m, hm1, ?_⟩
     show s.cfg.incarnation m = (restartPartialFresh s n k).incarnation m; rw [hIo m hmn]; exact hm2 }
 
+omit hkl hsurv hk hfresh in
 /-- `n` stops being authoritative, and every other node keeps its log. -/
 theorem eligibleHoldsCommitted_restartPartialFresh : EligibleHoldsCommitted (restartPartialFresh s n k) := by
   have hLo : ∀ x, x ≠ n → (restartPartialFresh s n k).log x = s.log x := fun _ => restartPartialFresh_log_other
@@ -827,8 +835,8 @@ theorem invariant_restartPartialFresh : Invariant (restartPartialFresh s n k) wh
   toReplInvariant := repl_restartPartialFresh h n k hkl hsurv hk hfresh
   toMembershipInvariant := membership_restartPartialFresh h n k hkl hsurv hk hfresh
   toCommitInvariant := commit_restartPartialFresh h n k hkl hsurv hk hfresh
-  toFailoverInvariant := failover_restartPartialFresh h n k hkl hsurv hk hfresh
-  eligibleHoldsCommitted := eligibleHoldsCommitted_restartPartialFresh h n k hkl hsurv hk hfresh
+  toFailoverInvariant := failover_restartPartialFresh h n k hkl hsurv
+  eligibleHoldsCommitted := eligibleHoldsCommitted_restartPartialFresh h n k
 
 end restartPartialFresh
 

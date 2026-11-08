@@ -12,9 +12,8 @@ namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
--- Every layer lemma takes the action's whole guard, so some take a part they
--- do not use.
-set_option linter.unusedSectionVars false
+-- Every layer lemma takes the action's guard; a lemma that does not use part of it
+-- says so with `omit ... in`.
 
 section commit
 
@@ -22,9 +21,10 @@ variable {s : State Node} (h : Invariant s) (p : Node) (hp : ThinksPrimary s p) 
 
 include h hp hlen hcap
 
+omit hp hlen hcap in
 /-- Commit changes no configuration. -/
 theorem config_commit : ConfigInvariant (commitNext s p) :=
-  (h.toConfigInvariant).frame rfl rfl rfl
+  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
 
 /-- The commit guard requires every sync replica to have acknowledged past the new commit point. -/
 theorem repl_commit : ReplInvariant (commitNext s p) := by
@@ -68,9 +68,11 @@ theorem repl_commit : ReplInvariant (commitNext s p) := by
     · subst hx; exact hcap r hs
     · exact h.syncCommit q r hq hs }
 
+omit hp hlen hcap in
 /-- Commit changes no sync replica set or eligibility. -/
 theorem membership_commit : MembershipInvariant (commitNext s p) :=
-  (h.toMembershipInvariant).frame rfl rfl rfl rfl rfl rfl
+  (h.toMembershipInvariant).frame
+    (hsync := rfl) (hacked := rfl) (hcfg := rfl) (hknown := rfl) (hinc := rfl) (hinherited := rfl)
 
 /-- The newly committed entry is the history's entry at that offset, or extends the history by one. -/
 theorem commit_commit : CommitInvariant (commitNext s p) := by
@@ -185,7 +187,8 @@ theorem failover_commit : FailoverInvariant (commitNext s p) := by
   obtain ⟨hH1, hH2, hH3, hH4⟩ := hH
   exact {
   -- Commit moves only commit points and the history, which the fence does not mention.
-  stale := fun q hq hv => (h.stale q hq hv).mono rfl rfl rfl rfl (fun _ => List.prefix_refl _)
+  stale := fun q hq hv => (h.stale q hq hv).mono (hcfg := rfl) (hknown := rfl) (hinherited := rfl) (hinc := rfl)
+      (fun _ => List.prefix_refl _)
     (commitNext_ackHigh_le p) (fun x => h.ackedLe q x hq) (fun _ x => x) (fun _ _ => rfl)
   authEx := h.authEx }
 
@@ -229,9 +232,9 @@ theorem eligibleHoldsCommitted_commit : EligibleHoldsCommitted (commitNext s p) 
     rw [hh]; exact h.eligibleHoldsCommitted n hn
 
 theorem invariant_commit : Invariant (commitNext s p) where
-  toConfigInvariant := config_commit h p hp hlen hcap
+  toConfigInvariant := config_commit h p
   toReplInvariant := repl_commit h p hp hlen hcap
-  toMembershipInvariant := membership_commit h p hp hlen hcap
+  toMembershipInvariant := membership_commit h p
   toCommitInvariant := commit_commit h p hp hlen hcap
   toFailoverInvariant := failover_commit h p hp hlen hcap
   eligibleHoldsCommitted := eligibleHoldsCommitted_commit h p hp hlen hcap
@@ -244,9 +247,10 @@ variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p
 
 include h r hp hrp hf hcup
 
+omit hp hrp hf hcup in
 /-- Count changes no configuration. -/
 theorem config_count : ConfigInvariant (count s p r) :=
-  (h.toConfigInvariant).frame rfl rfl rfl
+  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
 
 /-- `r` has acknowledged up to the catch-up point, which is at least `p`'s commit point, so `p` still never commits past a sync replica's acknowledgement. -/
 theorem repl_count : ReplInvariant (count s p r) := by
@@ -284,10 +288,13 @@ theorem membership_count : MembershipInvariant (count s p r) := by
       exact ⟨hf, this⟩
   eligibleInOldConfig := h.eligibleInOldConfig }
 
+omit hp hrp hf hcup in
 /-- Count changes no commit point, catch-up point or history. -/
 theorem commit_count : CommitInvariant (count s p r) :=
-  (h.toCommitInvariant).frame rfl rfl rfl rfl rfl rfl rfl
+  (h.toCommitInvariant).frame
+    (hcommit := rfl) (hinherited := rfl) (hlog := rfl) (hhist := rfl) (hcfg := rfl) (hinc := rfl) (hah := rfl)
 
+omit hp hrp hf hcup in
 /-- Adding a sync replica does not move a fence. -/
 theorem failover_count : FailoverInvariant (count s p r) := by
   have hS := count_sync (s := s) p r
@@ -295,22 +302,24 @@ theorem failover_count : FailoverInvariant (count s p r) := by
   stale := by
     -- Count only adds a replica to a sync replica set.
     intro q hq hv
-    refine (h.stale q hq hv).mono rfl rfl rfl rfl (fun _ => List.prefix_refl _) (fun _ => Nat.le_refl _)
+    refine (h.stale q hq hv).mono (hcfg := rfl) (hknown := rfl) (hinherited := rfl) (hinc := rfl)
+      (fun _ => List.prefix_refl _) (fun _ => Nat.le_refl _)
       (fun x => h.ackedLe q x hq) ?_ (fun _ _ => rfl)
     intro x hx; show (count s p r).sync q x = true; rw [hS]; simp [hx]
   authEx := h.authEx }
 
+omit hp hrp hf hcup in
 /-- Count moves no log. -/
 theorem eligibleHoldsCommitted_count : EligibleHoldsCommitted (count s p r) := by
   exact h.eligibleHoldsCommitted
 
 theorem invariant_count : Invariant (count s p r) where
-  toConfigInvariant := config_count h p r hp hrp hf hcup
+  toConfigInvariant := config_count h p r
   toReplInvariant := repl_count h p r hp hrp hf hcup
   toMembershipInvariant := membership_count h p r hp hrp hf hcup
-  toCommitInvariant := commit_count h p r hp hrp hf hcup
-  toFailoverInvariant := failover_count h p r hp hrp hf hcup
-  eligibleHoldsCommitted := eligibleHoldsCommitted_count h p r hp hrp hf hcup
+  toCommitInvariant := commit_count h p r
+  toFailoverInvariant := failover_count h p r
+  eligibleHoldsCommitted := eligibleHoldsCommitted_count h p r
 
 end count
 
@@ -321,10 +330,12 @@ variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p
 
 include h hp hs hel
 
+omit hp hs hel in
 /-- Uncount changes no configuration. -/
 theorem config_uncount : ConfigInvariant (uncount s p r) :=
-  (h.toConfigInvariant).frame rfl rfl rfl
+  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
 
+omit hp hs hel in
 /-- Removing a sync replica only weakens the commit rule's obligation. -/
 theorem repl_uncount : ReplInvariant (uncount s p r) := by
   have hS := uncount_sync (s := s) p r
@@ -360,9 +371,11 @@ theorem membership_uncount : MembershipInvariant (uncount s p r) := by
     exact h.syncNew x hx.1 hex
   eligibleInOldConfig := h.eligibleInOldConfig }
 
+omit hp hs hel in
 /-- Uncount changes no commit point, catch-up point or history. -/
 theorem commit_uncount : CommitInvariant (uncount s p r) :=
-  (h.toCommitInvariant).frame rfl rfl rfl rfl rfl rfl rfl
+  (h.toCommitInvariant).frame
+    (hcommit := rfl) (hinherited := rfl) (hlog := rfl) (hhist := rfl) (hcfg := rfl) (hinc := rfl) (hah := rfl)
 
 /-- A deposed primary may drop members, but only ones it does not list as eligible, and
 only those it lists as eligible fence it: the member that sets its fence stays. An
@@ -396,16 +409,17 @@ theorem failover_uncount : FailoverInvariant (uncount s p r) := by
         rw [d2, hel] at hold; exact absurd hold (by decide)
   authEx := h.authEx }
 
+omit hp hs hel in
 /-- Uncount moves no log. -/
 theorem eligibleHoldsCommitted_uncount : EligibleHoldsCommitted (uncount s p r) := h.eligibleHoldsCommitted
 
 theorem invariant_uncount : Invariant (uncount s p r) where
-  toConfigInvariant := config_uncount h p r hp hs hel
-  toReplInvariant := repl_uncount h p r hp hs hel
+  toConfigInvariant := config_uncount h p r
+  toReplInvariant := repl_uncount h p r
   toMembershipInvariant := membership_uncount h p r hp hs hel
-  toCommitInvariant := commit_uncount h p r hp hs hel
+  toCommitInvariant := commit_uncount h p r
   toFailoverInvariant := failover_uncount h p r hp hs hel
-  eligibleHoldsCommitted := eligibleHoldsCommitted_uncount h p r hp hs hel
+  eligibleHoldsCommitted := eligibleHoldsCommitted_uncount h p r
 
 end uncount
 

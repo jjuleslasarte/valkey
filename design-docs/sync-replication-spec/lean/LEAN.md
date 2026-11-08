@@ -507,22 +507,22 @@ type; `Quot.sound` through function extensionality.
 |---|---|
 | `SyncReplication/Model.lean` | 459 |
 | `SyncReplication/Leases.lean` | 314 |
-| `SyncReplication/LeaseInvariant.lean` | 1,052 |
+| `SyncReplication/LeaseInvariant.lean` | 1,056 |
 | `SyncReplication/Replies.lean` | 129 |
 | `SyncReplication/Invariant.lean` | 462 |
 | `SyncReplication/Contracts.lean` | 616 |
-| `SyncReplication/Preserve/Replication.lean` | 336 |
-| `SyncReplication/Preserve/Commit.lean` | 412 |
-| `SyncReplication/Preserve/Config.lean` | 589 |
-| `SyncReplication/Preserve/Failover.lean` | 291 |
-| `SyncReplication/Preserve/Restart.lean` | 835 |
+| `SyncReplication/Preserve/Replication.lean` | 343 |
+| `SyncReplication/Preserve/Commit.lean` | 426 |
+| `SyncReplication/Preserve/Config.lean` | 593 |
+| `SyncReplication/Preserve/Failover.lean` | 290 |
+| `SyncReplication/Preserve/Restart.lean` | 843 |
 | `SyncReplication/Preserve.lean` | 56 |
 | `SyncReplication/Safety.lean` | 107 |
 | `SyncReplication/Durability.lean` | 249 |
 | `SyncReplication/Counterexamples/` (18 files) | 1,718 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 8,070 (plus the two root imports, 23 lines) |
+| total | 8,106 (plus the two root imports, 23 lines) |
 
 `lake build` of the whole tree takes about 20 seconds warm on a laptop-class
 machine (1,043 jobs including Mathlib's and CSLib's prebuilt modules).
