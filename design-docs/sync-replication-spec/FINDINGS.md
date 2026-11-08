@@ -306,26 +306,16 @@ configuration records for it.
 
 Section 4: "If the replica falls behind or fails before step 4, the primary
 simply removes it from the commit calculation." The Lean model has this as
-`Uncount`, and the proofs cover it with two conditions. "Before step 4" is
+`Uncount`. "Before step 4" is
 load-bearing: dropping a replica that is already eligible lets the primary
 commit without it (`SyncReplication.uncountElig_unsafe`, 9 steps, min-sync = 1;
 TLC `Core_earlyDrop`, `CoreRecon_earlyDropMin1`, `CoreRestart_earlyDropMin1`).
-The model also allows early removal only to a primary that knows the latest
-configuration: a deposed primary that drops the member whose frozen
-acknowledgement fences it could commit past what the new configuration holds.
-The second condition is not shown needed. `SyncReplication.uncountDeposed_unsafe`
-(7 steps, min-sync = 0) drops it while still checking eligibility in the
-latest configuration: Takeover drops the new primary from the eligible set,
-so the deposed primary drops it and commits a write the new primary does not
-hold. But the deposed primary has not seen that configuration; in its own, the
-new primary is eligible, and "before step 4" already forbids dropping it. So
-the run shows only that the model's two conditions go together. With the
-check in the primary's own configuration there is no counterexample, and the
-proof uses the second condition there too.
+"Not yet eligible" is read in the primary's own configuration, and that is
+enough: the proofs hold with no requirement that the primary knows the latest
+configuration, so a deposed primary may drop such a replica too. (An earlier
+version of the model required it; the proof no longer does.)
 **Proposed doc change:** state that early removal applies to replicas not yet
-committed as eligible. Holding the latest shard configuration is a
-defensive addition (it covers a primary that does not learn the outcome of
-its own promotion), not one a run shows needed.
+committed as eligible, as the primary itself sees it.
 
 ## Survival condition (an assumption, not a defect)
 
