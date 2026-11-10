@@ -47,7 +47,7 @@ variable {Node : Type} [DecidableEq Node]
 
 def replyInit (i : Node) : ReplyState Node := ⟨init i, [], []⟩
 
-/-- `Write(p)`: AppendWrite plus a held reply at the new length. -/
+/-- `write a p`: `appendWrite` plus a held reply at the new length. -/
 def write (a : ReplyState Node) (p : Node) : ReplyState Node :=
   ⟨appendWrite a.core p, ⟨p, (a.core.log p).length + 1, a.core.replId p⟩ :: a.held, a.acknowledged⟩
 
@@ -57,15 +57,15 @@ fence of a deposed primary.) -/
 def ReplyFenced (s : State Node) (h : Held Node) : Prop :=
   ThinksPrimary s h.primary ∧ s.replId h.primary = h.replId
 
-/-- `Release(h)`: OK. -/
+/-- `release a h`: the client is told OK. -/
 def release (a : ReplyState Node) (h : Held Node) : ReplyState Node :=
   ⟨a.core, a.held.erase h, (h.offset, h.replId) :: a.acknowledged⟩
 
-/-- `Abort(h)`: UNCOMMITTED. -/
+/-- `abort a h`: the client is told UNCOMMITTED. -/
 def abort (a : ReplyState Node) (h : Held Node) : ReplyState Node :=
   ⟨a.core, a.held.erase h, a.acknowledged⟩
 
-/-- `NewId(p)`: `p` takes a fresh replication ID without a takeover (Valkey's
+/-- `newId a p`: `p` takes a fresh replication ID without a takeover (Valkey's
 `changeReplicationId` when a primary creates or frees its backlog, on
 `DEBUG change-repl-id`, and at a primary's restart). -/
 def newId (a : ReplyState Node) (p : Node) : ReplyState Node :=
@@ -98,34 +98,34 @@ inductive ReplyStep (m : Nat) : ReplyState Node → ReplyAction Node → ReplySt
       ReplyStep m a (.abort h) (abort a h)
   /-- Any node may take a fresh replication ID at any time. -/
   | newId (a : ReplyState Node) (p : Node) : ReplyStep m a (.newId p) (newId a p)
-  | restartEmpty (a : ReplyState Node) (n : Node) : (hkl : KnowsLatest a.core n) → (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+  | restartEmpty (a : ReplyState Node) (n : Node) : (hKnowsLatest : KnowsLatest a.core n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       ReplyStep m a (.restartEmpty n) ⟨restartEmpty a.core n, dropHeld a.held n, a.acknowledged⟩
-  | restartKeep (a : ReplyState Node) (n : Node) : (hkl : KnowsLatest a.core n) →
+  | restartKeep (a : ReplyState Node) (n : Node) : (hKnowsLatest : KnowsLatest a.core n) →
       ReplyStep m a (.restartKeep n) ⟨restartKeep a.core n, dropHeld a.held n, a.acknowledged⟩
   /-- RestartPartial, keeping the incarnation; `n`'s held replies are dropped with its
   client connections, as for the other restarts. -/
-  | restartPartialKeep (a : ReplyState Node) (n : Node) (k : Nat) : (hkl : KnowsLatest a.core n) →
-      (hk : k < (a.core.log n).length) → (hkeep : a.core.ackHigh n ≤ k) →
+  | restartPartialKeep (a : ReplyState Node) (n : Node) (k : Nat) : (hKnowsLatest : KnowsLatest a.core n) →
+      (hFileShorter : k < (a.core.log n).length) → (hCoversAcks : a.core.ackHigh n ≤ k) →
       ReplyStep m a (.restartPartial n k) ⟨restartPartialKeep a.core n k, dropHeld a.held n, a.acknowledged⟩
   /-- RestartPartial, taking a new incarnation. -/
-  | restartPartialFresh (a : ReplyState Node) (n : Node) (k : Nat) : (hkl : KnowsLatest a.core n) →
-      (hk : k < (a.core.log n).length) → (hfresh : k < a.core.ackHigh n) → (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+  | restartPartialFresh (a : ReplyState Node) (n : Node) (k : Nat) : (hKnowsLatest : KnowsLatest a.core n) →
+      (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       ReplyStep m a (.restartPartial n k) ⟨restartPartialFresh a.core n k, dropHeld a.held n, a.acknowledged⟩
 
 /-- The acknowledgement layer as a labelled transition system. -/
-def replyLTS (m : Nat) : LTS (ReplyState Node) (ReplyAction Node) where
+def replyTransitionSystem (m : Nat) : LTS (ReplyState Node) (ReplyAction Node) where
   Tr := ReplyStep m
 
 /-- The layer states reachable from `replyInit i` by any finite run. -/
 def ReplyReachable (m : Nat) (i : Node) (a : ReplyState Node) : Prop :=
-  (replyLTS m).CanReach (replyInit i) a
+  (replyTransitionSystem m).CanReach (replyInit i) a
 
 theorem ReplyReachable.init {m : Nat} (i : Node) : ReplyReachable m i (replyInit i) :=
-  LTS.CanReach.refl (replyLTS m) _
+  LTS.CanReach.refl (replyTransitionSystem m) _
 
 theorem ReplyReachable.stepR {m : Nat} {i : Node} {a a' : ReplyState Node} {μ : ReplyAction Node}
     (h : ReplyReachable m i a) (hs : ReplyStep m a μ a') : ReplyReachable m i a' :=
-  let ⟨_, run⟩ := h; ⟨_, LTS.MTr.stepR (replyLTS m) run hs⟩
+  let ⟨_, run⟩ := h; ⟨_, LTS.MTr.stepR (replyTransitionSystem m) run hs⟩
 
 /-- AckedDurable: every acknowledged `(o, v)` is the committed history's entry at offset `o`
 (1-based, so `getD (o-1)`). -/

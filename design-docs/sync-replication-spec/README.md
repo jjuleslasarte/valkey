@@ -59,9 +59,9 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   earned eligibility or primaryship.
 - **Shard configuration.** Cluster V2 stores the primary, the eligible set and the
   incarnation recorded for each node. Every change increments the
-  configuration version. We assume the Cluster V2 implementation is correct and treat
+  configuration epoch. We assume the Cluster V2 implementation is correct and treat
   the configuration as a compare-and-set register: one totally ordered sequence of
-  versions, each change a compare-and-set on the previous one (design §6). Each node
+  epochs, each change a compare-and-set on the previous one (design §6). Each node
   also keeps the configuration it last learned, which may be stale.
 - **Replication.** A replica receives its primary's replication stream, applies the
   entries in log order, and sends `REPLCONF ACK` with its replication offset. It
@@ -162,7 +162,9 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   with its data rebuilds its
   sync replica set from the configuration it knows. Volatile state is lost in every
   case: the committed offset, the sync replica set, the acknowledgements, and the
-  client connections with their held replies.
+  client connections with their held replies. The model has one log per node and does
+  not distinguish memory from disk: a restart keeps the log, empties it, or keeps a
+  prefix of it.
 
 Messages are not modelled as separate objects. A replica reads its primary's log
 directly, and an acknowledgement updates the primary's view directly, with the
@@ -246,10 +248,10 @@ layer is stated in terms of the ones before it. The names are the field names in
 
 **Configuration** (`ConfigInvariant`, design §6). Cluster V2 holds one totally
 ordered configuration; each node's copy may be behind it but never ahead.
-- `knownLe`: no node has seen a configuration newer than the latest.
-- `knownEq`: a node that has seen the latest version has the latest configuration.
+- `localCfgLe`: no node has seen a configuration newer than the latest.
+- `localCfgEq`: a node that has seen the latest epoch has the latest configuration.
 - `primKnows`: the current primary knows the configuration that made it primary.
-- `knownIncLe`: no node's copy of the configuration records an incarnation newer than
+- `localCfgIncLe`: no node's copy of the configuration records an incarnation newer than
   the node's own, so a node that came back empty never matches its old record. For the
   latest configuration this follows (`ConfigInvariant.incLe`).
 
@@ -347,7 +349,7 @@ by `primCanRead_reachable` and `replCanRead_reachable`.
 
 **Which conjuncts the proof needs.** Each conjunct was deleted in turn and the proof
 rebuilt (Experiment B, a sweep of scratch builds not kept in the repository). None is dead. Three follow from the others and are lemmas now,
-not conjuncts: `ConfigInvariant.incLe` (from `knownIncLe` at the current primary and
+not conjuncts: `ConfigInvariant.incLe` (from `localCfgIncLe` at the current primary and
 `primKnows`), `CommitInvariant.commitWithinHistory` (from `commitWithinLog` and
 `committedIsHistoryPrefix`) and, in the lease layer, `LeaseInvariant.readLeaseLe` (from
 `leaseBound`, `ackReceivedLe` and `primarySinceLe`). The rest are load-bearing. In the
@@ -356,26 +358,26 @@ without it; the others come from a map of the uses of the conjunct, leaving out 
 that only re-establish the same conjunct, so a listed use may still be replaceable by a
 different proof, and an action may be missing where the map was incomplete. The map was made before early removal
 dropped `KnowsLatest` and the fence counted only eligible members; the rows those
-changes touch (`knownEq`, `primKnows`, `eligibleInOldConfig`) are corrected by hand.
+changes touch (`localCfgEq`, `primKnows`, `eligibleInOldConfig`) are corrected by hand.
 
 | Conjunct | Layer | Needed by |
 |---|---|---|
-| `knownLe` | Config | Commit, MakeEligible, MakeIneligible, Takeover; NoStaleRead |
-| `knownEq` | Config | MakeEligible, MakeIneligible, Takeover, the restarts; the reply and lease layers |
-| `primKnows` | Config | Commit, MakeEligible, Learn, MakeIneligible, Takeover, Resync, Uncount; `commit_two_copies` |
-| `knownIncLe` | Config | RestartEmpty, RestartPartialFresh |
+| `localCfgLe` | Config | Commit, MakeEligible, MakeIneligible, Takeover; NoStaleRead |
+| `localCfgEq` | Config | MakeEligible, MakeIneligible, Takeover, the restarts; the reply and lease layers |
+| `primKnows` | Config | Commit, MakeEligible, Learn, MakeIneligible, Takeover, Resync, RemoveFromSyncSet; `commit_two_copies` |
+| `localCfgIncLe` | Config | RestartEmpty, RestartPartialFresh |
 | `noSelfSync` | Replication | Commit, MakeEligible, RestartKeep, RestartPartialKeep; `commit_two_copies` |
 | `ackedPrim` | Replication | Commit, Takeover, Learn |
-| `ackedLe` | Replication | AppendWrite, Replicate, Ack, Commit, Count, MakeEligible, Takeover |
+| `ackedLe` | Replication | AppendWrite, Replicate, Ack, Commit, AddToSyncSet, MakeEligible, Takeover |
 | `ackHolds` | Replication | Commit, Learn, MakeEligible, Takeover |
 | `ackedHigh` | Replication | Commit, MakeEligible, Learn, Takeover, RestartPartialKeep |
 | `syncCommit` | Replication | MakeEligible |
 | `eligibleCounted` | Membership | Commit, Takeover |
 | `syncNew` | Membership | MakeEligible |
-| `eligibleInOldConfig` | Membership | Resync, Learn, Uncount (the fence) |
-| `commitWithinLog` | Commit | the `Safety` statement; Count, Resync, Commit, AppendWrite, Replicate |
+| `eligibleInOldConfig` | Membership | Resync, Learn, RemoveFromSyncSet (the fence) |
+| `commitWithinLog` | Commit | the `Safety` statement; AddToSyncSet, Resync, Commit, AppendWrite, Replicate |
 | `committedIsHistoryPrefix` | Commit | the `Safety` statement; Commit, the reply layer's Release, NoStaleRead, data messages |
-| `inheritedEndWithinLog` | Commit | Count, RestartKeep; NoStaleRead |
+| `inheritedEndWithinLog` | Commit | AddToSyncSet, RestartKeep; NoStaleRead |
 | `historyWithinCommitOrInherited` | Commit | MakeEligible; NoStaleRead |
 | `histAck` | Commit | RestartPartialKeep |
 | `stale` | Failover | Commit |
@@ -441,13 +443,13 @@ What these say about the design's own wording is in Appendix B.
 | Property 6 (no stale linearizable read, `margin ≥ 2 · drift`) | `SyncReplication.noStaleRead` |
 | Properties 1 and 2 under the lease layer | `SyncReplication.lease_safety` |
 | Lease margin and durations | `Lease/` |
-| Each rule in Appendix B with a counterexample is needed | `SyncReplication.noReconcile_unsafe`, `noCatchUp_unsafe`, `resyncEligible_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `uncountElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `grantNoIncRestart_stale`, `smallMargin_stale`, `restartKeepsReadLease_stale`, `restartNoDemotionWait_stale`, `restartForgetsTimer_stale`, `takeoverNoDemotionWait_stale`, `grantWithoutPrimaryLease_stale` |
+| Each rule in Appendix B with a counterexample is needed | `SyncReplication.noReconcile_unsafe`, `noCatchUp_unsafe`, `resyncEligible_unsafe`, `noReplyFence_unsafe`, `noRebuild_unsafe`, `noIncCheck_unsafe`, `noIncWritable_oneCopy`, `removeFromSyncSetElig_unsafe`, `staleRestoreKeepsInc_unsafe`, `staleRestoreKeepsInc_loses`, `noSurvivor_loses`, `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale`, `grantSync_stale`, `grantNoIncRestart_stale`, `smallMargin_stale`, `restartKeepsReadLease_stale`, `restartNoDemotionWait_stale`, `restartForgetsTimer_stale`, `takeoverNoDemotionWait_stale`, `grantWithoutPrimaryLease_stale` |
 | Property 6 is not vacuous: the primary holding its lease from an eligible replica may serve a read | `SyncReplication.primCanRead_reachable` |
 | Property 6 is not vacuous: a replica holding a read lease may serve a read | `SyncReplication.replCanRead_reachable` |
 | A new primary may demote a replica it promoted itself without the post-takeover wait | `SyncReplication.demoteNew_reachable` |
 | Resync's guard that the replica is not counted excludes a reachable state (no counterexample without it) | `SyncReplication.countedDiverged_reachable` |
 
-Size: the model is 930 lines (476 for the protocol, 140 for the held-reply layer,
+Size: the model is 934 lines (480 for the protocol, 140 for the held-reply layer,
 314 for the lease layer), the invariants and their lemmas 1,531 (475 for replication,
 1,056 for leases, which includes their preservation), the per-action contracts 616,
 and the replication preservation proofs 2,551. Lean checks the whole of
@@ -624,13 +626,13 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 
 | Path | Contents | Lines |
 |---|---|---|
-| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 476 |
+| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 480 |
 | `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 140 |
 | `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 314 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 475 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
 | `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,551 |
-| `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies`, `committed_inherited_first` | 107 |
+| `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies`, `committed_inherited_first` | 109 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 278 |
 | `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,056 |
 | `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,718 |
@@ -652,7 +654,7 @@ dispatch that ties preservation to the step relation.
 fields not mentioned are unchanged. Guards live in the `Step` constructors, and each
 step carries the label of the action that fired (`Action`), so a run is a list of
 actions. The protocol is packaged as a labelled transition system from CSLib
-(`lts m : LTS (State Node) (Action Node)`, with `m` the `min-sync-replicas` value),
+(`transitionSystem m : LTS (State Node) (Action Node)`, with `m` the `min-sync-replicas` value),
 and `Reachable m i s` is CSLib's `CanReach` from `init i`: the existence of a run.
 Names follow the design where it has one (`ThinksPrimary`, `KnowsLatest`,
 `IsAuthoritative`, `Writable`, `catchUpPoint`). A counterexample is a concrete run on
@@ -836,7 +838,7 @@ reference.
 | `inductive Action`, `inductive Step` | `Action` is an ordinary enumeration, one case per protocol action. `Step` is a proposition defined by its introduction rules: a `Step m s μ s'` can only be built from the constructor for action `μ`, so a proof of it is a record of which action fired and evidence that its guards held. `Step` is an *inductively defined proposition*; because it is indexed by states and a label it is also an *inductive family*. | Ch. 7, Inductive Types (§7.3, §7.7) |
 | `cases hs with \| append … \| replicate …` in `invariant_step` | Case analysis on which constructor built the step. Lean checks that every constructor is handled. This is the proof-side counterpart of `Step`'s definition. | Ch. 7 (§7.6, Tactics for Inductive Types) |
 | `invariant_trInv`, `LTS.mtrInv_of_trInv` in `invariant_reachable` | "`Invariant` holds initially and every step keeps it" implies "`Invariant` holds in every reachable state". The induction over the run is CSLib's lemma (Appendix A.8); the proof here only supplies the one-step fact. | Ch. 7, Ch. 8 |
-| `structure ConfigInvariant … `, `structure Invariant … extends …` | Record types whose fields are propositions. `Invariant` extends five sub-records, so each conjunct has a name (`h.knownEq`), can be cited alone, and the five layers can be proved separately and assembled with `where`. | Ch. 9, Structures and Records |
+| `structure ConfigInvariant … `, `structure Invariant … extends …` | Record types whose fields are propositions. `Invariant` extends five sub-records, so each conjunct has a name (`h.localCfgEq`), can be cited alone, and the five layers can be proved separately and assembled with `where`. | Ch. 9, Structures and Records |
 | `theorem invariant_takeover : Invariant … where toConfigInvariant := …` | A proof written as a term, field by field, rather than as a tactic script. TPIL contrasts term-style and tactic-style proofs and notes that tactic proofs are harder to read because the reader must predict the effect of each step; where a proof is an assembly of named parts we write it as a term. | Ch. 3, Ch. 5 (introduction) |
 | `by … · … · …`, `show …`, `have …`, `refine ⟨…, ?_⟩`, `exact …` | Tactic proofs structured so each sub-goal is a bullet (`·`) that must be closed in place, with `show` stating the goal being proved. TPIL recommends this structure for readability and robustness, and recommends `exact` over `apply` where the term should close the goal exactly, because a failure then points at the real problem. | Ch. 5, Tactics (§5.4, Structuring Tactic Proofs) |
 | `variable {Node : Type} [DecidableEq Node]`, section variables for guards in `Preserve/` | Parameters shared by every declaration in a section or file, so a theorem's statement shows only what is specific to it. | Ch. 6, Interacting with Lean (§6.3, §6.4) |
@@ -865,9 +867,9 @@ ours.
 
 | CSLib | What it is | Where this proof uses it |
 |---|---|---|
-| `LTS State Label` | A *labelled transition system*: a relation `Tr : State → Label → State → Prop`. The whole protocol is one value of this type, `lts m`, whose relation is `Step m`. | `Model.lean`, `Replies.lean` |
+| `LTS State Label` | A *labelled transition system*: a relation `Tr : State → Label → State → Prop`. The whole protocol is one value of this type, `transitionSystem m`, whose relation is `Step m`. | `Model.lean`, `Replies.lean` |
 | `MTr s μs s'` | A *run*: a finite sequence of transitions from `s` to `s'` whose labels are the list `μs`. Built from `refl` (the empty run) and `stepL` (one transition in front of a run); `comp` joins two runs. | Every counterexample is an `MTr` from `init 0`, and its label list is the trace in the statement. |
-| `CanReach s s'` | *Reachability*: some run leads from `s` to `s'`. `Reachable m i s` is defined as `(lts m).CanReach (init i) s`. | The hypothesis of every safety theorem |
+| `CanReach s s'` | *Reachability*: some run leads from `s` to `s'`. `Reachable m i s` is defined as `(transitionSystem m).CanReach (init i) s`. | The hypothesis of every safety theorem |
 | `TrInv p`, `MTrInv p`, `mtrInv_of_trInv` | A *one-step invariant* (every transition preserves `p`), a *run invariant* (every run preserves `p`), and the lemma that the first implies the second. The library does the induction over the run. | `invariant_reachable`, `replyInvariant_reachable` |
 
 Nothing about the protocol comes from CSLib; the model, invariant and preservation
@@ -903,7 +905,7 @@ promotes n2, whose log is empty. n2 is now eligible without the committed write.
 Rule: until the new primary has committed its inherited log, promotion catch-up and
 full resync are measured against the end of that log. Counterexample:
 `noReconcile_unsafe` (11 steps, `min-sync-replicas = 1`). The run removes only the
-catch-up part of the rule, in Count; that the resync bound is needed on its own is not
+catch-up part of the rule, in AddToSyncSet; that the resync bound is needed on its own is not
 shown. The fix as first proposed also blocked client writes until the inherited log was
 committed. That block is not needed for safety: with it removed every theorem still
 holds, and `committed_inherited_first` shows the inherited offsets still commit first.
@@ -940,7 +942,7 @@ so n0 keeps acting as primary. It counts n2, whose log is empty, and makes it
 eligible. n2 is now authoritative without the committed write. Rule: a node acts as
 primary only if its configuration records its current incarnation (`ThinksPrimary`
 in the model). Counterexample: `noIncCheck_unsafe` (9 steps); the run drops the check
-from Count and MakeEligible only.
+from AddToSyncSet and MakeEligible only.
 
 **`min-sync-replicas` counts only matching incarnations**
 (`Counterexamples/MinSyncIncarnation.lean`). The design says a node that restarts
@@ -976,14 +978,14 @@ offset (a replica's is 0) and the acknowledgements it sent as a replica (a prima
 commits are not among them; the initial primary has sent none). Counterexample:
 `staleRestoreKeepsInc_unsafe` (8 steps) and `staleRestoreKeepsInc_loses` (9).
 
-**Early removal only before eligibility** (`Counterexamples/Uncount.lean`). Design §4
+**Early removal only before eligibility** (`Counterexamples/RemoveFromSyncSet.lean`). Design §4
 says a primary may drop a counted replica that falls behind or fails "before step 4".
 The qualifier is load-bearing. Scenario: n0 promotes n1 and n2 and writes; n2
 acknowledges; n0 drops n1 from its sync replica set and commits with n2's
 acknowledgement only. n1 is eligible and authoritative without the committed write.
 Rule: a replica that is already eligible leaves the sync replica set only through
 demotion. This is the design's own second ordering rule; the entry records that early
-removal must respect it. Counterexample: `uncountElig_unsafe` (9 steps,
+removal must respect it. Counterexample: `removeFromSyncSetElig_unsafe` (9 steps,
 `min-sync-replicas = 1`). The check is in the primary's own configuration, and early
 removal does not require the primary to know the latest one: a deposed primary may
 drop a member it does not list as eligible. An earlier version of the model required
@@ -1001,15 +1003,15 @@ history is non-empty and no node's log holds it. Counterexample: `noSurvivor_los
 **Replication rules the proof uses, each shown needed.** These rules are in the design
 or in the model as described in section 1; each entry deletes one and gives the run
 that breaks property 1 without it.
-- *Count waits for the catch-up point* (`Counterexamples/CatchUp.lean`): a primary
+- *AddToSyncSet waits for the catch-up point* (`Counterexamples/CatchUp.lean`): a primary
   counts a replica only once it has acknowledged up to the primary's catch-up point,
   which is the design's committed offset (promotion step 1) once the primary has
   reconciled. Scenario: a write commits on n0 and n1; n0 counts n2, which has
   acknowledged nothing, and makes it eligible. n2 is authoritative with an empty log.
-  The design's own guard forbids the Count, so the run is about the design's half of
+  The design's own guard forbids the AddToSyncSet, so the run is about the design's half of
   the rule. Counterexample: `noCatchUp_unsafe` (8 steps, `min-sync-replicas = 1`).
-  F1's run is a second one, for the reconciliation half: Count measured against the
-  primary's own commit point is a special case of Count with no guard
+  F1's run is a second one, for the reconciliation half: AddToSyncSet measured against the
+  primary's own commit point is a special case of AddToSyncSet with no guard
   (`stepNoCatchUp_of_stepNoReconcile`).
 - *Resync only a replica that is not eligible* (`Counterexamples/ResyncEligible.lean`):
   a primary that restarts from a stale persistence file can hold less than an
@@ -1041,7 +1043,7 @@ kept. The model's MakeEligible updates the latest configuration and the primary'
 step, so a primary always knows the outcome of its own promotion. In the real system the
 compare-and-set can commit while the primary has not seen the result; a primary that
 then drops the replica as "not eligible in my view" drops an eligible one, which is
-`uncountElig_unsafe`. So the relaxed rule is safe only if a primary treats an
+`removeFromSyncSetElig_unsafe`. So the relaxed rule is safe only if a primary treats an
 outstanding step-4 compare-and-set as possibly committed. The design's own wording, "before step 4" (before the primary
 proposes the compare-and-set), is safe either way.
 

@@ -36,7 +36,7 @@ inductive LeaseStepRestartNoDemotionWait (m : Nat) (P : LeaseParams) :
         (leaseRestartWithoutDemotionWait a n (restartKeep a.core n))
 
 /-- The weakened lease layer as a transition system. -/
-def leaseLTSRestartNoDemotionWait (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+def leaseTransitionSystemRestartNoDemotionWait (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
   Tr := LeaseStepRestartNoDemotionWait m P
 
 def lp7 := leaseRestartWithoutDemotionWait l6 0 (restartKeep l6.core 0) -- n0 restarts with its data
@@ -46,10 +46,10 @@ def lp10 := withCore lp9 (commitNext lp9.core 0)        -- n0 commits alone: the
 
 /-- The run; the label list is its trace. Only `restartKeep 0` is the weakened action;
 the demotion that follows is a step of the lease layer. -/
-theorem restartNoDemotionWait_run : (leaseLTSRestartNoDemotionWait 0 P0).MTr l0
-    [.core (.count 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
+theorem restartNoDemotionWait_run : (leaseTransitionSystemRestartNoDemotionWait 0 P0).MTr l0
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
      .heartbeat 1, .restartKeep 0, .demote 0 1, .core (.append 0), .core (.commit 0)] lp10 :=
-  LTS.MTr.comp (leaseLTSRestartNoDemotionWait 0 P0)
+  LTS.MTr.comp (leaseTransitionSystemRestartNoDemotionWait 0 P0)
     (leaseMtr_of_step LeaseStepRestartNoDemotionWait.step (leases_prefix P0)) <|
   .stepL (.step (LeaseStep.heartbeatGrant l5 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (LeaseStepRestartNoDemotionWait.restartKeep l6 0 (by decide)) <|
@@ -64,7 +64,7 @@ theorem restartNoDemotionWait_run : (leaseLTSRestartNoDemotionWait 0 P0).MTr l0
 at once commits without it while the replica's read lease is still valid, and the
 replica may serve a linearizable read that misses the write. -/
 theorem restartNoDemotionWait_stale :
-    ∃ a, (leaseLTSRestartNoDemotionWait 0 P0).CanReach (leaseInit 0) a ∧
+    ∃ a, (leaseTransitionSystemRestartNoDemotionWait 0 P0).CanReach (leaseInit 0) a ∧
       ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist :=
   ⟨lp10, ⟨_, restartNoDemotionWait_run⟩, by decide, by decide⟩
 

@@ -30,16 +30,16 @@ inductive LeaseStepGrantWithoutPrimaryLease (m : Nat) (P : LeaseParams) :
   configuration. -/
   | heartbeatGrant (a : LeaseState N) (r : N) : primaryOf a.core r ≠ r →
       ThinksPrimary a.core (primaryOf a.core r) → a.core.log r <+: a.core.log (primaryOf a.core r) →
-      a.core.sync (primaryOf a.core r) r = true → (a.core.known (primaryOf a.core r)).eligible r = true →
-      (a.core.known (primaryOf a.core r)).incarnation r = a.core.incarnation r →
+      a.core.sync (primaryOf a.core r) r = true → (a.core.localCfg (primaryOf a.core r)).eligible r = true →
+      (a.core.localCfg (primaryOf a.core r)).incarnation r = a.core.incarnation r →
       LeaseStepGrantWithoutPrimaryLease m P a (.heartbeat r)
         (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
 
 /-- The weakened lease layer as a transition system. -/
-def leaseLTSGrantWithoutPrimaryLease (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+def leaseTransitionSystemGrantWithoutPrimaryLease (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
   Tr := LeaseStepGrantWithoutPrimaryLease m P
 
-def lq5 := leaseLearn li4 1                           -- n1 learns version 3; n0 and n2 never learn more
+def lq5 := leaseLearn li4 1                           -- n1 learns epoch 3; n0 and n2 never learn more
 def lq6 := tick lq5
 def lq7 := tick lq6
 def lq8 := tick lq7
@@ -56,15 +56,15 @@ def lq18 := recvData lq17 2 lq17.core (lq17.ackEcho 0 2) -- n0, deposed and leas
 
 /-- The run; the label list is its trace. Only the last `heartbeat 2` is the weakened
 action. -/
-theorem grantWithoutPrimaryLease_run : (leaseLTSGrantWithoutPrimaryLease 0 P0).MTr l0
-    [.core (.count 0 1), .core (.makeEligible 0 1), .core (.count 0 2), .core (.makeEligible 0 2),
+theorem grantWithoutPrimaryLease_run : (leaseTransitionSystemGrantWithoutPrimaryLease 0 P0).MTr l0
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .core (.addToSyncSet 0 2), .core (.makeEligible 0 2),
      .learn 1, .tick, .tick, .tick, .tick, .takeover 1, .tick, .tick, .tick, .demote 1 2,
      .core (.append 1), .core (.commit 1), .ack 2, .heartbeat 2] lq18 :=
-  .stepL (.step (LeaseStep.core l0 _ _ (Step.count l0.core 0 1 (by decide) (by decide) (by decide)
+  .stepL (.step (LeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (LeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li2 _ _ (Step.count li2.core 0 2 (by decide) (by decide) (by decide)
+  .stepL (.step (LeaseStep.core li2 _ _ (Step.addToSyncSet li2.core 0 2 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (LeaseStep.core li3 _ _ (Step.makeEligible li3.core 0 2 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
@@ -88,7 +88,7 @@ theorem grantWithoutPrimaryLease_run : (leaseLTSGrantWithoutPrimaryLease 0 P0).M
 the takeover grants a read lease to a replica that still follows it, and the replica
 may serve a linearizable read that misses the new primary's committed write. -/
 theorem grantWithoutPrimaryLease_stale :
-    ∃ a, (leaseLTSGrantWithoutPrimaryLease 0 P0).CanReach (leaseInit 0) a ∧
+    ∃ a, (leaseTransitionSystemGrantWithoutPrimaryLease 0 P0).CanReach (leaseInit 0) a ∧
       ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist :=
   ⟨lq18, ⟨_, grantWithoutPrimaryLease_run⟩, by decide, by decide⟩
 

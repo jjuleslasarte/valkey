@@ -40,11 +40,11 @@ inductive LeaseStepTakeoverNoDemotionWait (m : Nat) (P : LeaseParams) :
       LeaseStepTakeoverNoDemotionWait m P a (.takeover n) (leaseTakeoverWithoutDemotionWait a n)
 
 /-- The weakened lease layer as a transition system. -/
-def leaseLTSTakeoverNoDemotionWait (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+def leaseTransitionSystemTakeoverNoDemotionWait (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
   Tr := LeaseStepTakeoverNoDemotionWait m P
 
-def lt5 := leaseLearn li4 1                           -- n1 learns version 3
-def lt6 := leaseLearn lt5 2                           -- n2 learns version 3
+def lt5 := leaseLearn li4 1                           -- n1 learns epoch 3
+def lt6 := leaseLearn lt5 2                           -- n2 learns epoch 3
 def lt7 := recvData lt6 1 lt6.core none               -- a heartbeat reaches n1 at time 0
 def lt8 := recvAck lt7 1 lt7.core                     -- n1 acknowledges: n0's lease from n1 starts at 0
 def lt9 := recvData lt8 2 lt8.core none               -- a heartbeat reaches n2 at time 0
@@ -64,16 +64,16 @@ def lt22 := withCore lt21 (commitNext lt21.core 1)    -- n1 commits alone: the h
 
 /-- The run; the label list is its trace. Only `takeover 1` is the weakened action;
 the demotion that follows is a step of the lease layer. -/
-theorem takeoverNoDemotionWait_run : (leaseLTSTakeoverNoDemotionWait 0 P3).MTr l0
-    [.core (.count 0 1), .core (.makeEligible 0 1), .core (.count 0 2), .core (.makeEligible 0 2),
+theorem takeoverNoDemotionWait_run : (leaseTransitionSystemTakeoverNoDemotionWait 0 P3).MTr l0
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .core (.addToSyncSet 0 2), .core (.makeEligible 0 2),
      .learn 1, .learn 2, .heartbeat 1, .ack 1, .heartbeat 2, .ack 2,
      .tick, .tick, .tick, .tick, .heartbeat 2, .ack 2, .heartbeat 2, .tick,
      .takeover 1, .demote 1 2, .core (.append 1), .core (.commit 1)] lt22 :=
-  .stepL (.step (LeaseStep.core l0 _ _ (Step.count l0.core 0 1 (by decide) (by decide) (by decide)
+  .stepL (.step (LeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (LeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li2 _ _ (Step.count li2.core 0 2 (by decide) (by decide) (by decide)
+  .stepL (.step (LeaseStep.core li2 _ _ (Step.addToSyncSet li2.core 0 2 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (LeaseStep.core li3 _ _ (Step.makeEligible li3.core 0 2 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
@@ -103,7 +103,7 @@ primary that demotes a replica of the replaced configuration at once commits wit
 it while the read lease the old primary granted it is still valid, and the replica may
 serve a linearizable read that misses the write. -/
 theorem takeoverNoDemotionWait_stale :
-    ∃ a, (leaseLTSTakeoverNoDemotionWait 0 P3).CanReach (leaseInit 0) a ∧
+    ∃ a, (leaseTransitionSystemTakeoverNoDemotionWait 0 P3).CanReach (leaseInit 0) a ∧
       ReplCanRead P3 a 2 ∧ a.core.log 2 ≠ a.core.hist :=
   ⟨lt22, ⟨_, takeoverNoDemotionWait_run⟩, by decide, by decide⟩
 

@@ -12,7 +12,7 @@ counterexamples are in the appendix.
 lean/
   SyncReplication.lean          root import
   SyncReplication/
-    Model.lean                  state, actions, Step, lts, Reachable, the safety properties
+    Model.lean                  state, actions, Step, transitionSystem, Reachable, the safety properties
     Replies.lean                held client replies: ReplyState, ReplyStep, AckedDurable, AckedHeld
     Leases.lean                 the lease layer: LeaseState, LeaseStep, the read rule, NoStaleRead
     Invariant.lean              the inductive invariant in five layers; the fence; frame lemmas
@@ -23,7 +23,7 @@ lean/
     Durability.lean             ReplyInvariant; ackSafety, ackedHeld
     LeaseInvariant.lean         LeaseInvariant and its preservation; noStaleRead, lease_safety
     Counterexamples/            Basic, Reconcile, CatchUp, ResyncEligible, ResyncCounted,
-                                ReplyFence, Rebuild, Uncount,
+                                ReplyFence, Rebuild, RemoveFromSyncSet,
                                 Incarnation, MinSyncIncarnation, Survival, StaleRestore, Leases,
                                 RestartReadLease, RestartDemotionWait, RestartTimer, TakeoverDemotionWait,
                                 GrantPrimaryLease
@@ -42,18 +42,18 @@ Dependency order: `Lists` → `Model` → `Replies`, `Invariant` → `Contracts`
 ### Log safety (`Safety.lean`)
 
 ```lean
-theorem safety {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) : Safety s
+theorem safety {m : Nat} {i : Node} {s : State Node} (hReachable : Reachable m i s) : Safety s
 
-theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
-    (h : Reachable m i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.primary)
-    (hw : Writable m s p) (hlen : s.commit p < (s.log p).length)
-    (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
+theorem commit_two_copies {m : Nat} (hMinSync : 1 ≤ m) {i : Node} {s : State Node}
+    (hReachable : Reachable m i s) {p : Node} (hThinksPrimary : ThinksPrimary s p) (hCurrent : p = s.cfg.primary)
+    (hWritable : Writable m s p) (hHasNext : s.commit p < (s.log p).length)
+    (hAllAcked : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
     ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
       (commitNext s p).hist <+: (commitNext s p).log e ∧ (commitNext s p).hist <+: (commitNext s p).log p
 
-theorem committed_inherited_first {m : Nat} {i : Node} {t : State Node} (ht : Reachable m i t)
-    (p : Node) (hpast : t.inheritedEnd p < t.commit p) :
-    ∃ u, Reachable m i u ∧ (lts m).CanReach u t ∧
+theorem committed_inherited_first {m : Nat} {i : Node} {t : State Node} (hReachable : Reachable m i t)
+    (p : Node) (hPastInherited : t.inheritedEnd p < t.commit p) :
+    ∃ u, Reachable m i u ∧ (transitionSystem m).CanReach u t ∧
       u.commit p = t.inheritedEnd p ∧ u.inheritedEnd p = t.inheritedEnd p
 ```
 
@@ -63,7 +63,7 @@ offsets, not about which writes occupy them, and does not cover a deposed node w
 a Resync truncated below its inherited end.
 
 `m` is `min-sync-replicas`, universally quantified. `Node` is any type with decidable
-equality, so any number of nodes; logs, configuration versions, incarnations and
+equality, so any number of nodes; logs, configuration epochs, incarnations and
 restarts are unbounded. `Safety` is `EligibleHoldsCommitted ∧ CommittedAgree`:
 
 ```lean
@@ -84,10 +84,10 @@ authoritative (README §2).
 ### No acknowledged write is lost (`Durability.lean`)
 
 ```lean
-theorem ackSafety {i : Node} {a : ReplyState Node} {m : Nat} (h : ReplyReachable m i a) :
+theorem ackSafety {i : Node} {a : ReplyState Node} {m : Nat} (hReachable : ReplyReachable m i a) :
     AckedDurable a ∧ Safety a.core
 
-theorem ackedHeld {i : Node} {a : ReplyState Node} {m : Nat} (h : ReplyReachable m i a) : AckedHeld a
+theorem ackedHeld {i : Node} {a : ReplyState Node} {m : Nat} (hReachable : ReplyReachable m i a) : AckedHeld a
 ```
 
 ```lean
@@ -102,17 +102,17 @@ grows, so an acknowledged write stays in the committed history.
 ### No stale linearizable read (`LeaseInvariant.lean`)
 
 ```lean
-theorem noStaleRead {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
-    {a : LeaseState Node} (h : LeaseReachable m P i a) : NoStaleRead P a
+theorem noStaleRead {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
+    {a : LeaseState Node} (hReachable : LeaseReachable m P i a) : NoStaleRead P a
 
-theorem lease_safety {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
-    {a : LeaseState Node} (h : LeaseReachable m P i a) : Safety a.core
+theorem lease_safety {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
+    {a : LeaseState Node} (hReachable : LeaseReachable m P i a) : Safety a.core
 ```
 
 ```lean
 HolderValid P now start dur  :=  start = some t0 ∧ now + P.margin < t0 + dur + P.drift   (false for none)
 GrantorOver P now recv dur   :=  recv = some t0 → t0 + dur ≤ now + P.drift
-PrimLeaseValid P a p  :=  ∀ r, (a.core.known p).eligible r = true → r ≠ p →
+PrimLeaseValid P a p  :=  ∀ r, (a.core.localCfg p).eligible r = true → r ≠ p →
                             HolderValid P a.now (a.primaryLease p r) P.primDur
 ReadLeaseValid P a r  :=  HolderValid P a.now (a.readLease r) P.readDur
 PrimCanRead P a p     :=  ThinksPrimary a.core p ∧ PrimLeaseValid P a p ∧ a.core.commit p = (a.core.log p).length
@@ -132,35 +132,35 @@ action with a rule removed) that violates the guarantee; see the appendix. The
 reachability witnesses below are runs of the model itself, with no rule removed.
 
 ```lean
-theorem noReconcile_unsafe        : ∃ s, (ltsNoReconcile 1).CanReach (init 0) s ∧ ¬ Safety s
-theorem noCatchUp_unsafe          : ∃ s, (ltsNoCatchUp 1).CanReach (init 0) s ∧ ¬ Safety s
-theorem resyncEligible_unsafe     : ∃ s, (ltsResyncEligible 1).CanReach (init 0) s ∧ ¬ Safety s
-theorem noReplyFence_unsafe       : ∃ a, (replyLTSNoFence 0).CanReach (replyInit 0) a ∧ ¬ AckedDurable a
-theorem noRebuild_unsafe          : ∃ s, (ltsNoRebuild 1).CanReach (init 0) s ∧ ¬ Safety s
-theorem noIncCheck_unsafe         : ∃ s, (ltsNoInc 1).CanReach (init 0) s ∧ ¬ Safety s
-theorem staleRestoreKeepsInc_unsafe : ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧ ¬ Safety s
-theorem staleRestoreKeepsInc_loses  : ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧
+theorem noReconcile_unsafe        : ∃ s, (transitionSystemNoReconcile 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noCatchUp_unsafe          : ∃ s, (transitionSystemNoCatchUp 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem resyncEligible_unsafe     : ∃ s, (transitionSystemResyncEligible 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noReplyFence_unsafe       : ∃ a, (replyTransitionSystemNoFence 0).CanReach (replyInit 0) a ∧ ¬ AckedDurable a
+theorem noRebuild_unsafe          : ∃ s, (transitionSystemNoRebuild 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noIncCheck_unsafe         : ∃ s, (transitionSystemNoInc 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem staleRestoreKeepsInc_unsafe : ∃ s, (transitionSystemStaleKeep 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem staleRestoreKeepsInc_loses  : ∃ s, (transitionSystemStaleKeep 1).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ ∀ n, ¬ s.hist <+: s.log n
-theorem noSurvivor_loses          : ∃ s, (ltsNoSurv 1).CanReach (init 0) s ∧
+theorem noSurvivor_loses          : ∃ s, (transitionSystemNoSurv 1).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ (∀ n, ¬ s.hist <+: s.log n) ∧ (∀ n, ¬ IsAuthoritative s n)
-theorem uncountElig_unsafe        : ∃ s, (ltsUncountElig 1).CanReach (init 0) s ∧ ¬ Safety s
-theorem noWaitPrim_stale  : ∃ a, (leaseLTSNoWaitPrim 0 P0).CanReach (leaseInit 0) a ∧ PrimCanRead P0 a 0 ∧ a.core.log 0 ≠ a.core.hist
-theorem noWaitRead_stale  : ∃ a, (leaseLTSNoWaitRead 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
-theorem grantAny_stale    : ∃ a, (leaseLTSGrantAny 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
-theorem grantSync_stale   : ∃ a, (leaseLTSGrantSync 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
-theorem grantNoIncRestart_stale : ∃ a, (leaseLTSGrantNoInc 0 P3).CanReach (leaseInit 0) a ∧ ReplCanRead P3 a 1 ∧ a.core.log 1 ≠ a.core.hist
+theorem removeFromSyncSetElig_unsafe        : ∃ s, (transitionSystemRemoveFromSyncSetElig 1).CanReach (init 0) s ∧ ¬ Safety s
+theorem noWaitPrim_stale  : ∃ a, (leaseTransitionSystemNoWaitPrim 0 P0).CanReach (leaseInit 0) a ∧ PrimCanRead P0 a 0 ∧ a.core.log 0 ≠ a.core.hist
+theorem noWaitRead_stale  : ∃ a, (leaseTransitionSystemNoWaitRead 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
+theorem grantAny_stale    : ∃ a, (leaseTransitionSystemGrantAny 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
+theorem grantSync_stale   : ∃ a, (leaseTransitionSystemGrantSync 0 P0).CanReach (leaseInit 0) a ∧ ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
+theorem grantNoIncRestart_stale : ∃ a, (leaseTransitionSystemGrantNoInc 0 P3).CanReach (leaseInit 0) a ∧ ReplCanRead P3 a 1 ∧ a.core.log 1 ≠ a.core.hist
 theorem smallMargin_stale : ∃ a, LeaseReachable 0 P1 0 a ∧ PrimCanRead P1 a 0 ∧ a.core.log 0 ≠ a.core.hist
-theorem restartKeepsReadLease_stale : ∃ a, (leaseLTSRestartKeepsReadLease 0 P0).CanReach (leaseInit 0) a ∧
+theorem restartKeepsReadLease_stale : ∃ a, (leaseTransitionSystemRestartKeepsReadLease 0 P0).CanReach (leaseInit 0) a ∧
     ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
-theorem restartNoDemotionWait_stale : ∃ a, (leaseLTSRestartNoDemotionWait 0 P0).CanReach (leaseInit 0) a ∧
+theorem restartNoDemotionWait_stale : ∃ a, (leaseTransitionSystemRestartNoDemotionWait 0 P0).CanReach (leaseInit 0) a ∧
     ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist
-theorem restartForgetsTimer_stale : ∃ a, (leaseLTSRestartForgetsTimer 0 P0).CanReach (leaseInit 0) a ∧
+theorem restartForgetsTimer_stale : ∃ a, (leaseTransitionSystemRestartForgetsTimer 0 P0).CanReach (leaseInit 0) a ∧
     PrimCanRead P0 a 0 ∧ a.core.log 0 ≠ a.core.hist
-theorem takeoverNoDemotionWait_stale : ∃ a, (leaseLTSTakeoverNoDemotionWait 0 P3).CanReach (leaseInit 0) a ∧
+theorem takeoverNoDemotionWait_stale : ∃ a, (leaseTransitionSystemTakeoverNoDemotionWait 0 P3).CanReach (leaseInit 0) a ∧
     ReplCanRead P3 a 2 ∧ a.core.log 2 ≠ a.core.hist
-theorem grantWithoutPrimaryLease_stale : ∃ a, (leaseLTSGrantWithoutPrimaryLease 0 P0).CanReach (leaseInit 0) a ∧
+theorem grantWithoutPrimaryLease_stale : ∃ a, (leaseTransitionSystemGrantWithoutPrimaryLease 0 P0).CanReach (leaseInit 0) a ∧
     ReplCanRead P0 a 2 ∧ a.core.log 2 ≠ a.core.hist
-theorem noIncWritable_oneCopy     : ∃ s, (ltsNoIncWritable 1).CanReach (init 0) s ∧
+theorem noIncWritable_oneCopy     : ∃ s, (transitionSystemNoIncWritable 1).CanReach (init 0) s ∧
     ThinksPrimary s 0 ∧ 0 = s.cfg.primary ∧ WritableNoInc 1 s 0 ∧ s.commit 0 < (s.log 0).length ∧
     (∀ r, s.sync 0 r = true → s.commit 0 < s.acked 0 r) ∧
     ∀ e, e ≠ 0 → ¬ IsAuthoritative (commitNext s 0) e
@@ -175,7 +175,7 @@ Runs of the protocol itself, no rule removed, with `P0` (primary lease 5, read l
 drift 1, margin 2), the parameters the lease counterexamples also use.
 
 ```lean
-theorem primCanRead_reachable : ∃ a, LeaseReachable 0 P0 0 a ∧ PrimCanRead P0 a 0 ∧ (a.core.known 0).eligible 1 = true
+theorem primCanRead_reachable : ∃ a, LeaseReachable 0 P0 0 a ∧ PrimCanRead P0 a 0 ∧ (a.core.localCfg 0).eligible 1 = true
 theorem replCanRead_reachable : ∃ a, LeaseReachable 0 P0 0 a ∧ ReplCanRead P0 a 1
 theorem demoteNew_reachable   : ∃ a,
     LeaseReachable 0 P0 0 a ∧ a.core.cfg.primary = 1 ∧ a.core.cfg.eligible 2 = false ∧ a.primarySince 1 = some a.now
@@ -198,9 +198,9 @@ theorem countedDiverged_reachable : ∃ s, Reachable 0 0 s ∧ s.sync 0 1 = true
     primaryOf s 1 = 0 ∧ ¬ (s.log 1 <+: s.log 0) ∧ s.acked 0 1 = 0
 ```
 
-- `countedDiverged_reachable`: count 0 1, append 0, replicate 1 (n1 is a sync replica,
+- `countedDiverged_reachable`: addToSyncSet 0 1, append 0, replicate 1 (n1 is a sync replica,
   so it may receive the uncommitted write), restartPartial 0 0 (n0 keeps its
-  incarnation; its rebuilt sync replica set is empty), count 0 1. n0 counts n1 while n1's log has diverged from n0's, so
+  incarnation; its rebuilt sync replica set is empty), addToSyncSet 0 1. n0 counts n1 while n1's log has diverged from n0's, so
   Resync's guard that the replica is not counted excludes a reachable state. No run
   shows the guard is needed; in the witness n0's record of n1's acknowledgement is 0,
   so the excluded Resync would change no acknowledgement (README Appendix B).
@@ -217,8 +217,8 @@ See "Lease timing" below.
 |---|---|---|
 | `log` | `Node → List Nat` | Each node's replication log. An entry is the replication ID of the primaryship that wrote it, so a write is identified by its offset and ID. 0-indexed; the design's offset `o` is index `o - 1`. |
 | `incarnation` | `Node → Nat` | Each node's incarnation. A restart without data increments it. |
-| `cfg` | `Cfg Node` | The latest Cluster V2 configuration: `version`, `primary`, `eligible : Node → Bool`, `incarnation : Node → Nat` (the incarnation recorded for each node). |
-| `known` | `Node → Cfg Node` | The configuration each node last learned; possibly stale. |
+| `cfg` | `Cfg Node` | The latest Cluster V2 configuration: `epoch`, `primary`, `eligible : Node → Bool`, `incarnation : Node → Nat` (the incarnation recorded for each node). |
+| `localCfg` | `Node → Cfg Node` | The configuration each node last learned; possibly stale. |
 | `sync` | `Node → Node → Bool` | `sync p r`: `r` is in `p`'s sync replica set. |
 | `acked` | `Node → Node → Nat` | `acked p r`: how far `p` believes `r` has acknowledged. |
 | `commit` | `Node → Nat` | Each node's committed offset. |
@@ -233,16 +233,16 @@ Sets of nodes are `Node → Bool`. `update f a b` is `f` with the value at `a` r
 lost one is the step never taken, so acknowledgements carry the replica's offset at
 delivery (README §1 and §5). Restarts with data, without data and from a stale
 persistence file are actions; correlated loss of every copy is excluded by the
-survival guard on the restarts that take a new incarnation (README §2). `init i` has `i` primary at version 1, no eligible replica, every incarnation 1,
+survival guard on the restarts that take a new incarnation (README §2). `init i` has `i` primary at epoch 1, no eligible replica, every incarnation 1,
 empty logs.
 
-Derived predicates: `ThinksPrimary s p` (`known[p]` names `p` primary with its current
-incarnation), `KnowsLatest s n` (`known[n].version = cfg.version`), `primaryOf s n`
-(`known[n].primary`), `IsAuthoritative`,
+Derived predicates: `ThinksPrimary s p` (`localCfg[p]` names `p` primary with its current
+incarnation), `KnowsLatest s n` (`localCfg[n].epoch = cfg.epoch`), `primaryOf s n`
+(`localCfg[n].primary`), `IsAuthoritative`,
 `PrimaryAuthoritative s` (the current primary's incarnation matches),
 `catchUpPoint s p` (`commit p` once `inheritedEnd p ≤ commit p`, else `min (inheritedEnd p) (log p).length`),
 `Writable m s p` (`m ≤` the number of sync members of `p` that are eligible with a
-matching incarnation in `known[p]`, as `Set.encard`).
+matching incarnation in `localCfg[p]`, as `Set.encard`).
 
 ### Actions
 
@@ -257,20 +257,20 @@ also carries the action's label (`Action`). `Step m s μ s'` reads: with
 | `replicate r` | `r` does not consider itself primary; its log is a strict prefix of its primary's | copies the next entry; `replId r :=` its primary's ID |
 | `ack r` | `r` does not consider itself primary; its log is a prefix of its primary's and longer than its recorded ack | primary records `acked p r := (log r).length`; `ackHigh r` raised to it |
 | `commit p` | `p` thinks it is primary, is writable, has an uncommitted entry, and every sync member has acknowledged past `commit p` | `commit p + 1`; `hist` extended if this offset is new; `ackHigh p` raised to the new commit point |
-| `count p r` | `p` thinks it is primary; `r ≠ p` follows `p`, is not counted, and has acknowledged `catchUpPoint s p` | `sync p r := true` |
-| `uncount p r` | `p` thinks it is primary; `r` is counted and not eligible in `known p` | `sync p r := false` |
-| `makeEligible p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new version with `r` eligible and `inc r` recorded; `known p` updated |
-| `makeIneligible p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new version with `r` ineligible; `known p` updated; `sync p r := false` |
-| `learn n` | `n` does not know the latest configuration | `known n := cfg`; `sync n` emptied unless `n` is primary there |
-| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.incarnation n = inc n` | new version with `n` primary and the old primary dropped from the eligible set; `sync n` := the eligible replicas of the new configuration; `acked n`, `commit n` reset; `inheritedEnd n := (log n).length`; `replId n := freshId s`, added to `usedIds` |
+| `addToSyncSet p r` | `p` thinks it is primary; `r ≠ p` follows `p`, is not counted, and has acknowledged `catchUpPoint s p` | `sync p r := true` |
+| `removeFromSyncSet p r` | `p` thinks it is primary; `r` is counted and not eligible in `localCfg p` | `sync p r := false` |
+| `makeEligible p r` | `p` thinks it is primary, knows the latest configuration, counts `r`; `r` not eligible | new epoch with `r` eligible and `inc r` recorded; `localCfg p` updated |
+| `makeIneligible p r` | `p` thinks it is primary, knows the latest configuration; `r` eligible | new epoch with `r` ineligible; `localCfg p` updated; `sync p r := false` |
+| `learn n` | `n` does not know the latest configuration | `localCfg n := cfg`; `sync n` emptied unless `n` is primary there |
+| `takeover n` | `n` knows the latest configuration, is eligible, is not the primary, and `cfg.incarnation n = inc n` | new epoch with `n` primary and the old primary dropped from the eligible set; `sync n` := the eligible replicas of the new configuration; `acked n`, `commit n` reset; `inheritedEnd n := (log n).length`; `replId n := freshId s`, added to `usedIds` |
 | `resync r` | `r` does not consider itself primary; its log is not a prefix of its primary's; `r` is neither counted nor eligible in its primary's configuration | `log r := (log p).take (catchUpPoint s p)`; `acked p r := 0`; `commit r` capped |
 | `restartEmpty n` | `n` knows the latest configuration; some other node is authoritative | `log n := []`, `incarnation n + 1`, volatile state and `ackHigh n` reset; the current primary drops `n` from its sync set and acks |
-| `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `inheritedEnd n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `known n`), else emptied |
+| `restartKeep n` | `n` knows the latest configuration | `commit n := 0`, `acked n` reset, `inheritedEnd n := (log n).length`; if `n` thinks it is primary, `sync n := rebuiltSync s n` (the matching eligible replicas in `localCfg n`), else emptied |
 | `restartPartial n k`, keeping the incarnation | as `restartKeep`, with `k < (log n).length` and `ackHigh n ≤ k` | `restartKeep` on `(log n).take k`, with `inheritedEnd n := k` |
 | `restartPartial n k`, new incarnation | `n` knows the latest configuration, `k < (log n).length`, `k < ackHigh n`, some other node authoritative | `restartEmpty`, except `log n := (log n).take k` |
 
-The protocol is a CSLib labelled transition system, `lts m : LTS (State Node)
-(Action Node)` with `Tr := Step m`, and `Reachable m i s := (lts m).CanReach (init i) s`.
+The protocol is a CSLib labelled transition system, `transitionSystem m : LTS (State Node)
+(Action Node)` with `Tr := Step m`, and `Reachable m i s := (transitionSystem m).CanReach (init i) s`.
 
 ### Leases (`Leases.lean`)
 
@@ -287,7 +287,7 @@ configuration `p`'s takeover replaced; every `r` after a restart). `LeaseStep m 
 | Action | Guard | Effect |
 |---|---|---|
 | `tick` | | `now + 1` |
-| `core μ` | `Step m` for AppendWrite, Commit, Count, Uncount, MakeEligible | the replication step; no lease state moves |
+| `core μ` | `Step m` for AppendWrite, Commit, AddToSyncSet, RemoveFromSyncSet, MakeEligible | the replication step; no lease state moves |
 | `replicate r` | as `Step.replicate` | the replication step; `committedView r := max (committedView r) (min (commit p) \|log r\|)`, `primaryTraffic r := now`, `dataSent r := now` |
 | `heartbeat r` | `r` does not consider itself primary; its log is a prefix of its primary's | the `committedView`, `primaryTraffic`, `dataSent` updates; log unchanged |
 | `heartbeat r` with echo | as above; the primary thinks it is primary; `MayGrant`: it holds its lease from every eligible replica it knows, and `r` is a sync member eligible with a matching incarnation | as above, and `readLease r := max (readLease r) (ackEcho p r)` |
@@ -299,7 +299,7 @@ configuration `p`'s takeover replaced; every `r` after a restart). `LeaseStep m 
 | `resync r` | as `Step.resync` | the replication step; `committedView r := 0` |
 | the restarts | as the replication restarts | the replication step; `committedView n := 0`; `n`'s leases cleared; `primaryTraffic n := now`, `dataSent n := now`, `primarySince n := now`, `oldEligible n := fun _ => true` |
 
-`leaseLTS m P` and `LeaseReachable m P i a` as for the replication model.
+`leaseTransitionSystem m P` and `LeaseReachable m P i a` as for the replication model.
 
 ### Held client replies (`Replies.lean`)
 
@@ -317,7 +317,7 @@ replication ID at the append; since a log entry is the ID, it is also the value 
 | `newId p` | none | `replId p := freshId`, added to `usedIds`: a fresh replication ID without a takeover; `p`'s held replies then fail the fence |
 | `restartEmpty n`, `restartKeep n`, `restartPartial n k` | as the replication restarts | the replication restart; `n`'s held replies dropped |
 
-`replyLTS m`, `ReplyReachable m i a` as above.
+`replyTransitionSystem m`, `ReplyReachable m i a` as above.
 
 ## The proof
 
@@ -331,7 +331,7 @@ that it implies `Safety`.
 
 The fence of a deposed primary `p` is `fence s p := sInf (s.acked p '' leftSync s p)`,
 the smallest acknowledgement `p` recorded from a sync member that now follows another
-primary and that `p` lists as eligible (Uncount cannot drop such a member, so the fence
+primary and that `p` lists as eligible (RemoveFromSyncSet cannot drop such a member, so the fence
 survives a deposed primary's early removal). `DeposedFenced s p` packages the five facts the proof needs about it (`left`,
 `fenceLeInheritedEnd`, `primHolds`, `primAck`, `eligHolds`); it is unrelated to the
 reply fence `ReplyFenced` of `Replies.lean`. The preservation proofs use four lemmas
@@ -358,7 +358,7 @@ the action is not unfolded in a preservation proof.
 ### Preservation (`Preserve/`, `Preserve.lean`)
 
 One file per subsystem of the design: `Replication.lean` (AppendWrite, Replicate, Ack,
-Resync), `Commit.lean` (Commit, Count, Uncount), `Config.lean` (Learn, MakeEligible,
+Resync), `Commit.lean` (Commit, AddToSyncSet, RemoveFromSyncSet), `Config.lean` (Learn, MakeEligible,
 MakeIneligible), `Failover.lean` (Takeover), `Restart.lean` (RestartEmpty,
 RestartKeep, RestartPartial). Every action with a non-trivial proof is proved one
 layer at a time, `config_X`, `repl_X`, `membership_X`, `commit_X`, `failover_X`,
@@ -366,8 +366,9 @@ layer at a time, `config_X`, `repl_X`, `membership_X`, `commit_X`, `failover_X`,
 layer survives the action, and `invariant_X` assembles them as a term. Steps that leave
 a layer's variables alone use that layer's frame lemma (`ConfigInvariant.frame`, ...).
 
-Guard hypotheses keep one name from the `Step` constructor through `invariant_step` to
-the layer lemmas: `hp` (thinks it is primary), `hkl` (knows the latest configuration),
+The `Step` constructors name their guards descriptively (`hThinksPrimary`,
+`hKnowsLatest`, `hEligible`, `hSurvivor`, …). Inside proofs each guard has one short
+name, kept from `invariant_step` through the layer lemmas: `hp` (thinks it is primary), `hkl` (knows the latest configuration),
 `hnkl` (does not), `hel` (the eligibility guard), `hnp` (not the current primary), `hin`
 (recorded incarnation matches), `hsy` (sync membership), `hsurv` (some other node is
 authoritative), `hk`, `hkeep`, `hfresh` (the stale-restore bounds on `k`).
@@ -479,7 +480,7 @@ and the robustness notes there:
 'SyncReplication.staleRestoreKeepsInc_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.staleRestoreKeepsInc_loses' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.noIncWritable_oneCopy' depends on axioms: [propext, Classical.choice, Quot.sound]
-'SyncReplication.uncountElig_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'SyncReplication.removeFromSyncSetElig_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.noCatchUp_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.resyncEligible_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
 'SyncReplication.countedDiverged_reachable' depends on axioms: [propext, Classical.choice, Quot.sound]
@@ -509,7 +510,7 @@ type; `Quot.sound` through function extensionality.
 
 | File | Lines |
 |---|---|
-| `SyncReplication/Model.lean` | 476 |
+| `SyncReplication/Model.lean` | 480 |
 | `SyncReplication/Leases.lean` | 314 |
 | `SyncReplication/LeaseInvariant.lean` | 1,056 |
 | `SyncReplication/Replies.lean` | 140 |
@@ -521,12 +522,12 @@ type; `Quot.sound` through function extensionality.
 | `SyncReplication/Preserve/Failover.lean` | 290 |
 | `SyncReplication/Preserve/Restart.lean` | 843 |
 | `SyncReplication/Preserve.lean` | 56 |
-| `SyncReplication/Safety.lean` | 107 |
+| `SyncReplication/Safety.lean` | 109 |
 | `SyncReplication/Durability.lean` | 278 |
 | `SyncReplication/Counterexamples/` (18 files) | 1,718 |
 | `SyncReplication/Lists.lean` | 68 |
 | `Lease/` (3 files) | 377 |
-| total | 8,176 (plus the two root imports, 23 lines) |
+| total | 8,182 (plus the two root imports, 23 lines) |
 
 `lake build` of the whole tree takes about 20 seconds warm on a laptop-class
 machine (1,043 jobs including Mathlib's and CSLib's prebuilt modules).
@@ -634,21 +635,21 @@ history is `[1]`, on n0 and n1).
 
 | File | Weakened relation | Rule removed | Trace | Violates |
 |---|---|---|---|---|
-| `Reconcile.lean` | `StepNoReconcile` | Count measures catch-up against the primary's own commit point | count 0 1, makeEligible 0 1, append 0, learn 1, replicate 1, ack 1, commit 0, takeover 1, learn 2, **count 1 2**, makeEligible 1 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
-| `CatchUp.lean` | `StepNoCatchUp` | Count with no catch-up guard; `StepNoReconcile` is a special case (`stepNoCatchUp_of_stepNoReconcile`), so F1's run is a second one | *prefix*, **count 0 2**, makeEligible 0 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `Reconcile.lean` | `StepNoReconcile` | AddToSyncSet measures catch-up against the primary's own commit point | addToSyncSet 0 1, makeEligible 0 1, append 0, learn 1, replicate 1, ack 1, commit 0, takeover 1, learn 2, **addToSyncSet 1 2**, makeEligible 1 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `CatchUp.lean` | `StepNoCatchUp` | AddToSyncSet with no catch-up guard; `StepNoReconcile` is a special case (`stepNoCatchUp_of_stepNoReconcile`), so F1's run is a second one | *prefix*, **addToSyncSet 0 2**, makeEligible 0 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `ResyncEligible.lean` | `StepResyncEligible` | Resync of a replica its primary lists as eligible | *prefix*, restartPartial 0 0 (new incarnation), **resync 1** | EligibleHoldsCommitted: n1 authoritative with an empty log |
-| `ReplyFence.lean` | `ReplyStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | count 0 1, makeEligible 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, count 1 0, makeEligible 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[3]` |
-| `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | count 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, count 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
-| `Incarnation.lean` | `StepNoInc` | Count and MakeEligible check `known[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **count 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `ReplyFence.lean` | `ReplyStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | addToSyncSet 0 1, makeEligible 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, addToSyncSet 1 0, makeEligible 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[3]` |
+| `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | addToSyncSet 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, addToSyncSet 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
+| `Incarnation.lean` | `StepNoInc` | AddToSyncSet and MakeEligible check `localCfg[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **addToSyncSet 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
-| `Leases.lean` | `LeaseStepNoWaitPrim`, `LeaseStepNoWaitRead`, `LeaseStepGrantAny`, `LeaseStepGrantSync`, `LeaseStepGrantNoInc` (with `P3`: primary lease 6, read lease 3, within the duration rule), and `leaseLTS` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the sync set; echo to a counted but ineligible member, then early removal; echo to a restarted-empty eligible member, then a restart of the primary whose rebuilt sync replica set leaves it out; margin 1 with drift 1 | shared prefix count 0 1, makeEligible 0 1, learn 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `leaseInit`) heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
+| `Leases.lean` | `LeaseStepNoWaitPrim`, `LeaseStepNoWaitRead`, `LeaseStepGrantAny`, `LeaseStepGrantSync`, `LeaseStepGrantNoInc` (with `P3`: primary lease 6, read lease 3, within the duration rule), and `leaseTransitionSystem` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the sync set; echo to a counted but ineligible member, then early removal; echo to a restarted-empty eligible member, then a restart of the primary whose rebuilt sync replica set leaves it out; margin 1 with drift 1 | shared prefix addToSyncSet 0 1, makeEligible 0 1, learn 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `leaseInit`) heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
 | `RestartReadLease.lean` | `LeaseStepRestartKeepsReadLease` | RestartEmpty keeps the restarted node's read lease | shared lease prefix, append 0, replicate 1, ack 1, commit 0, heartbeat 1 (grant), **restartEmpty 1** | `ReplCanRead` holds for n1 with an empty log, history `[1]` |
 | `RestartDemotionWait.lean` | `LeaseStepRestartNoDemotionWait` | RestartKeep arms no demotion wait (`oldEligible n := fun _ => false`) | shared lease prefix, heartbeat 1 (grant), **restartKeep 0**, demote 0 1, append 0, commit 0 | `ReplCanRead` holds for n1 without the write |
-| `RestartTimer.lean` | `LeaseStepRestartForgetsTimer` | RestartKeep sets the restarted node's takeover timer to 0 (`primaryTraffic n := 0`) | count 0 1, makeEligible 0 1, learn 1, tick ×4, heartbeat 1, ack 1, **restartKeep 1**, takeover 1, append 1, commit 1 | `PrimCanRead` holds for the deposed n0 without the write |
-| `TakeoverDemotionWait.lean` | `LeaseStepTakeoverNoDemotionWait` (with `P3`) | Takeover arms no demotion wait (`oldEligible n := fun _ => false`) | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, learn 1, learn 2, heartbeat 1, ack 1, heartbeat 2, ack 2, tick ×4, heartbeat 2, ack 2, heartbeat 2 (grant), tick, **takeover 1**, demote 1 2, append 1, commit 1 | `ReplCanRead` holds for n2 without the write |
-| `GrantPrimaryLease.lean` | `LeaseStepGrantWithoutPrimaryLease` | Echo without `PrimLeaseValid` (the rest of `MayGrant` kept) | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, learn 1, tick ×4, takeover 1, tick ×3, demote 1 2, append 1, commit 1, ack 2, **heartbeat 2 (grant)** by the deposed n0 | `ReplCanRead` holds for n2 without the write |
-| `Uncount.lean` | `StepUncountElig` | Uncount of an eligible counted replica | count 0 1, makeEligible 0 1, count 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **uncount 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
-| `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, count 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
+| `RestartTimer.lean` | `LeaseStepRestartForgetsTimer` | RestartKeep sets the restarted node's takeover timer to 0 (`primaryTraffic n := 0`) | addToSyncSet 0 1, makeEligible 0 1, learn 1, tick ×4, heartbeat 1, ack 1, **restartKeep 1**, takeover 1, append 1, commit 1 | `PrimCanRead` holds for the deposed n0 without the write |
+| `TakeoverDemotionWait.lean` | `LeaseStepTakeoverNoDemotionWait` (with `P3`) | Takeover arms no demotion wait (`oldEligible n := fun _ => false`) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, learn 2, heartbeat 1, ack 1, heartbeat 2, ack 2, tick ×4, heartbeat 2, ack 2, heartbeat 2 (grant), tick, **takeover 1**, demote 1 2, append 1, commit 1 | `ReplCanRead` holds for n2 without the write |
+| `GrantPrimaryLease.lean` | `LeaseStepGrantWithoutPrimaryLease` | Echo without `PrimLeaseValid` (the rest of `MayGrant` kept) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, tick ×4, takeover 1, tick ×3, demote 1 2, append 1, commit 1, ack 2, **heartbeat 2 (grant)** by the deposed n0 | `ReplCanRead` holds for n2 without the write |
+| `RemoveFromSyncSet.lean` | `StepRemoveFromSyncSetElig` | RemoveFromSyncSet of an eligible counted replica | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **removeFromSyncSet 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
+| `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, addToSyncSet 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
 | `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |
 
 The weakened action in each trace is in bold; *prefix* is `committed_run`. In

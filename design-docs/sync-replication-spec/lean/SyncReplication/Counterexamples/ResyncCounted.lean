@@ -28,7 +28,7 @@ open Cslib
 namespace SyncReplication
 
 /-- n0 counts n1: n1 is a sync replica. -/
-def counted0 := count c0 0 1
+def counted0 := addToSyncSet c0 0 1
 /-- n0 writes at offset 1. -/
 def counted1 := appendWrite counted0 0
 /-- n1 copies the uncommitted write. -/
@@ -37,16 +37,16 @@ def counted2 := replicate counted1 1
 replica set is empty. -/
 def counted3 := restartPartialKeep counted2 0 0
 /-- n0 counts n1 again, at catch-up point 0. -/
-def counted4 := count counted3 0 1
+def counted4 := addToSyncSet counted3 0 1
 
 /-- The run; the label list is its trace. Every step is a step of the model. -/
-theorem countedDiverged_run : (lts 0).MTr c0
-    [.count 0 1, .append 0, .replicate 1, .restartPartial 0 0, .count 0 1] counted4 :=
-  .stepL (Step.count c0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
+theorem countedDiverged_run : (transitionSystem 0).MTr c0
+    [.addToSyncSet 0 1, .append 0, .replicate 1, .restartPartial 0 0, .addToSyncSet 0 1] counted4 :=
+  .stepL (Step.addToSyncSet c0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.append counted0 0 (by decide) (writable_zero counted0 0)) <|
   .stepL (Step.replicate counted1 1 (by decide) (by decide) (by decide)) <|
   .stepL (Step.restartPartialKeep counted2 0 0 (by decide) (by decide) (by decide)) <|
-  .stepL (Step.count counted3 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (Step.addToSyncSet counted3 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
   .refl
 
 /-- A replica its primary counts can have a log that has diverged from the primary's:

@@ -24,9 +24,9 @@ open Cslib
 
 namespace SyncReplication
 
-/-- `Writable` without the incarnation check: `m ≤ |sync[p] ∩ known[p].eligible|`. -/
+/-- `Writable` without the incarnation check: `m ≤ |sync[p] ∩ localCfg[p].eligible|`. -/
 def WritableNoInc (m : Nat) (s : State N) (p : N) : Prop :=
-  (m : ℕ∞) ≤ {r | s.sync p r = true ∧ (s.known p).eligible r = true}.encard
+  (m : ℕ∞) ≤ {r | s.sync p r = true ∧ (s.localCfg p).eligible r = true}.encard
 
 /-- `Step`, with AppendWrite and Commit guarded by `WritableNoInc`. -/
 inductive StepNoIncWritable (m : Nat) : State N → Action N → State N → Prop
@@ -38,36 +38,36 @@ inductive StepNoIncWritable (m : Nat) : State N → Action N → State N → Pro
       StepNoIncWritable m s (.commit p) (commitNext s p)
 
 /-- The weakened protocol as a transition system. -/
-def ltsNoIncWritable (m : Nat) : LTS (State N) (Action N) where
+def transitionSystemNoIncWritable (m : Nat) : LTS (State N) (Action N) where
   Tr := StepNoIncWritable m
 
 /-- `WritableNoInc 1` from one counted eligible replica. -/
 theorem writableNoInc_one {s : State N} {p r : N} (hs : s.sync p r = true)
-    (he : (s.known p).eligible r = true) : WritableNoInc 1 s p :=
-  (le_encard_iff_list 1 {r | s.sync p r = true ∧ (s.known p).eligible r = true}).2
+    (he : (s.localCfg p).eligible r = true) : WritableNoInc 1 s p :=
+  (le_encard_iff_list 1 {r | s.sync p r = true ∧ (s.localCfg p).eligible r = true}).2
     ⟨[r], List.nodup_singleton r, by simp, by simp [hs, he]⟩
 
 def w7 := learn c6 1               -- n1 learns the latest configuration
 def w8 := restartEmpty w7 1        -- n1 restarts empty (n0 survives); still listed as eligible
 def w9 := replicate w8 1           -- n1 copies the committed write back
 def w10 := ack w9 1                -- n1 acknowledges it
-def w11 := count w10 0 1           -- n0 counts n1 again
+def w11 := addToSyncSet w10 0 1           -- n0 counts n1 again
 def w12 := appendWrite w11 0       -- n0 writes at offset 2 (WritableNoInc: n1 is eligible)
 def w13 := replicate w12 1         -- n1 copies it
 def w14 := ack w13 1               -- n1 acknowledges it
 
 /-- The run up to the commit. The append is the weakened action; so is the commit
 whose guard the theorem states. -/
-theorem noIncWritable_run : (ltsNoIncWritable 1).MTr c0
-    [.count 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
-     .learn 1, .restartEmpty 1, .replicate 1, .ack 1, .count 0 1, .append 0, .replicate 1,
+theorem noIncWritable_run : (transitionSystemNoIncWritable 1).MTr c0
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+     .learn 1, .restartEmpty 1, .replicate 1, .ack 1, .addToSyncSet 0 1, .append 0, .replicate 1,
      .ack 1] w14 :=
-  LTS.MTr.comp (ltsNoIncWritable 1) (mtr_of_step StepNoIncWritable.step committed_run) <|
+  LTS.MTr.comp (transitionSystemNoIncWritable 1) (mtr_of_step StepNoIncWritable.step committed_run) <|
   .stepL (.step (Step.learn c6 1 (by decide))) <|
   .stepL (.step (Step.restartEmpty w7 1 (by decide) ⟨0, by decide, by decide⟩)) <|
   .stepL (.step (Step.replicate w8 1 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.ack w9 1 (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.count w10 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.addToSyncSet w10 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (StepNoIncWritable.append w11 0 (by decide)
     (writableNoInc_one (s := w11) (r := 1) (by decide) (by decide))) <|
   .stepL (.step (Step.replicate w12 1 (by decide) (by decide) (by decide))) <|
@@ -78,7 +78,7 @@ theorem noIncWritable_run : (ltsNoIncWritable 1).MTr c0
 `min-sync-replicas = 1`, a reachable state satisfies every hypothesis of
 `commit_two_copies` except that `Writable` is replaced by `WritableNoInc`, and after
 the commit the primary is the only authoritative node. -/
-theorem noIncWritable_oneCopy : ∃ s : State N, (ltsNoIncWritable 1).CanReach (init 0) s ∧
+theorem noIncWritable_oneCopy : ∃ s : State N, (transitionSystemNoIncWritable 1).CanReach (init 0) s ∧
     ThinksPrimary s 0 ∧ (0 : N) = s.cfg.primary ∧ WritableNoInc 1 s 0 ∧
     s.commit 0 < (s.log 0).length ∧ (∀ r, s.sync 0 r = true → s.commit 0 < s.acked 0 r) ∧
     ∀ e, e ≠ (0 : N) → ¬ IsAuthoritative (commitNext s 0) e :=

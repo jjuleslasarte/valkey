@@ -39,11 +39,11 @@ inductive LeaseStepRestartForgetsTimer (m : Nat) (P : LeaseParams) :
         (leaseRestartForgettingTimer a n (restartKeep a.core n))
 
 /-- The weakened lease layer as a transition system. -/
-def leaseLTSRestartForgetsTimer (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+def leaseTransitionSystemRestartForgetsTimer (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
   Tr := LeaseStepRestartForgetsTimer m P
 
 /-- n0 counts n1. -/
-def forgetTimer1 := withCore l0 (count l0.core 0 1)
+def forgetTimer1 := withCore l0 (addToSyncSet l0.core 0 1)
 /-- n0 makes n1 eligible. -/
 def forgetTimer2 := withCore forgetTimer1 (makeEligible forgetTimer1.core 0 1)
 /-- n1 learns the configuration. -/
@@ -71,11 +71,11 @@ def forgetTimer13 := withCore forgetTimer12 (commitNext forgetTimer12.core 1)
 
 /-- The run; the label list is its trace. Only `restartKeep 1` is the weakened action;
 the takeover that follows is a step of the lease layer. -/
-theorem restartForgetsTimer_run : (leaseLTSRestartForgetsTimer 0 P0).MTr l0
-    [.core (.count 0 1), .core (.makeEligible 0 1), .learn 1, .tick, .tick, .tick, .tick,
+theorem restartForgetsTimer_run : (leaseTransitionSystemRestartForgetsTimer 0 P0).MTr l0
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .tick, .tick, .tick, .tick,
      .heartbeat 1, .ack 1, .restartKeep 1, .takeover 1, .core (.append 1), .core (.commit 1)]
     forgetTimer13 :=
-  .stepL (.step (LeaseStep.core l0 _ _ (Step.count l0.core 0 1 (by decide) (by decide) (by decide)
+  .stepL (.step (LeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (LeaseStep.core forgetTimer1 _ _ (Step.makeEligible forgetTimer1.core 0 1 (by decide)
     (by decide) (by decide) (by decide)) rfl)) <|
@@ -98,7 +98,7 @@ forgets its takeover timer and takes over at once commits while the deposed prim
 still holds its lease from it, and the deposed primary may serve a linearizable read
 that misses the write. -/
 theorem restartForgetsTimer_stale :
-    ∃ a, (leaseLTSRestartForgetsTimer 0 P0).CanReach (leaseInit 0) a ∧
+    ∃ a, (leaseTransitionSystemRestartForgetsTimer 0 P0).CanReach (leaseInit 0) a ∧
       PrimCanRead P0 a 0 ∧ a.core.log 0 ≠ a.core.hist :=
   ⟨forgetTimer13, ⟨_, restartForgetsTimer_run⟩, by decide, by decide⟩
 

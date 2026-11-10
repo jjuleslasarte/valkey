@@ -36,7 +36,7 @@ inductive LeaseStepRestartKeepsReadLease (m : Nat) (P : LeaseParams) :
         (leaseRestartKeepingReadLease a n (restartEmpty a.core n))
 
 /-- The weakened lease layer as a transition system. -/
-def leaseLTSRestartKeepsReadLease (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
+def leaseTransitionSystemRestartKeepsReadLease (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
   Tr := LeaseStepRestartKeepsReadLease m P
 
 def lk6 := withCore l5 (appendWrite l5.core 0)       -- n0 writes at offset 1
@@ -47,10 +47,10 @@ def lk10 := recvData lk9 1 lk9.core (lk9.ackEcho 0 1)  -- n0 echoes n1's acknowl
 def lk11 := leaseRestartKeepingReadLease lk10 1 (restartEmpty lk10.core 1) -- n1 restarts empty, lease kept
 
 /-- The run; the label list is its trace. Only `restartEmpty 1` is the weakened action. -/
-theorem restartKeepsReadLease_run : (leaseLTSRestartKeepsReadLease 0 P0).MTr l0
-    [.core (.count 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
+theorem restartKeepsReadLease_run : (leaseTransitionSystemRestartKeepsReadLease 0 P0).MTr l0
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
      .core (.append 0), .replicate 1, .ack 1, .core (.commit 0), .heartbeat 1, .restartEmpty 1] lk11 :=
-  LTS.MTr.comp (leaseLTSRestartKeepsReadLease 0 P0)
+  LTS.MTr.comp (leaseTransitionSystemRestartKeepsReadLease 0 P0)
     (leaseMtr_of_step LeaseStepRestartKeepsReadLease.step (leases_prefix P0)) <|
   .stepL (.step (LeaseStep.core l5 _ _ (Step.append l5.core 0 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (LeaseStep.replicate lk6 1 (by decide) (by decide) (by decide))) <|
@@ -65,7 +65,7 @@ theorem restartKeepsReadLease_run : (leaseLTSRestartKeepsReadLease 0 P0).MTr l0
 keeps its lease may serve a linearizable read of an empty log while the committed
 history is `[1]`. -/
 theorem restartKeepsReadLease_stale :
-    ∃ a, (leaseLTSRestartKeepsReadLease 0 P0).CanReach (leaseInit 0) a ∧
+    ∃ a, (leaseTransitionSystemRestartKeepsReadLease 0 P0).CanReach (leaseInit 0) a ∧
       ReplCanRead P0 a 1 ∧ a.core.log 1 ≠ a.core.hist :=
   ⟨lk11, ⟨_, restartKeepsReadLease_run⟩, by decide, by decide⟩
 

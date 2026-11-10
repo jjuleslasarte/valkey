@@ -12,7 +12,7 @@ One line per action, each pointing at the subsystem file that proves it:
 | Action | File |
 |---|---|
 | AppendWrite, Replicate, Ack, Resync | `Preserve/Replication.lean` |
-| Commit, Count, Uncount | `Preserve/Commit.lean` |
+| Commit, AddToSyncSet, RemoveFromSyncSet | `Preserve/Commit.lean` |
 | Learn, MakeEligible, MakeIneligible | `Preserve/Config.lean` |
 | Takeover | `Preserve/Failover.lean` |
 | RestartEmpty, RestartKeep, RestartPartial | `Preserve/Restart.lean` |
@@ -31,8 +31,8 @@ theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv
   | replicate r _ _ _ => exact invariant_replicate h r
   | ack r hne hpre hlt => exact invariant_ack h r hne hpre hlt
   | commit p hp _ hlen hcap => exact invariant_commit h p hp hlen hcap
-  | count p r hp hrp hf _ hle => exact invariant_count h p r hp hrp hf hle
-  | uncount p r hp hsy hel => exact invariant_uncount h p r hp hsy hel
+  | addToSyncSet p r hp hrp hf _ hle => exact invariant_addToSyncSet h p r hp hrp hf hle
+  | removeFromSyncSet p r hp hsy hel => exact invariant_removeFromSyncSet h p r hp hsy hel
   | makeEligible p r hp hkl hsy hel => exact invariant_makeEligible h hp hkl hsy hel
   | makeIneligible p r hp hkl hel => exact invariant_makeIneligible h hp hkl hel
   | learn n hnkl => exact invariant_learn h n hnkl
@@ -44,7 +44,7 @@ theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv
   | restartPartialFresh n k hkl hk hfresh hsurv => exact invariant_restartPartialFresh h n k hkl hsurv hk hfresh
 
 /-- `Invariant` is a one-step invariant of the protocol, in CSLib's sense. -/
-theorem invariant_trInv {m : Nat} : (lts m (Node := Node)).TrInv Invariant :=
+theorem invariant_trInv {m : Nat} : (transitionSystem m (Node := Node)).TrInv Invariant :=
   fun _ _ _ hs h => invariant_step h hs
 
 /-- Hence it holds in every reachable state: a one-step invariant is a run invariant

@@ -26,8 +26,8 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
     intro p
     show (L p).take (s.commit p) = _
     rw [← prefix_take_eq (hL p) (h.commitWithinLog p)]; exact h.committedIsHistoryPrefix p
-  knownLe := h.knownLe
-  knownEq := h.knownEq
+  localCfgLe := h.localCfgLe
+  localCfgEq := h.localCfgEq
   primKnows := h.primKnows
   eligibleCounted := h.eligibleCounted
   noSelfSync := h.noSelfSync
@@ -44,10 +44,10 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
   inheritedEndWithinLog := Nat.le_trans h.inheritedEndWithinLog (hL _).length_le
   syncCommit := h.syncCommit
   eligibleInOldConfig := h.eligibleInOldConfig
-  knownIncLe := h.knownIncLe
+  localCfgIncLe := h.localCfgIncLe
   authEx := h.authEx
   historyWithinCommitOrInherited := h.historyWithinCommitOrInherited
-  stale := fun p hp hv => (h.stale p hp hv).mono (hcfg := rfl) (hknown := rfl) (hinherited := rfl) (hinc := rfl)
+  stale := fun p hp hv => (h.stale p hp hv).mono (hcfg := rfl) (hlocalCfg := rfl) (hinherited := rfl) (hinc := rfl)
       hL (fun _ => Nat.le_refl _)
     (fun r => h.ackedLe p r hp) (fun _ x => x) (fun _ _ => rfl)
 
@@ -72,12 +72,12 @@ include h hne hpre hlt
 omit hne hpre hlt in
 /-- Ack changes no configuration. -/
 theorem config_ack : ConfigInvariant (ack s r) :=
-  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
+  (h.toConfigInvariant).frame (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl)
 
 /-- The recorded acknowledgement becomes the replica's log length, and the replica's log is a prefix of its primary's, so the record is real. -/
 theorem repl_ack : ReplInvariant (ack s r) := by
   have hA := ack_acked (s := s) r
-  have hfol : (s.known r).primary = primaryOf s r := rfl
+  have hfol : (s.localCfg r).primary = primaryOf s r := rfl
   exact {
   noSelfSync := h.noSelfSync
   ackedPrim := by
@@ -140,12 +140,12 @@ theorem commit_ack : CommitInvariant (ack s r) where
 /-- Only the acknowledgement of a replica that still follows its primary moves, so no fence moves. -/
 theorem failover_ack : FailoverInvariant (ack s r) := by
   have hA := ack_acked (s := s) r
-  have hfol : (s.known r).primary = primaryOf s r := rfl
+  have hfol : (s.localCfg r).primary = primaryOf s r := rfl
   exact {
   stale := by
     -- Ack moves only the acknowledgement of a replica that follows its primary.
     intro p hp hv
-    refine (h.stale p hp hv).mono (hcfg := rfl) (hknown := rfl) (hinherited := rfl) (hinc := rfl)
+    refine (h.stale p hp hv).mono (hcfg := rfl) (hlocalCfg := rfl) (hinherited := rfl) (hinc := rfl)
       (fun _ => List.prefix_refl _) (ack_ackHigh_le r)
       (fun x => h.ackedLe p x hp) (fun _ x => x) ?_
     intro x hx
@@ -172,7 +172,7 @@ end ack
 
 section resync
 
-variable {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ r) (hsy : s.sync (primaryOf s r) r = false) (hke : (s.known (primaryOf s r)).eligible r = false)
+variable {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ r) (hsy : s.sync (primaryOf s r) r = false) (hke : (s.localCfg (primaryOf s r)).eligible r = false)
 
 include h hne hsy hke
 
@@ -183,22 +183,22 @@ eligible, and no node that thinks it is primary is `r`. -/
 theorem resync_facts :
     r ≠ s.cfg.primary ∧ s.cfg.eligible r = false ∧ (∀ x, ThinksPrimary s x → x ≠ r) := by
   have hrprim : r ≠ s.cfg.primary := by
-    intro e; apply hne; show (s.known r).primary = r; rw [e, h.primKnows]
+    intro e; apply hne; show (s.localCfg r).primary = r; rw [e, h.primKnows]
   refine ⟨hrprim, ?_, fun x hx e => by subst e; exact hne hx.1⟩
   cases hc : s.cfg.eligible r
   · rfl
   · exfalso
-    by_cases hf : (s.known r).primary = s.cfg.primary
+    by_cases hf : (s.localCfg r).primary = s.cfg.primary
     · have : primaryOf s r = s.cfg.primary := hf
       rw [this, h.primKnows, hc] at hke; exact absurd hke (by decide)
     · have := h.eligibleInOldConfig r hc hf
-      change (s.known (primaryOf s r)).eligible r = true at this
+      change (s.localCfg (primaryOf s r)).eligible r = true at this
       rw [hke] at this; exact absurd this (by decide)
 
 omit hne hsy hke in
 /-- Resync changes no configuration. -/
 theorem config_resync : ConfigInvariant (resync s r) :=
-  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
+  (h.toConfigInvariant).frame (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl)
 
 /-- `r`'s log becomes a prefix of its primary's and its acknowledgement is reset to 0, so recorded acknowledgements stay real. -/
 theorem repl_resync : ReplInvariant (resync s r) := by

@@ -12,7 +12,7 @@ import SyncReplication
 #print axioms SyncReplication.staleRestoreKeepsInc_unsafe
 #print axioms SyncReplication.staleRestoreKeepsInc_loses
 #print axioms SyncReplication.noIncWritable_oneCopy
-#print axioms SyncReplication.uncountElig_unsafe
+#print axioms SyncReplication.removeFromSyncSetElig_unsafe
 #print axioms SyncReplication.noCatchUp_unsafe
 #print axioms SyncReplication.resyncEligible_unsafe
 #print axioms SyncReplication.countedDiverged_reachable

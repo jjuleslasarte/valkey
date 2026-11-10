@@ -32,22 +32,22 @@ namespace SyncReplication
 inductive StepResyncEligible (m : Nat) : State N → Action N → State N → Prop
   /-- Every step of the model. -/
   | step {s μ s'} : Step m s μ s' → StepResyncEligible m s μ s'
-  /-- Resync without `(s.known (primaryOf s r)).eligible r = false`. -/
+  /-- Resync without `(s.localCfg (primaryOf s r)).eligible r = false`. -/
   | resync (s : State N) (r : N) : primaryOf s r ≠ r → ¬ (s.log r <+: s.log (primaryOf s r)) →
       s.sync (primaryOf s r) r = false → StepResyncEligible m s (.resync r) (resync s r)
 
 /-- The weakened protocol as a transition system. -/
-def ltsResyncEligible (m : Nat) : LTS (State N) (Action N) where
+def transitionSystemResyncEligible (m : Nat) : LTS (State N) (Action N) where
   Tr := StepResyncEligible m
 
 def re7 := restartPartialFresh c6 0 0   -- n0 restarts from an empty file: new incarnation, empty log
 def re8 := resync re7 1                  -- n1, eligible, resyncs to n0's empty log
 
 /-- The run; the label list is its trace. Only `resync 1` is the weakened action. -/
-theorem resyncEligible_run : (ltsResyncEligible 1).MTr c0
-    [.count 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+theorem resyncEligible_run : (transitionSystemResyncEligible 1).MTr c0
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
      .restartPartial 0 0, .resync 1] re8 :=
-  LTS.MTr.comp (ltsResyncEligible 1) (mtr_of_step StepResyncEligible.step committed_run) <|
+  LTS.MTr.comp (transitionSystemResyncEligible 1) (mtr_of_step StepResyncEligible.step committed_run) <|
   .stepL (.step (Step.restartPartialFresh c6 0 0 (by decide) (by decide) (by decide)
     ⟨1, by decide, by decide⟩)) <|
   .stepL (StepResyncEligible.resync re7 1 (by decide) (by decide) (by decide)) <|
@@ -55,7 +55,7 @@ theorem resyncEligible_run : (ltsResyncEligible 1).MTr c0
 
 /-- Resync must exclude eligible replicas: without the guard a reachable state has an
 authoritative eligible replica (n1) that lacks the committed history. -/
-theorem resyncEligible_unsafe : ∃ s, (ltsResyncEligible 1).CanReach (init 0) s ∧ ¬ Safety s := by
+theorem resyncEligible_unsafe : ∃ s, (transitionSystemResyncEligible 1).CanReach (init 0) s ∧ ¬ Safety s := by
   refine ⟨re8, ⟨_, resyncEligible_run⟩, ?_⟩
   intro ⟨hholds, _⟩
   exact absurd (hholds 1 (by decide)) (by decide)

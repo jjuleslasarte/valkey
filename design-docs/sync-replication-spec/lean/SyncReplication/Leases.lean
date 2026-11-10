@@ -129,7 +129,7 @@ instance (P : LeaseParams) (now : Nat) (recv : Option Nat) (dur : Nat) :
 /-- `p` holds a valid primary lease from every eligible replica in the configuration it
 knows. -/
 def PrimLeaseValid (P : LeaseParams) (a : LeaseState Node) (p : Node) : Prop :=
-  ∀ r, (a.core.known p).eligible r = true → r ≠ p → HolderValid P a.now (a.primaryLease p r) P.primDur
+  ∀ r, (a.core.localCfg p).eligible r = true → r ≠ p → HolderValid P a.now (a.primaryLease p r) P.primDur
 
 /-- `r` holds a valid read lease. -/
 def ReadLeaseValid (P : LeaseParams) (a : LeaseState Node) (r : Node) : Prop :=
@@ -139,8 +139,8 @@ def ReadLeaseValid (P : LeaseParams) (a : LeaseState Node) (r : Node) : Prop :=
 stops granting, design §5 "Leases across a failover"), and `r` is a sync member that
 is eligible with a matching incarnation in `p`'s configuration. -/
 def MayGrant (P : LeaseParams) (a : LeaseState Node) (p r : Node) : Prop :=
-  PrimLeaseValid P a p ∧ a.core.sync p r = true ∧ (a.core.known p).eligible r = true ∧
-    (a.core.known p).incarnation r = a.core.incarnation r
+  PrimLeaseValid P a p ∧ a.core.sync p r = true ∧ (a.core.localCfg p).eligible r = true ∧
+    (a.core.localCfg p).incarnation r = a.core.incarnation r
 
 /-! ### The read rule -/
 
@@ -233,7 +233,7 @@ def leaseRestart (a : LeaseState Node) (n : Node) (c : State Node) : LeaseState 
 
 /-- The replication actions that touch no lease state and keep their guards. -/
 def Action.isPlain : Action Node → Bool
-  | .append _ | .commit _ | .count _ _ | .uncount _ _ | .makeEligible _ _ => true
+  | .append _ | .commit _ | .addToSyncSet _ _ | .removeFromSyncSet _ _ | .makeEligible _ _ => true
   | _ => false
 
 /-- The actions of the lease layer. -/
@@ -248,8 +248,8 @@ inductive LeaseAction (Node : Type)
 inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseAction Node → LeaseState Node → Prop
   /-- Real time advances. -/
   | tick (a) : LeaseStep m P a .tick (tick a)
-  /-- A replication action that touches no lease state: AppendWrite, Commit, Count,
-  Uncount, MakeEligible, with their guards. -/
+  /-- A replication action that touches no lease state: AppendWrite, Commit, AddToSyncSet,
+  RemoveFromSyncSet, MakeEligible, with their guards. -/
   | core (a μ c) : Step m a.core μ c → μ.isPlain = true → LeaseStep m P a (.core μ) (withCore a c)
   /-- A replica copies the next entry of its primary's log; the message carries the
   primary's committed offset. -/
@@ -272,43 +272,43 @@ inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActio
   | ackRenew (a r) : primaryOf a.core r ≠ r → a.core.log r <+: a.core.log (primaryOf a.core r) →
       LeaseStep m P a (.ack r) (recvAck a r a.core)
   /-- A node learns the latest configuration. -/
-  | learn (a n) : (hnkl : ¬ KnowsLatest a.core n) → LeaseStep m P a (.learn n) (leaseLearn a n)
+  | learn (a n) : (hStale : ¬ KnowsLatest a.core n) → LeaseStep m P a (.learn n) (leaseLearn a n)
   /-- Demotion (design §4 and §5): the primary waits until the replica's read lease
   must have expired, measured from the last acknowledgement it received from it, and,
   for a replica of the configuration its takeover replaced, until one read lease plus
   the margin after that takeover. -/
-  | demote (a p r) : (hp : ThinksPrimary a.core p) → (hkl : KnowsLatest a.core p) → (hel : a.core.cfg.eligible r = true) →
+  | demote (a p r) : (hThinksPrimary : ThinksPrimary a.core p) → (hKnowsLatest : KnowsLatest a.core p) → (hEligible : a.core.cfg.eligible r = true) →
       GrantorOver P a.now (a.ackReceived p r) P.readDur →
       (∀ T, a.primarySince p = some T → a.oldEligible p r = true →
         T + P.readDur + P.margin ≤ a.now + P.drift) →
       LeaseStep m P a (.demote p r) (withCore a (makeIneligible a.core p r))
   /-- Takeover: the replica waits until the primary's lease must have expired, measured
   from the last traffic it received from the primary. -/
-  | takeover (a n) : (hkl : KnowsLatest a.core n) → (hel : a.core.cfg.eligible n = true) → (hnp : n ≠ a.core.cfg.primary) →
+  | takeover (a n) : (hKnowsLatest : KnowsLatest a.core n) → (hEligible : a.core.cfg.eligible n = true) → (hNotPrimary : n ≠ a.core.cfg.primary) →
       a.core.cfg.incarnation n = a.core.incarnation n →
       a.primaryTraffic n + P.primDur ≤ a.now + P.drift →
       LeaseStep m P a (.takeover n) (leaseTakeover a n)
   /-- A full resync. -/
   | resync (a r) : primaryOf a.core r ≠ r → ¬ (a.core.log r <+: a.core.log (primaryOf a.core r)) →
-      a.core.sync (primaryOf a.core r) r = false → (a.core.known (primaryOf a.core r)).eligible r = false →
+      a.core.sync (primaryOf a.core r) r = false → (a.core.localCfg (primaryOf a.core r)).eligible r = false →
       LeaseStep m P a (.resync r) (leaseResync a r)
   /-- The restarts, each clearing the node's lease state. -/
-  | restartEmpty (a n) : (hkl : KnowsLatest a.core n) → (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+  | restartEmpty (a n) : (hKnowsLatest : KnowsLatest a.core n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       LeaseStep m P a (.restartEmpty n) (leaseRestart a n (restartEmpty a.core n))
-  | restartKeep (a n) : (hkl : KnowsLatest a.core n) →
+  | restartKeep (a n) : (hKnowsLatest : KnowsLatest a.core n) →
       LeaseStep m P a (.restartKeep n) (leaseRestart a n (restartKeep a.core n))
-  | restartPartialKeep (a n k) : (hkl : KnowsLatest a.core n) → (hk : k < (a.core.log n).length) → (hkeep : a.core.ackHigh n ≤ k) →
+  | restartPartialKeep (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hCoversAcks : a.core.ackHigh n ≤ k) →
       LeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialKeep a.core n k))
-  | restartPartialFresh (a n k) : (hkl : KnowsLatest a.core n) → (hk : k < (a.core.log n).length) → (hfresh : k < a.core.ackHigh n) →
+  | restartPartialFresh (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) →
       (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       LeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialFresh a.core n k))
 
 /-- The lease layer as a labelled transition system. -/
-def leaseLTS (m : Nat) (P : LeaseParams) : LTS (LeaseState Node) (LeaseAction Node) where
+def leaseTransitionSystem (m : Nat) (P : LeaseParams) : LTS (LeaseState Node) (LeaseAction Node) where
   Tr := LeaseStep m P
 
 /-- The states reachable from `leaseInit i`. -/
 def LeaseReachable (m : Nat) (P : LeaseParams) (i : Node) (a : LeaseState Node) : Prop :=
-  (leaseLTS m P).CanReach (leaseInit i) a
+  (leaseTransitionSystem m P).CanReach (leaseInit i) a
 
 end SyncReplication

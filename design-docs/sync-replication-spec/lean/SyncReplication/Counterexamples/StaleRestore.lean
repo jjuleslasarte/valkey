@@ -26,17 +26,17 @@ inductive StepStaleKeep (m : Nat) : State N → Action N → State N → Prop
       StepStaleKeep m s (.restartPartial n k) (restartPartialKeep s n k)
 
 /-- The protocol with that rule, as a transition system. -/
-def ltsStaleKeep (m : Nat) : LTS (State N) (Action N) where
+def transitionSystemStaleKeep (m : Nat) : LTS (State N) (Action N) where
   Tr := StepStaleKeep m
 
 def g7 := learn c6 1                  -- n1 learns the latest configuration
 def g8 := restartPartialKeep g7 1 0   -- n1 restarts from a file without the write
 
 /-- The run; the label list is its trace. Only the last action is the weakened one. -/
-theorem staleRestoreKeepsInc_run : (ltsStaleKeep 1).MTr c0
-    [.count 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+theorem staleRestoreKeepsInc_run : (transitionSystemStaleKeep 1).MTr c0
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
      .learn 1, .restartPartial 1 0] g8 :=
-  LTS.MTr.comp (ltsStaleKeep 1) (mtr_of_step StepStaleKeep.step committed_run) <|
+  LTS.MTr.comp (transitionSystemStaleKeep 1) (mtr_of_step StepStaleKeep.step committed_run) <|
   .stepL (.step (Step.learn c6 1 (by decide))) <|
   .stepL (StepStaleKeep.restartPartial g7 1 0 (by decide) (by decide)) <|
   .refl
@@ -45,7 +45,7 @@ theorem staleRestoreKeepsInc_run : (ltsStaleKeep 1).MTr c0
 after restarting from a file that does not cover what it acknowledged, a reachable
 state has an authoritative eligible replica (n1) that lacks the committed history. -/
 theorem staleRestoreKeepsInc_unsafe :
-    ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧ ¬ Safety s := by
+    ∃ s, (transitionSystemStaleKeep 1).CanReach (init 0) s ∧ ¬ Safety s := by
   refine ⟨g8, ⟨_, staleRestoreKeepsInc_run⟩, ?_⟩
   intro ⟨hholds, _⟩
   exact absurd (hholds 1 (by decide)) (by decide)
@@ -54,16 +54,16 @@ def g9 := restartEmpty g8 0   -- n0 restarts empty; allowed, since n1 is still a
 
 /-- One more step: n0 restarts empty. The survival guard is satisfied by n1, which is
 authoritative but holds nothing. -/
-theorem staleRestoreKeepsInc_loss_run : (ltsStaleKeep 1).MTr c0
-    [.count 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+theorem staleRestoreKeepsInc_loss_run : (transitionSystemStaleKeep 1).MTr c0
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
      .learn 1, .restartPartial 1 0, .restartEmpty 0] g9 :=
-  LTS.MTr.comp (ltsStaleKeep 1) staleRestoreKeepsInc_run <|
+  LTS.MTr.comp (transitionSystemStaleKeep 1) staleRestoreKeepsInc_run <|
   .stepL (.step (Step.restartEmpty g8 0 (by decide) ⟨1, by decide, by decide⟩)) <|
   .refl
 
 /-- The committed write is then gone from every node: the committed history is
 non-empty and no node's log holds it. -/
-theorem staleRestoreKeepsInc_loses : ∃ s, (ltsStaleKeep 1).CanReach (init 0) s ∧
+theorem staleRestoreKeepsInc_loses : ∃ s, (transitionSystemStaleKeep 1).CanReach (init 0) s ∧
     s.hist ≠ [] ∧ ∀ n, ¬ s.hist <+: s.log n :=
   ⟨g9, ⟨_, staleRestoreKeepsInc_loss_run⟩, by decide, by decide⟩
 

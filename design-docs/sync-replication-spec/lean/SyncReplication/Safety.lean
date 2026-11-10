@@ -3,7 +3,7 @@ import SyncReplication.Preserve
 /-! # Main theorem
 
 Every reachable state satisfies Safety, with EligibleHoldsCommitted over authoritative nodes, for EVERY
-MinSync `m`, any node type, unbounded logs, versions, incarnations and restarts. -/
+MinSync `m`, any node type, unbounded logs, epochs, incarnations and restarts. -/
 
 open Cslib
 
@@ -13,33 +13,35 @@ variable {Node : Type} [DecidableEq Node]
 
 /-- Safety for every min-sync-replicas value `m`.
 
-In prose: in every state reachable from `init i`, every authoritative node holds the whole committed history,
+In every state reachable from `init i`, every authoritative node holds the whole committed history,
 and no node has committed an entry that differs from it. This holds for any number
 of nodes, log length, configuration changes and restarts, provided each restart
 without data leaves some other authoritative node with its data. -/
-theorem safety {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) : Safety s :=
-  invariant_safety (invariant_reachable h)
+theorem safety {m : Nat} {i : Node} {s : State Node} (hReachable : Reachable m i s) : Safety s :=
+  invariant_safety (invariant_reachable hReachable)
 
-/-- What MinSync >= 1 adds: when the current primary commits, an eligible replica with a
-matching incarnation counts toward the commit, so after the commit the history is on
-at least two distinct authoritative nodes, the primary and that replica. -/
-theorem commit_two_copies {m : Nat} (hm : 1 ≤ m) {i : Node} {s : State Node}
-    (h : Reachable m i s) {p : Node} (hp : ThinksPrimary s p) (hpp : p = s.cfg.primary)
-    (hw : Writable m s p) (hlen : s.commit p < (s.log p).length)
-    (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
+/-- When the current primary commits, an eligible replica with a matching incarnation
+is in its sync replica set, so the commit waited for that replica's acknowledgement.
+After the commit the history is therefore on at least two distinct authoritative nodes,
+the primary and that replica. This needs `1 ≤ m`: with `m = 0` a primary may
+commit with no eligible replica in its sync set. -/
+theorem commit_two_copies {m : Nat} (hMinSync : 1 ≤ m) {i : Node} {s : State Node}
+    (hReachable : Reachable m i s) {p : Node} (hThinksPrimary : ThinksPrimary s p) (hCurrent : p = s.cfg.primary)
+    (hWritable : Writable m s p) (hHasNext : s.commit p < (s.log p).length)
+    (hAllAcked : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
     ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
       (commitNext s p).hist <+: (commitNext s p).log e ∧ (commitNext s p).hist <+: (commitNext s p).log p := by
-  have hi := invariant_reachable h
-  have hs' := (safety (h.stepR (Step.commit s p hp hw hlen hcap))).1
+  have hi := invariant_reachable hReachable
+  have hs' := (safety (hReachable.stepR (Step.commit s p hThinksPrimary hWritable hHasNext hAllAcked))).1
   obtain ⟨r, h1, h2, h3⟩ : (syncEligible s p).Nonempty :=
-    Set.one_le_encard_iff_nonempty.mp (le_trans (by exact_mod_cast hm) hw)
-  subst hpp
+    Set.one_le_encard_iff_nonempty.mp (le_trans (by exact_mod_cast hMinSync) hWritable)
+  subst hCurrent
   rw [hi.primKnows] at h2 h3
   have hrp : r ≠ s.cfg.primary := by intro e; rw [e, hi.noSelfSync] at h1; exact absurd h1 (by decide)
   have har : IsAuthoritative (commitNext s s.cfg.primary) r := ⟨Or.inl h2, h3⟩
   have hap : IsAuthoritative (commitNext s s.cfg.primary) s.cfg.primary := by
     refine ⟨Or.inr rfl, ?_⟩
-    have := hp.2; rw [hi.primKnows] at this; exact this
+    have := hThinksPrimary.2; rw [hi.primKnows] at this; exact this
   exact ⟨r, hrp, har, hap, hs' r har, hs' _ hap⟩
 
 /-! ## Inherited entries commit first
@@ -56,7 +58,7 @@ theorem commit_step_le {m : Nat} {s s' : State Node} {μ : Action Node} (hs : St
     s'.commit p ≤ s'.inheritedEnd p ∨
       (s'.inheritedEnd p = s.inheritedEnd p ∧ s'.commit p ≤ s.commit p + 1) := by
   cases hs <;>
-    simp only [appendWrite, replicate, ack, commitNext, count, uncount, makeEligible,
+    simp only [appendWrite, replicate, ack, commitNext, addToSyncSet, removeFromSyncSet, makeEligible,
       makeIneligible, learn, takeover, resync, restartEmpty, restartKeep, restartPartialKeep,
       restartPartialFresh, update] <;>
     (try split_ifs) <;> (try subst_vars) <;> (try simp only [true_and]) <;> omega
@@ -65,9 +67,9 @@ theorem commit_step_le {m : Nat} {s s' : State Node} {μ : Action Node} (hs : St
 already past it at the start, with the same inherited end, or some state of the run has
 `p`'s commit point exactly at the final inherited end. -/
 theorem commit_crosses_inheritedEnd {m : Nat} {s t : State Node} {μs : List (Action Node)}
-    (h : (lts m).MTr s μs t) (p : Node) :
+    (h : (transitionSystem m).MTr s μs t) (p : Node) :
     t.commit p ≤ t.inheritedEnd p ∨
-      (∃ u, (lts m).CanReach s u ∧ (lts m).CanReach u t ∧
+      (∃ u, (transitionSystem m).CanReach s u ∧ (transitionSystem m).CanReach u t ∧
         u.commit p = u.inheritedEnd p ∧ u.inheritedEnd p = t.inheritedEnd p) ∨
       (s.inheritedEnd p < s.commit p ∧ s.inheritedEnd p = t.inheritedEnd p) := by
   induction h with
@@ -94,11 +96,11 @@ Limits. It is about offsets, not about which writes occupy them: it does not say
 write appended before reconciling lands above the inherited end. It does whenever the
 node's log is at least as long as its inherited end; a deposed node whose log a Resync
 truncated below its inherited end is the case not covered. -/
-theorem committed_inherited_first {m : Nat} {i : Node} {t : State Node} (ht : Reachable m i t)
-    (p : Node) (hpast : t.inheritedEnd p < t.commit p) :
-    ∃ u, Reachable m i u ∧ (lts m).CanReach u t ∧
+theorem committed_inherited_first {m : Nat} {i : Node} {t : State Node} (hReachable : Reachable m i t)
+    (p : Node) (hPastInherited : t.inheritedEnd p < t.commit p) :
+    ∃ u, Reachable m i u ∧ (transitionSystem m).CanReach u t ∧
       u.commit p = t.inheritedEnd p ∧ u.inheritedEnd p = t.inheritedEnd p := by
-  obtain ⟨_, run⟩ := ht
+  obtain ⟨_, run⟩ := hReachable
   rcases commit_crosses_inheritedEnd run p with h1 | ⟨u, hsu, hut, hu, he⟩ | ⟨hlt, _⟩
   · omega
   · exact ⟨u, hsu, hut, hu ▸ he, he⟩

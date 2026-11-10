@@ -28,17 +28,17 @@ theorem config_restartEmpty : ConfigInvariant (restartEmpty s n) := by
   have hI := restartEmpty_inc (s := s) (n := n)
   have hnauth : ¬ (s.cfg.incarnation n = s.incarnation n + 1) := by have := h.incLe n; omega
   exact {
-  knownLe := h.knownLe
-  knownEq := h.knownEq
+  localCfgLe := h.localCfgLe
+  localCfgEq := h.localCfgEq
   primKnows := h.primKnows
-  knownIncLe := by
-    intro x y; show (s.known x).incarnation y ≤ (restartEmpty s n).incarnation y; rw [hI]; split_ifs with e
-    · subst e; have := h.knownIncLe x y; omega
-    · exact h.knownIncLe x y }
+  localCfgIncLe := by
+    intro x y; show (s.localCfg x).incarnation y ≤ (restartEmpty s n).incarnation y; rw [hI]; split_ifs with e
+    · subst e; have := h.localCfgIncLe x y; omega
+    · exact h.localCfgIncLe x y }
 
 /-- `n` loses its acknowledgements and sync replica set, and the current primary forgets `n`'s acknowledgement. -/
 theorem repl_restartEmpty : ReplInvariant (restartEmpty s n) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hLo : ∀ x, x ≠ n → (restartEmpty s n).log x = s.log x := fun _ => restartEmpty_log_other
   have hCo : ∀ x, x ≠ n → (restartEmpty s n).commit x = s.commit x := fun _ => restartEmpty_commit_other
   have hS := restartEmpty_sync (s := s) (n := n)
@@ -68,7 +68,7 @@ theorem repl_restartEmpty : ReplInvariant (restartEmpty s n) := by
     rw [hLo p hpn]
     by_cases emn : m = n
     · subst emn
-      have hpp : p = s.cfg.primary := by rw [← hf]; show (s.known m).primary = s.cfg.primary; rw [hkn]
+      have hpp : p = s.cfg.primary := by rw [← hf]; show (s.localCfg m).primary = s.cfg.primary; rw [hkn]
       rw [hA, if_neg hpn, if_pos ⟨hpp, rfl⟩]; simp
     · rw [hLo m emn, hA, if_neg hpn, if_neg (fun c => emn c.2)]
       exact h.ackHolds p m hp' hm hf
@@ -79,7 +79,7 @@ theorem repl_restartEmpty : ReplInvariant (restartEmpty s n) := by
     rw [restartEmpty_ackHigh]
     by_cases emn : m = n
     · subst emn
-      have hpp : p = s.cfg.primary := by rw [← hf]; show (s.known m).primary = s.cfg.primary; rw [hkn]
+      have hpp : p = s.cfg.primary := by rw [← hf]; show (s.localCfg m).primary = s.cfg.primary; rw [hkn]
       rw [hA, if_neg hpn, if_pos ⟨hpp, rfl⟩, if_pos rfl]
     · rw [hA, if_neg hpn, if_neg (fun c => emn c.2), if_neg emn]
       exact h.ackedHigh p m hp' hm hf
@@ -95,7 +95,7 @@ theorem repl_restartEmpty : ReplInvariant (restartEmpty s n) := by
 
 /-- `n` no longer matches its recorded incarnation, so no primary has to count it. -/
 theorem membership_restartEmpty : MembershipInvariant (restartEmpty s n) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hIo : ∀ x, x ≠ n → (restartEmpty s n).incarnation x = s.incarnation x := fun _ => restartEmpty_inc_other
   have hIn := restartEmpty_inc_self (s := s) (n := n)
   have hRo : ∀ x, x ≠ n → (restartEmpty s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartEmpty_inheritedEnd_other
@@ -112,9 +112,9 @@ theorem membership_restartEmpty : MembershipInvariant (restartEmpty s n) := by
     obtain ⟨hpn, hp'⟩ := htp p hp
     have hrn : r ≠ n := by
       intro e; subst e
-      change (s.known p).incarnation r = (restartEmpty s r).incarnation r at hi
-      rw [hIn] at hi; have := h.knownIncLe p r; omega
-    change (s.known p).incarnation r = (restartEmpty s n).incarnation r at hi
+      change (s.localCfg p).incarnation r = (restartEmpty s r).incarnation r at hi
+      rw [hIn] at hi; have := h.localCfgIncLe p r; omega
+    change (s.localCfg p).incarnation r = (restartEmpty s n).incarnation r at hi
     rw [hIo r hrn] at hi
     rw [hS, if_neg hpn, if_neg (fun c => hrn c.2)]
     exact h.eligibleCounted p r hp' he hi
@@ -169,7 +169,7 @@ theorem commit_restartEmpty : CommitInvariant (restartEmpty s n) := by
 
 /-- Other nodes' fences do not move, and the survival guard keeps some other node authoritative. -/
 theorem failover_restartEmpty : FailoverInvariant (restartEmpty s n) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hIo : ∀ x, x ≠ n → (restartEmpty s n).incarnation x = s.incarnation x := fun _ => restartEmpty_inc_other
   have hLo : ∀ x, x ≠ n → (restartEmpty s n).log x = s.log x := fun _ => restartEmpty_log_other
   have hRo : ∀ x, x ≠ n → (restartEmpty s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartEmpty_inheritedEnd_other
@@ -238,7 +238,7 @@ include h hkl
 omit hkl in
 /-- RestartKeep changes no configuration or incarnation. -/
 theorem config_restartKeep : ConfigInvariant (restartKeep s n) :=
-  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
+  (h.toConfigInvariant).frame (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl)
 
 /-- `n`'s acknowledgements are reset and its commit point is 0, so it is below every acknowledgement. -/
 theorem repl_restartKeep : ReplInvariant (restartKeep s n) := by
@@ -286,12 +286,12 @@ theorem repl_restartKeep : ReplInvariant (restartKeep s n) := by
 
 /-- A restarted primary counts every matching eligible replica again. -/
 theorem membership_restartKeep : MembershipInvariant (restartKeep s n) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hRo : ∀ x, x ≠ n → (restartKeep s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartKeep_inheritedEnd_other
   have hAo : ∀ x, x ≠ n → (restartKeep s n).acked x = s.acked x := fun _ => restartKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartKeep s n).sync x = s.sync x := fun _ => restartKeep_sync_other
   have hSn := restartKeep_sync_self (s := s) (n := n)
-  have hnse : ThinksPrimary s n → (s.known n).eligible n = true → (s.known n).incarnation n = s.incarnation n → False := by
+  have hnse : ThinksPrimary s n → (s.localCfg n).eligible n = true → (s.localCfg n).incarnation n = s.incarnation n → False := by
     intro hp he hi; have := h.eligibleCounted n n hp he hi; rw [h.noSelfSync] at this
     exact absurd this (by decide)
   have htp := restartKeep_thinksPrimary (s := s) (n := n)
@@ -300,7 +300,7 @@ theorem membership_restartKeep : MembershipInvariant (restartKeep s n) := by
     intro p r hp he hi
     by_cases e : p = n
     · subst e
-      have hc : (s.known p).primary = p ∧ (s.known p).incarnation p = s.incarnation p := hp
+      have hc : (s.localCfg p).primary = p ∧ (s.localCfg p).incarnation p = s.incarnation p := hp
       rw [hSn, if_pos hc]
       have hrp : r ≠ p := by
         intro c; subst c; exact hnse hp he hi
@@ -369,7 +369,7 @@ theorem failover_restartKeep : FailoverInvariant (restartKeep s n) := by
     intro p hp hv
     have hpn : p ≠ n := by
       intro c
-      have hv' : (s.known p).version < s.cfg.version := hv
+      have hv' : (s.localCfg p).epoch < s.cfg.epoch := hv
       rw [c] at hv'; unfold KnowsLatest at hkl; omega
     have hF := h.stale p hp hv
     refine hF.transfer (hsync := (hSo p hpn)) (hkn := fun _ => rfl) (hke := rfl)
@@ -414,7 +414,7 @@ every deposed primary's fence (`DeposedFenced.eligHolds`, `DeposedFenced.primAck
 omit hkl hk hkeep in
 /-- RestartPartial changes no configuration or incarnation. -/
 theorem config_restartPartialKeep : ConfigInvariant (restartPartialKeep s n k) :=
-  (h.toConfigInvariant).frame (hcfg := rfl) (hknown := rfl) (hinc := rfl)
+  (h.toConfigInvariant).frame (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl)
 
 /-- `n`'s acknowledgements are reset. The acknowledgement its primary recorded from it is
 within `n`'s high-water mark, which the kept prefix covers, so it is still real. -/
@@ -472,12 +472,12 @@ theorem repl_restartPartialKeep : ReplInvariant (restartPartialKeep s n k) := by
 
 /-- As for RestartKeep: a restarted primary counts every matching eligible replica. -/
 theorem membership_restartPartialKeep : MembershipInvariant (restartPartialKeep s n k) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialKeep_inheritedEnd_other
   have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).acked x = s.acked x := fun _ => restartPartialKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartPartialKeep s n k).sync x = s.sync x := fun _ => restartPartialKeep_sync_other
   have hSn := restartPartialKeep_sync_self (s := s) (n := n) (k := k)
-  have hnse : ThinksPrimary s n → (s.known n).eligible n = true → (s.known n).incarnation n = s.incarnation n → False := by
+  have hnse : ThinksPrimary s n → (s.localCfg n).eligible n = true → (s.localCfg n).incarnation n = s.incarnation n → False := by
     intro hp he hi; have := h.eligibleCounted n n hp he hi; rw [h.noSelfSync] at this
     exact absurd this (by decide)
   exact {
@@ -485,7 +485,7 @@ theorem membership_restartPartialKeep : MembershipInvariant (restartPartialKeep 
     intro p r hp he hi
     by_cases e : p = n
     · subst e
-      have hc : (s.known p).primary = p ∧ (s.known p).incarnation p = s.incarnation p := hp
+      have hc : (s.localCfg p).primary = p ∧ (s.localCfg p).incarnation p = s.incarnation p := hp
       rw [hSn, if_pos hc]
       have hrp : r ≠ p := by
         intro c; subst c; exact hnse hp he hi
@@ -552,7 +552,7 @@ theorem commit_restartPartialKeep : CommitInvariant (restartPartialKeep s n k) :
 fence is within `n`'s high-water mark, so the kept prefix still holds its log up to
 the fence, whether `n` is the current primary or an eligible replica. -/
 theorem failover_restartPartialKeep : FailoverInvariant (restartPartialKeep s n k) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hLo : ∀ x, x ≠ n → (restartPartialKeep s n k).log x = s.log x := fun _ => restartPartialKeep_log_other
   have hLn := restartPartialKeep_log_self (s := s) (n := n) (k := k)
   have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialKeep_inheritedEnd_other
@@ -564,7 +564,7 @@ theorem failover_restartPartialKeep : FailoverInvariant (restartPartialKeep s n 
     intro p hp hv
     have hpn : p ≠ n := by
       intro c
-      have hv' : (s.known p).version < s.cfg.version := hv
+      have hv' : (s.localCfg p).epoch < s.cfg.epoch := hv
       rw [c] at hv'; unfold KnowsLatest at hkl; omega
     have hF := h.stale p hp hv
     have hpp := stale_ne_prim h hv
@@ -638,17 +638,17 @@ theorem config_restartPartialFresh : ConfigInvariant (restartPartialFresh s n k)
   have hI := restartPartialFresh_inc (s := s) (n := n) (k := k)
   have hnauth : ¬ (s.cfg.incarnation n = s.incarnation n + 1) := by have := h.incLe n; omega
   exact {
-  knownLe := h.knownLe
-  knownEq := h.knownEq
+  localCfgLe := h.localCfgLe
+  localCfgEq := h.localCfgEq
   primKnows := h.primKnows
-  knownIncLe := by
-    intro x y; show (s.known x).incarnation y ≤ (restartPartialFresh s n k).incarnation y; rw [hI]; split_ifs with e
-    · subst e; have := h.knownIncLe x y; omega
-    · exact h.knownIncLe x y }
+  localCfgIncLe := by
+    intro x y; show (s.localCfg x).incarnation y ≤ (restartPartialFresh s n k).incarnation y; rw [hI]; split_ifs with e
+    · subst e; have := h.localCfgIncLe x y; omega
+    · exact h.localCfgIncLe x y }
 
 /-- `n` loses its acknowledgements and sync replica set, and the current primary forgets `n`'s acknowledgement. -/
 theorem repl_restartPartialFresh : ReplInvariant (restartPartialFresh s n k) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hLo : ∀ x, x ≠ n → (restartPartialFresh s n k).log x = s.log x := fun _ => restartPartialFresh_log_other
   have hCo : ∀ x, x ≠ n → (restartPartialFresh s n k).commit x = s.commit x := fun _ => restartPartialFresh_commit_other
   have hS := restartPartialFresh_sync (s := s) (n := n) (k := k)
@@ -678,7 +678,7 @@ theorem repl_restartPartialFresh : ReplInvariant (restartPartialFresh s n k) := 
     rw [hLo p hpn]
     by_cases emn : m = n
     · subst emn
-      have hpp : p = s.cfg.primary := by rw [← hf]; show (s.known m).primary = s.cfg.primary; rw [hkn]
+      have hpp : p = s.cfg.primary := by rw [← hf]; show (s.localCfg m).primary = s.cfg.primary; rw [hkn]
       rw [hA, if_neg hpn, if_pos ⟨hpp, rfl⟩]; simp
     · rw [hLo m emn, hA, if_neg hpn, if_neg (fun c => emn c.2)]
       exact h.ackHolds p m hp' hm hf
@@ -689,7 +689,7 @@ theorem repl_restartPartialFresh : ReplInvariant (restartPartialFresh s n k) := 
     rw [restartPartialFresh_ackHigh]
     by_cases emn : m = n
     · subst emn
-      have hpp : p = s.cfg.primary := by rw [← hf]; show (s.known m).primary = s.cfg.primary; rw [hkn]
+      have hpp : p = s.cfg.primary := by rw [← hf]; show (s.localCfg m).primary = s.cfg.primary; rw [hkn]
       rw [hA, if_neg hpn, if_pos ⟨hpp, rfl⟩, if_pos rfl]
     · rw [hA, if_neg hpn, if_neg (fun c => emn c.2), if_neg emn]
       exact h.ackedHigh p m hp' hm hf
@@ -705,7 +705,7 @@ theorem repl_restartPartialFresh : ReplInvariant (restartPartialFresh s n k) := 
 
 /-- `n` no longer matches its recorded incarnation, so no primary has to count it. -/
 theorem membership_restartPartialFresh : MembershipInvariant (restartPartialFresh s n k) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hIo : ∀ x, x ≠ n → (restartPartialFresh s n k).incarnation x = s.incarnation x := fun _ => restartPartialFresh_inc_other
   have hIn := restartPartialFresh_inc_self (s := s) (n := n) (k := k)
   have hRo : ∀ x, x ≠ n → (restartPartialFresh s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialFresh_inheritedEnd_other
@@ -722,9 +722,9 @@ theorem membership_restartPartialFresh : MembershipInvariant (restartPartialFres
     obtain ⟨hpn, hp'⟩ := htp p hp
     have hrn : r ≠ n := by
       intro e; subst e
-      change (s.known p).incarnation r = (restartPartialFresh s r k).incarnation r at hi
-      rw [hIn] at hi; have := h.knownIncLe p r; omega
-    change (s.known p).incarnation r = (restartPartialFresh s n k).incarnation r at hi
+      change (s.localCfg p).incarnation r = (restartPartialFresh s r k).incarnation r at hi
+      rw [hIn] at hi; have := h.localCfgIncLe p r; omega
+    change (s.localCfg p).incarnation r = (restartPartialFresh s n k).incarnation r at hi
     rw [hIo r hrn] at hi
     rw [hS, if_neg hpn, if_neg (fun c => hrn c.2)]
     exact h.eligibleCounted p r hp' he hi
@@ -780,7 +780,7 @@ theorem commit_restartPartialFresh : CommitInvariant (restartPartialFresh s n k)
 omit hk hfresh in
 /-- Other nodes' fences do not move, and the survival guard keeps some other node authoritative. -/
 theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s n k) := by
-  have hkn : s.known n = s.cfg := h.knownEq n hkl
+  have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hIo : ∀ x, x ≠ n → (restartPartialFresh s n k).incarnation x = s.incarnation x := fun _ => restartPartialFresh_inc_other
   have hLo : ∀ x, x ≠ n → (restartPartialFresh s n k).log x = s.log x := fun _ => restartPartialFresh_log_other
   have hRo : ∀ x, x ≠ n → (restartPartialFresh s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialFresh_inheritedEnd_other

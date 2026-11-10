@@ -34,13 +34,13 @@ variable {n : Node}
 
 theorem takeover_log : (takeover s n).log = s.log := rfl
 
-theorem takeover_known (x : Node) :
-    (takeover s n).known x = if x = n then takeoverCfg s n else s.known x := rfl
+theorem takeover_localCfg (x : Node) :
+    (takeover s n).localCfg x = if x = n then takeoverCfg s n else s.localCfg x := rfl
 
-theorem takeover_known_other {x : Node} (hx : x ≠ n) : (takeover s n).known x = s.known x := by
-  rw [takeover_known, if_neg hx]
+theorem takeover_localCfg_other {x : Node} (hx : x ≠ n) : (takeover s n).localCfg x = s.localCfg x := by
+  rw [takeover_localCfg, if_neg hx]
 
-theorem takeover_sync_self : (takeover s n).sync n = takeoverSync s n := by simp [takeover]
+theorem takeover_sync_self : (takeover s n).sync n = syncAfterTakeover s n := by simp [takeover]
 
 theorem takeover_sync_other {x : Node} (hx : x ≠ n) : (takeover s n).sync x = s.sync x := by
   simp [takeover, update, hx]
@@ -59,24 +59,24 @@ theorem takeover_commit_other {x : Node} (hx : x ≠ n) : (takeover s n).commit 
 theorem takeover_inheritedEnd_self : (takeover s n).inheritedEnd n = (s.log n).length := by simp [takeover]
 
 /-- The new primary counts exactly the eligible replicas of the new configuration. -/
-theorem takeoverSync_iff (x : Node) :
-    takeoverSync s n x = true ↔ takeoverEligible s n x = true := by
-  simp [takeoverSync]
+theorem syncAfterTakeover_iff (x : Node) :
+    syncAfterTakeover s n x = true ↔ eligibleAfterTakeover s n x = true := by
+  simp [syncAfterTakeover]
 
 /-- The new primary does not count itself. -/
-theorem takeoverSync_self : takeoverSync s n n = false := by
-  simp [takeoverSync, takeoverEligible]
+theorem syncAfterTakeover_self : syncAfterTakeover s n n = false := by
+  simp [syncAfterTakeover, eligibleAfterTakeover]
 
 /-- The new eligible set: the old one without the old primary and without `n`. -/
-theorem takeoverEligible_iff (x : Node) :
-    takeoverEligible s n x = true ↔ s.cfg.eligible x = true ∧ x ≠ s.cfg.primary ∧ x ≠ n := by
-  simp [takeoverEligible, and_assoc]
+theorem eligibleAfterTakeover_iff (x : Node) :
+    eligibleAfterTakeover s n x = true ↔ s.cfg.eligible x = true ∧ x ≠ s.cfg.primary ∧ x ≠ n := by
+  simp [eligibleAfterTakeover, and_assoc]
 
 /-- After a takeover the new primary thinks it is primary, and every other node
 thinks so exactly when it did before. In particular a deposed primary still does. -/
 theorem takeover_thinksPrimary (hin : s.cfg.incarnation n = s.incarnation n) (x : Node) :
     ThinksPrimary (takeover s n) x ↔ x = n ∨ (x ≠ n ∧ ThinksPrimary s x) := by
-  unfold ThinksPrimary; rw [takeover_known]
+  unfold ThinksPrimary; rw [takeover_localCfg]
   by_cases e : x = n
   · subst e; simp only [takeoverCfg, true_or, iff_true]
     exact ⟨rfl, hin⟩
@@ -97,7 +97,7 @@ sync replica set. Nothing else changes. -/
 section learn
 variable {n : Node}
 
-theorem learn_known (x : Node) : (learn s n).known x = if x = n then s.cfg else s.known x := rfl
+theorem learn_localCfg (x : Node) : (learn s n).localCfg x = if x = n then s.cfg else s.localCfg x := rfl
 
 theorem learn_sync_self (hnp : n ≠ s.cfg.primary) : (learn s n).sync n = fun _ => false := by
   simp [learn, update, Ne.symm hnp]
@@ -110,7 +110,7 @@ primary of the latest configuration learns that it is not. -/
 theorem learn_thinksPrimary (hnp : n ≠ s.cfg.primary) {x : Node} (hx : ThinksPrimary (learn s n) x) :
     x ≠ n ∧ ThinksPrimary s x := by
   obtain ⟨hx1, hx2⟩ := hx
-  rw [learn_known] at hx1 hx2
+  rw [learn_localCfg] at hx1 hx2
   by_cases e : x = n
   · rw [if_pos e] at hx1; exact absurd (hx1.trans e).symm hnp
   · rw [if_neg e] at hx1 hx2; exact ⟨e, hx1, hx2⟩
@@ -128,12 +128,12 @@ latest configuration). -/
 section cas
 variable {r : Node}
 
-theorem makeEligible_known (x : Node) : (makeEligible s s.cfg.primary r).known x =
-    if x = s.cfg.primary then makeEligibleCfg s r else s.known x := rfl
+theorem makeEligible_localCfg (x : Node) : (makeEligible s s.cfg.primary r).localCfg x =
+    if x = s.cfg.primary then makeEligibleCfg s r else s.localCfg x := rfl
 
-theorem makeEligible_known_prim (hkp : s.known s.cfg.primary = s.cfg) (x : Node) :
-    ((makeEligible s s.cfg.primary r).known x).primary = (s.known x).primary := by
-  rw [makeEligible_known]; split_ifs with e
+theorem makeEligible_localCfg_prim (hkp : s.localCfg s.cfg.primary = s.cfg) (x : Node) :
+    ((makeEligible s s.cfg.primary r).localCfg x).primary = (s.localCfg x).primary := by
+  rw [makeEligible_localCfg]; split_ifs with e
   · subst e; rw [hkp]; rfl
   · rfl
 
@@ -144,18 +144,18 @@ theorem makeEligible_elig (x : Node) :
 theorem makeEligible_inc (x : Node) :
     (makeEligible s s.cfg.primary r).cfg.incarnation x = if x = r then s.incarnation r else s.cfg.incarnation x := rfl
 
-theorem makeEligible_known_inc (hkp : s.known s.cfg.primary = s.cfg) (hrp : r ≠ s.cfg.primary) (x : Node) :
-    ((makeEligible s s.cfg.primary r).known x).incarnation x = (s.known x).incarnation x := by
-  rw [makeEligible_known]; split_ifs with e
+theorem makeEligible_localCfg_inc (hkp : s.localCfg s.cfg.primary = s.cfg) (hrp : r ≠ s.cfg.primary) (x : Node) :
+    ((makeEligible s s.cfg.primary r).localCfg x).incarnation x = (s.localCfg x).incarnation x := by
+  rw [makeEligible_localCfg]; split_ifs with e
   · subst e; rw [hkp]
     show update s.cfg.incarnation r (s.incarnation r) s.cfg.primary = s.cfg.incarnation s.cfg.primary
     exact update_of_ne _ _ (Ne.symm hrp)
   · rfl
 
 /-- Promotion does not change who thinks it is primary. -/
-theorem makeEligible_thinksPrimary (hkp : s.known s.cfg.primary = s.cfg) (hrp : r ≠ s.cfg.primary) (x : Node) :
+theorem makeEligible_thinksPrimary (hkp : s.localCfg s.cfg.primary = s.cfg) (hrp : r ≠ s.cfg.primary) (x : Node) :
     ThinksPrimary (makeEligible s s.cfg.primary r) x ↔ ThinksPrimary s x := by
-  unfold ThinksPrimary; rw [makeEligible_known_prim hkp, makeEligible_known_inc hkp hrp]; rfl
+  unfold ThinksPrimary; rw [makeEligible_localCfg_prim hkp, makeEligible_localCfg_inc hkp hrp]; rfl
 
 /-- The only node promotion can make authoritative is `r`. -/
 theorem makeEligible_isAuthoritative {x : Node} (hx : IsAuthoritative (makeEligible s s.cfg.primary r) x) :
@@ -168,18 +168,18 @@ theorem makeEligible_isAuthoritative {x : Node} (hx : IsAuthoritative (makeEligi
     change (if x = r then s.incarnation r else s.cfg.incarnation x) = s.incarnation x at hi
     rw [if_neg e] at hn hi; exact ⟨hn, hi⟩
 
-theorem makeIneligible_known (x : Node) : (makeIneligible s s.cfg.primary r).known x =
-    if x = s.cfg.primary then makeIneligibleCfg s r else s.known x := rfl
+theorem makeIneligible_localCfg (x : Node) : (makeIneligible s s.cfg.primary r).localCfg x =
+    if x = s.cfg.primary then makeIneligibleCfg s r else s.localCfg x := rfl
 
-theorem makeIneligible_known_prim (hkp : s.known s.cfg.primary = s.cfg) (x : Node) :
-    ((makeIneligible s s.cfg.primary r).known x).primary = (s.known x).primary := by
-  rw [makeIneligible_known]; split_ifs with e
+theorem makeIneligible_localCfg_prim (hkp : s.localCfg s.cfg.primary = s.cfg) (x : Node) :
+    ((makeIneligible s s.cfg.primary r).localCfg x).primary = (s.localCfg x).primary := by
+  rw [makeIneligible_localCfg]; split_ifs with e
   · subst e; rw [hkp]; rfl
   · rfl
 
-theorem makeIneligible_known_inc (hkp : s.known s.cfg.primary = s.cfg) (x : Node) :
-    ((makeIneligible s s.cfg.primary r).known x).incarnation = (s.known x).incarnation := by
-  rw [makeIneligible_known]; split_ifs with e
+theorem makeIneligible_localCfg_inc (hkp : s.localCfg s.cfg.primary = s.cfg) (x : Node) :
+    ((makeIneligible s s.cfg.primary r).localCfg x).incarnation = (s.localCfg x).incarnation := by
+  rw [makeIneligible_localCfg]; split_ifs with e
   · subst e; rw [hkp]; rfl
   · rfl
 
@@ -202,9 +202,9 @@ theorem makeIneligible_sync_le {x y : Node} (hxy : (makeIneligible s s.cfg.prima
   · exact hxy
 
 /-- Demotion does not change who thinks it is primary. -/
-theorem makeIneligible_thinksPrimary (hkp : s.known s.cfg.primary = s.cfg) (x : Node) :
+theorem makeIneligible_thinksPrimary (hkp : s.localCfg s.cfg.primary = s.cfg) (x : Node) :
     ThinksPrimary (makeIneligible s s.cfg.primary r) x ↔ ThinksPrimary s x := by
-  unfold ThinksPrimary; rw [makeIneligible_known_prim hkp, makeIneligible_known_inc hkp]; rfl
+  unfold ThinksPrimary; rw [makeIneligible_localCfg_prim hkp, makeIneligible_localCfg_inc hkp]; rfl
 
 theorem makeIneligible_elig_true {m : Node} (hm : (makeIneligible s s.cfg.primary r).cfg.eligible m = true) :
     m ≠ r ∧ s.cfg.eligible m = true := by
@@ -221,7 +221,7 @@ theorem makeIneligible_isAuthoritative {x : Node} (hx : IsAuthoritative (makeIne
 
 end cas
 
-/-! ## Replication: Ack(r), Count(p, r), Commit(p)
+/-! ## Replication: Ack(r), AddToSyncSet(p, r), Commit(p)
 
 Each changes one entry: `p`'s view of `r`'s acknowledged offset, `p`'s sync replica
 set, or `p`'s commit point (and the committed history, the first time an offset
@@ -239,22 +239,22 @@ theorem ack_acked (r q x : Node) : (ack s r).acked q x =
     · simp [ack, update, hx]
   · simp [ack, update, hq]
 
-/-- Count(p, r): `p` adds `r` to its sync replica set (promotion step 2). -/
-theorem count_sync (p r q x : Node) : (count s p r).sync q x = (s.sync q x || (q = p ∧ x = r)) := by
+/-- AddToSyncSet(p, r): `p` adds `r` to its sync replica set (promotion step 2). -/
+theorem addToSyncSet_sync (p r q x : Node) : (addToSyncSet s p r).sync q x = (s.sync q x || (q = p ∧ x = r)) := by
   by_cases hq : q = p
   · subst hq; by_cases hx : x = r
-    · subst hx; simp [count, update]
-    · simp [count, update, hx]
-  · simp [count, update, hq]
+    · subst hx; simp [addToSyncSet, update]
+    · simp [addToSyncSet, update, hx]
+  · simp [addToSyncSet, update, hq]
 
-/-- Uncount changes only `p`'s sync replica set, where `r` is no longer counted. -/
-theorem uncount_sync (p r q x : Node) :
-    (uncount s p r).sync q x = (s.sync q x && !(q = p ∧ x = r)) := by
+/-- RemoveFromSyncSet changes only `p`'s sync replica set, where `r` is no longer counted. -/
+theorem removeFromSyncSet_sync (p r q x : Node) :
+    (removeFromSyncSet s p r).sync q x = (s.sync q x && !(q = p ∧ x = r)) := by
   by_cases hq : q = p
   · subst hq; by_cases hx : x = r
-    · subst hx; simp [uncount, update]
-    · simp [uncount, update, hx]
-  · simp [uncount, update, hq]
+    · subst hx; simp [removeFromSyncSet, update]
+    · simp [removeFromSyncSet, update, hx]
+  · simp [removeFromSyncSet, update, hq]
 
 /-- The high-water mark only grows: Ack raises the replica's to its log length. -/
 theorem ack_ackHigh_le (r x : Node) : s.ackHigh x ≤ (ack s r).ackHigh x := by
@@ -425,15 +425,15 @@ theorem restartEmpty_sync_le {p r : Node} (hs : (restartEmpty s n).sync p r = tr
 /-- A node that restarted empty does not think it is primary any more: its own
 configuration records its old incarnation. (`hinc`: recorded incarnations never run
 ahead of the real ones; `hkn`: `n` knew the latest configuration.) -/
-theorem restartEmpty_thinksPrimary (hkn : s.known n = s.cfg) (hinc : s.cfg.incarnation n ≤ s.incarnation n)
+theorem restartEmpty_thinksPrimary (hkn : s.localCfg n = s.cfg) (hinc : s.cfg.incarnation n ≤ s.incarnation n)
     {x : Node} (hx : ThinksPrimary (restartEmpty s n) x) : x ≠ n ∧ ThinksPrimary s x := by
   obtain ⟨h1, h2⟩ := hx
   have hxn : x ≠ n := by
     intro e; subst e
-    change (s.known x).incarnation x = (restartEmpty s x).incarnation x at h2
+    change (s.localCfg x).incarnation x = (restartEmpty s x).incarnation x at h2
     rw [hkn, restartEmpty_inc_self] at h2; omega
   refine ⟨hxn, h1, ?_⟩
-  change (s.known x).incarnation x = (restartEmpty s n).incarnation x at h2
+  change (s.localCfg x).incarnation x = (restartEmpty s n).incarnation x at h2
   rw [restartEmpty_inc_other hxn] at h2; exact h2
 
 /-- A node that restarted empty is not authoritative, and no node becomes so. -/
@@ -487,7 +487,7 @@ theorem restartKeep_sync_other {x : Node} (e : x ≠ n) :
 
 /-- A restarted primary's sync replica set is rebuilt from the configuration. -/
 theorem restartKeep_sync_self : (restartKeep s n).sync n =
-    if (s.known n).primary = n ∧ (s.known n).incarnation n = s.incarnation n then rebuiltSync s n
+    if (s.localCfg n).primary = n ∧ (s.localCfg n).incarnation n = s.incarnation n then rebuiltSync s n
     else fun _ => false := by
   simp [restartKeep]
 
@@ -540,7 +540,7 @@ theorem restartPartialKeep_sync_other {x : Node} (e : x ≠ n) :
     (restartPartialKeep s n k).sync x = s.sync x := restartKeep_sync_other e
 
 theorem restartPartialKeep_sync_self : (restartPartialKeep s n k).sync n =
-    if (s.known n).primary = n ∧ (s.known n).incarnation n = s.incarnation n then rebuiltSync s n
+    if (s.localCfg n).primary = n ∧ (s.localCfg n).incarnation n = s.incarnation n then rebuiltSync s n
     else fun _ => false := restartKeep_sync_self
 
 theorem restartPartialKeep_thinksPrimary (x : Node) :
@@ -599,7 +599,7 @@ theorem restartPartialFresh_ackHigh (x : Node) :
 theorem restartPartialFresh_ackHigh_other {x : Node} (e : x ≠ n) :
     (restartPartialFresh s n k).ackHigh x = s.ackHigh x := restartEmpty_ackHigh_other e
 
-theorem restartPartialFresh_thinksPrimary (hkn : s.known n = s.cfg) (hinc : s.cfg.incarnation n ≤ s.incarnation n)
+theorem restartPartialFresh_thinksPrimary (hkn : s.localCfg n = s.cfg) (hinc : s.cfg.incarnation n ≤ s.incarnation n)
     {x : Node} (hx : ThinksPrimary (restartPartialFresh s n k) x) : x ≠ n ∧ ThinksPrimary s x :=
   restartEmpty_thinksPrimary hkn hinc hx
 
