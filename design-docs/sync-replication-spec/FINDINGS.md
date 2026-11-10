@@ -81,10 +81,10 @@ after a takeover that leaves no sync replica: `CoreRecon_strictReachLoneReconMin
 explores the full state space without ever reconciling such a primary,
 while `CoreRecon_ReachLoneReconMin1` (the fix) reconciles it in 12 states.
 Lean counterexample without the fix: `SyncReplication.noReconcile_unsafe`
-(11 steps). Count's catch-up guard cannot simply be dropped either:
+(11 steps). AddToSyncSet's catch-up guard cannot simply be dropped either:
 `SyncReplication.noCatchUp_unsafe` deletes it and, after a write commits on n0
 and n1, has n0 count and promote n2, which has acknowledged nothing (8 steps).
-That Count is one the doc's own step 1 already forbids; F1 is about the case
+That AddToSyncSet is one the doc's own step 1 already forbids; F1 is about the case
 the doc's guard lets through.
 Full resync of an eligible replica is excluded by the model, as the doc says
 (eligible replicas ahead of the new primary are demoted first):
@@ -301,7 +301,7 @@ records its current incarnation.
 
 **Scope:** the model also checked incarnations in two other places, and
 each has now been settled on its own. Counting a replica into the sync set
-(`Count`) needs no incarnation check: the proofs never used it, and the guard
+(`AddToSyncSet` in Lean, `Count` in the TLA+ spec) needs no incarnation check: the proofs never used it, and the guard
 has been removed from the Lean model. Counting toward min-sync-replicas
 (`Writable`) does need it, for the two-copies property rather than for safety:
 `SyncReplication.noIncWritable_oneCopy` (14 steps, min-sync = 1) has a replica
@@ -316,9 +316,9 @@ configuration records for it.
 
 Section 4: "If the replica falls behind or fails before step 4, the primary
 simply removes it from the commit calculation." The Lean model has this as
-`Uncount`. "Before step 4" is
+`RemoveFromSyncSet`. "Before step 4" is
 load-bearing: dropping a replica that is already eligible lets the primary
-commit without it (`SyncReplication.uncountElig_unsafe`, 9 steps, min-sync = 1;
+commit without it (`SyncReplication.removeFromSyncSetElig_unsafe`, 9 steps, min-sync = 1;
 TLC `Core_earlyDrop`, `CoreRecon_earlyDropMin1`, `CoreRestart_earlyDropMin1`).
 "Not yet eligible" is read in the primary's own configuration, and that is
 enough: the proofs hold with no requirement that the primary knows the latest
@@ -327,7 +327,7 @@ version of the model required it; the proof no longer does.) This relies on
 the model's MakeEligible being atomic: the primary always learns the outcome
 of its own step-4 compare-and-set at once. In the real system the
 compare-and-set can commit while the primary has not seen the result, and
-dropping the replica then is `uncountElig_unsafe`.
+dropping the replica then is `removeFromSyncSetElig_unsafe`.
 **Proposed doc change:** keep "before step 4" as written: early removal
 applies before the primary proposes the step-4 compare-and-set, or after it
 learns the compare-and-set failed. Knowing the latest shard configuration is
