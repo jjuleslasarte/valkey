@@ -19,7 +19,8 @@ For each step:
 4. Fix the BLOCKER and MAJOR findings, rerun, then move on.
 
 Steps 0-4 are bounded model checking. Step 6 adds unbounded Lean proofs of
-the core protocol, cross-checked against TLC.
+the core protocol, cross-checked against TLC. The Lean proof now lives on the
+[`sync-repl-lean`](https://github.com/jjuleslasarte/valkey/tree/sync-repl-lean/design-docs/sync-replication-spec) branch; the older Lean snapshot that was here has been removed.
 
 ## Results at a glance
 
@@ -40,8 +41,7 @@ counterexample. The lease timing rules (F11, F12) are proven separately.
 
 Not covered: forced failover (F7), the delay while a demotion's
 compare-and-set commits (F10 follow-up), and a rate-bounded version of the
-F12 formula. Details in [FINDINGS.md](FINDINGS.md) and
-[lean/LEAN.md](lean/LEAN.md).
+F12 formula. Details in [FINDINGS.md](FINDINGS.md).
 
 ## Steps
 
@@ -52,10 +52,10 @@ F12 formula. Details in [FINDINGS.md](FINDINGS.md) and
 | 2–3 | `spec/Shard.tla`: sync set via Cluster V2 CAS, takeover, reconciliation; crash/restart, incarnations, REPLCONF COMMIT, forced failover, correlated loss | merged in iteration 2; clean; F1, F2, F3, F5, F7, F8, F9 |
 | 4 | `spec/Leases.tla`: real time, drift, delay/loss, both leases, demotion, takeover | reviewed; refines the contract since iteration 2; F10, F11; F8 2/3; safe not exhaustive |
 | 5 | Compose and refine | not started |
-| 6 | `spec/Core.tla` + Apalache (`spec/CoreInd.tla`) + Lean (`lean/`): unbounded proofs of the core invariant and of the lease timing conditions; TLC-Lean cross-checks (Core and CoreAck) | done, see [COMPARISON.md](COMPARISON.md) and [lean/LEAN.md](lean/LEAN.md); F11 proven, F12 new |
-| 6a | `spec/CoreAck.tla` + `lean/AckProof/`: client replies; no acknowledged write is lost with the F1 and F2 fixes (min-sync = 0, strict reconciliation) | proven; F8 fence not needed outside forced failover |
-| 6b | `spec/CoreRecon.tla` + `lean/ReconProof/`: the F1 fix as proposed (inherited-log catch-up), every min-sync value | proven; strict rule deadlocks at min-sync >= 1 (TLC) |
-| 6c | `spec/CoreRestart.tla` + `lean/RestartProof/`: restarts with and without data, incarnations, the F5 fix, every min-sync value | proven; without F5 a committed write is lost (TLC, 22 states) |
+| 6 | `spec/Core.tla` + Apalache (`spec/CoreInd.tla`) + Lean: unbounded proofs of the core invariant and of the lease timing conditions; TLC-Lean cross-checks (Core and CoreAck) | done, see [COMPARISON.md](COMPARISON.md); F11 proven, F12 new |
+| 6a | `spec/CoreAck.tla` + Lean: client replies; no acknowledged write is lost with the F1 and F2 fixes (min-sync = 0, strict reconciliation) | proven; F8 fence not needed outside forced failover |
+| 6b | `spec/CoreRecon.tla` + Lean: the F1 fix as proposed (inherited-log catch-up), every min-sync value | proven; strict rule deadlocks at min-sync >= 1 (TLC) |
+| 6c | `spec/CoreRestart.tla` + Lean: restarts with and without data, incarnations, the F5 fix, every min-sync value | proven; without F5 a committed write is lost (TLC, 22 states) |
 
 Cluster V2 (Raft) is a linearizable CAS register over a configuration log.
 Raft itself is out of scope.
@@ -169,6 +169,5 @@ contract, like every other step, in addition to `NoStaleLinRead`.
   committed config can be regenerated.
 - TLA+ tools 1.8.0 are not committed. Download the jar into `tools/`:
   `curl -L -o tools/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar`.
-  `tools/apalache.sh` and `tools/lean.sh` run Apalache 0.62.4 and Lean 4.35
-  in containers (unpack Apalache into `tools/apalache-0.62.4/` and the Lean
-  toolchain into `tools/elan/` first).
+  `tools/apalache.sh` runs Apalache 0.62.4 in a container (unpack it into
+  `tools/apalache-0.62.4/` first).

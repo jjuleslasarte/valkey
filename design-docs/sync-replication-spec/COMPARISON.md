@@ -29,7 +29,8 @@ following, using a step checker proven sound:
 - the initial states are equal;
 - every TLC state satisfies the Lean invariant.
 
-There were 0 mismatches (`lean/XCheck`, 6 s). The Apalache invariant was also
+There were 0 mismatches (6 s; the Lean cross-check harness was removed from this
+branch with the old Lean snapshot). The Apalache invariant was also
 confirmed by TLC on all 1,153,352 reachable states of `Core_safe`.
 
 ## What it cost
