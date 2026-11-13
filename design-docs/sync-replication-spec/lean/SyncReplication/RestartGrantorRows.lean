@@ -137,7 +137,11 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
     change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := hCV
   committedViewHist := hCH
-  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
+  drop := h.drop.frame (congrArg Cfg.primary hcfg) (fun _ _ hd => ⟨hd, rfl⟩) (fun _ _ he => Or.inl he)
+    (fun r x hx => (hLS r x hx).2)
+    (fun _ _ ⟨m, hm, hc, hd, he⟩ => ⟨m, hm, (hcb m hm hc).1, hd, he⟩)
+    (fun m hm hc => ⟨hm, (hcb m hm hc).1⟩) }
 
 /-- Every step of the variant preserves the lease invariant. -/
 theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}

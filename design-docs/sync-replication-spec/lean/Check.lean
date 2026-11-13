@@ -35,3 +35,14 @@ import SyncReplication
 #print axioms SyncReplication.noStaleRead_keepGrantorRows
 #print axioms SyncReplication.instant_simulates
 #print axioms SyncReplication.instantReachable_leaseReachable
+#print axioms SyncReplication.plannedDemotion_reachable
+#print axioms SyncReplication.noCloseOnRequest_stale
+#print axioms SyncReplication.noResetOnAck_stale
+#print axioms SyncReplication.noConfirmGuard_stale
+#print axioms SyncReplication.Lin.sequential_linearizable
+#print axioms SyncReplication.Lin.staleRead_not_linearizable
+#print axioms SyncReplication.Lin.uncommitted_seen_linearizable
+#print axioms SyncReplication.Lin.uncommitted_unseen_linearizable
+#print axioms SyncReplication.Lin.uncommitted_notBefore
+#print axioms SyncReplication.client_writeRead_reachable
+#print axioms SyncReplication.linearizable

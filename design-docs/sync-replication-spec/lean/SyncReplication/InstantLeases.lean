@@ -120,7 +120,7 @@ theorem instant_simulates {m : Nat} {P : LeaseParams} {a a' : LeaseState Node} {
     rw [e] at h3
     exact ⟨_, .stepL h2 (.single _ h3)⟩
   | learn n hnkl => exact ⟨_, .single _ (LeaseStep.learn a n hnkl)⟩
-  | demote p r hp hkl hel hgo hwo => exact ⟨_, .single _ (LeaseStep.demote a p r hp hkl hel hgo hwo)⟩
+  | demote p r hp hkl hel hgo hwo => exact ⟨_, .single _ (LeaseStep.demote a p r hp hkl hel (Or.inl ⟨hgo, hwo⟩))⟩
   | takeover n hkl hel hnp hin hwait => exact ⟨_, .single _ (LeaseStep.takeover a n hkl hel hnp hin hwait)⟩
   | resync r hne hnpre hsy hke => exact ⟨_, .single _ (LeaseStep.resync a r hne hnpre hsy hke)⟩
   | restartEmpty n hkl hsurv => exact ⟨_, .single _ (LeaseStep.restartEmpty a n hkl hsurv)⟩

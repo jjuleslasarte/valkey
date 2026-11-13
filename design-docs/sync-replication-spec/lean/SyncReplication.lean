@@ -20,3 +20,7 @@ import SyncReplication.Counterexamples.RestartDemotionWait
 import SyncReplication.Counterexamples.RestartTimer
 import SyncReplication.Counterexamples.TakeoverDemotionWait
 import SyncReplication.Counterexamples.GrantPrimaryLease
+import SyncReplication.Counterexamples.PlannedDemotion
+import SyncReplication.Linearizable
+import SyncReplication.Client
+import SyncReplication.ClientProof

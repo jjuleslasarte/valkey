@@ -149,6 +149,109 @@ theorem current_of_bump {a a' : LeaseState Node} {n : Node} (hg : a'.gen = bumpG
   rw [update_of_ne _ _ hs] at h1; rw [update_of_ne _ _ hd] at h2
   exact ⟨⟨h1, h2⟩, hs, hd⟩
 
+/-! ## Planned demotion -/
+
+/-- `x` is the start of a read lease that a current echo in flight to `r` would give it. -/
+def InFlightEcho (a : LeaseState Node) (r : Node) (x : Nat) : Prop :=
+  ∃ msg ∈ a.net, msg.Current a ∧ msg.dst = r ∧ msg.echo = some x
+
+/-- The facts that make a planned demotion safe. `p` asks `r` to drop its read lease and
+waits for the confirmation; the request closes the connection, so no echo sent before it
+is still current, and `p` echoes nothing while it has received no acknowledgement since
+asking. -/
+structure DropInvariant (a : LeaseState Node) : Prop where
+  /-- A confirmed drop is reset by any later acknowledgement. -/
+  confirmedNoEcho : ∀ p r, a.dropConfirmed p r = true → a.ackEcho p r = none
+  /-- The current primary's confirmed drop: the replica holds no read lease and has none
+  in flight. -/
+  confirmedNoLease : ∀ p r, a.dropConfirmed p r = true → p = a.core.cfg.primary →
+    ∀ x, ¬ LeaseStart a r x
+  /-- While the current primary's drop request is in flight and it has received no
+  acknowledgement since, no echo is on its way to the replica. -/
+  requestNoEcho : ∀ p r gs gd t, Msg.dropReq p r gs gd t ∈ a.net → (Msg.dropReq p r gs gd t).Current a →
+    a.ackEcho p r = none → p = a.core.cfg.primary → ∀ x, ¬ InFlightEcho a r x
+  /-- While a confirmation is in flight to the current primary, which has received no
+  acknowledgement since, the replica holds no read lease and has none in flight. -/
+  confirmNoLease : ∀ r p gs gd t, Msg.dropAck r p gs gd t ∈ a.net → (Msg.dropAck r p gs gd t).Current a →
+    a.ackEcho p r = none → p = a.core.cfg.primary → ∀ x, ¬ LeaseStart a r x
+
+/-- The drop facts survive a step that keeps the current primary, keeps every confirmed
+drop and its echo, only clears echoes of pairs whose drop messages it discards, shrinks
+the lease starts and the echoes in flight, and adds no drop message. -/
+theorem DropInvariant.frame {a a' : LeaseState Node} (h : DropInvariant a)
+    (hprim : a'.core.cfg.primary = a.core.cfg.primary)
+    (hDC : ∀ p r, a'.dropConfirmed p r = true → a.dropConfirmed p r = true ∧ a'.ackEcho p r = a.ackEcho p r)
+    (hAE : ∀ p r, a'.ackEcho p r = none → a.ackEcho p r = none ∨
+      ∀ m ∈ a'.net, m.Current a' → ¬ (m.src = p ∧ m.dst = r) ∧ ¬ (m.src = r ∧ m.dst = p))
+    (hLS : ∀ r x, LeaseStart a' r x → LeaseStart a r x)
+    (hIF : ∀ r x, InFlightEcho a' r x → InFlightEcho a r x)
+    (hNet : ∀ m ∈ a'.net, m.Current a' → m ∈ a.net ∧ m.Current a) :
+    DropInvariant a' where
+  confirmedNoEcho := by
+    intro p r hd; obtain ⟨hd', he⟩ := hDC p r hd; rw [he]; exact h.confirmedNoEcho p r hd'
+  confirmedNoLease := by
+    intro p r hd hp x hx; exact h.confirmedNoLease p r (hDC p r hd).1 (hp.trans hprim) x (hLS r x hx)
+  requestNoEcho := by
+    intro p r gs gd t hm hc he hp x hx
+    obtain ⟨hm', hc'⟩ := hNet _ hm hc
+    rcases hAE p r he with he' | hdead
+    · exact h.requestNoEcho p r gs gd t hm' hc' he' (hp.trans hprim) x (hIF r x hx)
+    · exact (hdead _ hm hc).1 ⟨rfl, rfl⟩
+  confirmNoLease := by
+    intro r p gs gd t hm hc he hp x hx
+    obtain ⟨hm', hc'⟩ := hNet _ hm hc
+    rcases hAE p r he with he' | hdead
+    · exact h.confirmNoLease r p gs gd t hm' hc' he' (hp.trans hprim) x (hLS r x hx)
+    · exact (hdead _ hm hc).2 ⟨rfl, rfl⟩
+
+/-- An echo in flight after a send was in flight before, or is the new message's. -/
+theorem inFlight_send {a : LeaseState Node} {msg : Msg Node} {r : Node} {x : Nat}
+    (hx : InFlightEcho (send a msg) r x) : InFlightEcho a r x ∨ (msg.dst = r ∧ msg.echo = some x) := by
+  obtain ⟨m', hm, hc, hd, he⟩ := hx
+  rcases List.mem_cons.1 hm with rfl | hm
+  · exact Or.inr ⟨hd, he⟩
+  · exact Or.inl ⟨m', hm, hc, hd, he⟩
+
+/-- A lease start after a send was one before, or is the new message's echo. -/
+theorem leaseStart_send' {a : LeaseState Node} {msg : Msg Node} {r : Node} {x : Nat}
+    (hx : LeaseStart (send a msg) r x) : LeaseStart a r x ∨ (msg.dst = r ∧ msg.echo = some x) := by
+  rcases hx with hx | hx
+  · exact Or.inl (Or.inl hx)
+  · rcases inFlight_send hx with hx | hx
+    · exact Or.inl (Or.inr hx)
+    · exact Or.inr hx
+
+/-- Sending a message without an echo keeps the drop facts, given what a new drop request
+or confirmation needs. -/
+theorem DropInvariant.sendMsg {a : LeaseState Node} (h : DropInvariant a) {msg : Msg Node}
+    (hecho : msg.echo = none)
+    (hReq : ∀ p r gs gd t, msg = .dropReq p r gs gd t → a.ackEcho p r = none → p = a.core.cfg.primary →
+      ∀ x, ¬ InFlightEcho a r x)
+    (hAck : ∀ r p gs gd t, msg = .dropAck r p gs gd t → a.ackEcho p r = none → p = a.core.cfg.primary →
+      ∀ x, ¬ LeaseStart a r x) :
+    DropInvariant (send a msg) := by
+  have hIF : ∀ r x, InFlightEcho (send a msg) r x → InFlightEcho a r x := by
+    intro r x hx; rcases inFlight_send hx with hx | ⟨_, he⟩
+    · exact hx
+    · rw [hecho] at he; cases he
+  have hLS : ∀ r x, LeaseStart (send a msg) r x → LeaseStart a r x := by
+    intro r x hx; rcases leaseStart_send' hx with hx | ⟨_, he⟩
+    · exact hx
+    · rw [hecho] at he; cases he
+  exact {
+  confirmedNoEcho := h.confirmedNoEcho
+  confirmedNoLease := fun p r hd hp x hx => h.confirmedNoLease p r hd hp x (hLS r x hx)
+  requestNoEcho := by
+    intro p r gs gd t hm hc he hp x hx
+    rcases List.mem_cons.1 hm with e | hm
+    · exact hReq p r gs gd t e.symm he hp x (hIF r x hx)
+    · exact h.requestNoEcho p r gs gd t hm hc he hp x (hIF r x hx)
+  confirmNoLease := by
+    intro r p gs gd t hm hc he hp x hx
+    rcases List.mem_cons.1 hm with e | hm
+    · exact hAck r p gs gd t e.symm he hp x (hLS r x hx)
+    · exact h.confirmNoLease r p gs gd t hm hc he hp x (hLS r x hx) }
+
 /-! ## The invariant -/
 
 /-- The inductive invariant of the lease layer. -/
@@ -208,6 +311,8 @@ structure LeaseInvariant (P : LeaseParams) (a : LeaseState Node) : Prop where
   /-- A current `REPLCONF COMMIT` goes from a replica's primary to the replica. -/
   follows : ∀ msg ∈ a.net, msg.Current a → msg.commitOf.isSome →
     primaryOf a.core msg.dst = msg.src ∧ msg.src ≠ msg.dst
+  /-- The planned-demotion facts. -/
+  drop : DropInvariant a
 
 /-- Every read lease, held or in flight, started in the past. A lease is bounded by an
 acknowledgement time or a primaryship start (`leaseBound`), and both are in the past
@@ -255,6 +360,11 @@ theorem leaseInvariant_init (P : LeaseParams) (i : Node) : LeaseInvariant P (lea
   genLe := by intro _ hm; simp [leaseInit] at hm
   commitLe := by intro _ hm; simp [leaseInit] at hm
   follows := by intro _ hm; simp [leaseInit] at hm
+  drop := {
+    confirmedNoEcho := by intro _ _ h; simp [leaseInit] at h
+    confirmedNoLease := by intro _ _ h; simp [leaseInit] at h
+    requestNoEcho := by intro _ _ _ _ _ hm; simp [leaseInit] at hm
+    confirmNoLease := by intro _ _ _ _ _ hm; simp [leaseInit] at hm }
 
 /-! ## The current primary is the only one that can hold its lease -/
 
@@ -363,6 +473,8 @@ theorem leaseInvariant_tick : LeaseInvariant P (tick a) where
   genLe := h.genLe
   commitLe := h.commitLe
   follows := h.follows
+  drop := h.drop.frame rfl (fun _ _ hd => ⟨hd, rfl⟩) (fun _ _ he => Or.inl he) (fun _ _ hx => hx)
+    (fun _ _ hx => hx) (fun _ hm hc => ⟨hm, hc⟩)
 
 /-! ### Frames -/
 
@@ -510,7 +622,8 @@ theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core)
     (hcfg : a'.core.cfg = a.core.cfg) (hlocalCfg : a'.core.localCfg = a.core.localCfg)
     (hinc : a'.core.incarnation = a.core.incarnation) (hnow : a'.now = a.now)
     (hPL : a'.primaryLease = a.primaryLease) (hAR : a'.ackReceived = a.ackReceived)
-    (hAE : a'.ackEcho = a.ackEcho) (hRL : a'.readLease = a.readLease)
+    (hAE : ∀ p r e, a'.ackEcho p r = some e → a.ackEcho p r = some e)
+    (hRL : ∀ r x, a'.readLease r = some x → a.readLease r = some x)
     (hPS : a'.primarySince = a.primarySince) (hOE : a'.oldEligible = a.oldEligible)
     (hNet : ∀ msg ∈ a'.net, msg ∈ a.net)
     (hCur : ∀ msg ∈ a.net, msg.Current a' → msg.Current a)
@@ -520,12 +633,13 @@ theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core)
     (hDS : ∀ r, a'.dataSent r ≤ a'.primaryTraffic r)
     (hCV : ∀ r, a'.committedView r ≤ (a'.core.log r).length)
     (hCH : ∀ r, a'.committedView r ≤ a'.core.hist.length ∧
-      (a'.core.log r).take (a'.committedView r) <+: a'.core.hist) :
+      (a'.core.log r).take (a'.committedView r) <+: a'.core.hist)
+    (hDrop : DropInvariant a') :
     LeaseInvariant P a' := by
   have hmono : ∀ msg ∈ a'.net, msg ∈ a.net ∧ (msg.Current a' → msg.Current a) :=
     fun msg hm => ⟨hNet msg hm, hCur msg (hNet msg hm)⟩
   have hLS : ∀ r x, LeaseStart a' r x → LeaseStart a r x :=
-    fun r x hx => leaseStart_mono a _ (fun r x e => by rw [hRL] at e; exact e) hmono hx
+    fun r x hx => leaseStart_mono a _ hRL hmono hx
   have hPLS : ∀ p r x, PrimStart a' p r x → PrimStart a p r x :=
     fun p r x hx => primStart_mono a _ (fun p r x e => by rw [hPL] at e; exact e) hmono hx
   obtain ⟨hS1, hS2, hS3, hS4⟩ := msgs_frame h (le_of_eq hnow.symm) hNet hCur hGenLe hCommit
@@ -537,7 +651,8 @@ theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core)
   primarySinceLe := by rw [hPS, hnow]; exact h.primarySinceLe
   dataSentLe := hDS
   primaryLeaseLe := fun p r x hx => Nat.le_trans (h.primaryLeaseLe p r x (hPLS p r x hx)) (hPT r).1
-  echoLe := by rw [hAE, hAR]; exact h.echoLe
+  echoLe := by
+    intro p r e he; rw [hAR]; exact h.echoLe p r e (hAE p r e he)
   primarySinceAck := by rw [hPS, hAR, hOE]; exact h.primarySinceAck
   deposed := by
     intro p hp hv
@@ -555,7 +670,21 @@ theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core)
     intro p hp x hx; rw [hlocalCfg] at hp; exact h.selfPrimNoLease p hp x (hLS p x hx)
   committedViewLen := hCV
   committedViewHist := hCH
-  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
+  drop := hDrop }
+
+/-- The frame's drop facts, for a step that keeps the current primary, every confirmed
+drop and every echo, and only shrinks the lease starts, the echoes in flight and the
+current messages. -/
+theorem drop_mono {a' : LeaseState Node} (hprim : a'.core.cfg.primary = a.core.cfg.primary)
+    (hDC : a'.dropConfirmed = a.dropConfirmed) (hAE : a'.ackEcho = a.ackEcho)
+    (hRL : ∀ r x, a'.readLease r = some x → a.readLease r = some x)
+    (hnet : ∀ msg ∈ a'.net, msg ∈ a.net ∧ (msg.Current a' → msg.Current a)) : DropInvariant a' :=
+  h.drop.frame hprim (fun p r hd => ⟨by rw [← hDC]; exact hd, by rw [hAE]⟩)
+    (fun p r he => Or.inl (by rw [← hAE]; exact he))
+    (fun r x hx => leaseStart_mono a a' hRL hnet hx)
+    (fun r x ⟨m, hm, hc, hd, he⟩ => ⟨m, (hnet m hm).1, (hnet m hm).2 hc, hd, he⟩)
+    (fun m hm hc => ⟨(hnet m hm).1, (hnet m hm).2 hc⟩)
 
 /-! ### Replication actions that touch no lease state -/
 
@@ -568,7 +697,8 @@ theorem leaseInvariant_withCore {c : State Node} (hc : Invariant c)
     (hlog : ∀ x, a.core.log x <+: c.log x) (hhist : a.core.hist <+: c.hist) :
     LeaseInvariant P (withCore a c) :=
   leaseInvariant_frame h hc (hcfg := hcfg) (hlocalCfg := hlocalCfg) (hinc := hinc)
-    (hnow := rfl) (hPL := rfl) (hAR := rfl) (hAE := rfl) (hRL := rfl) (hPS := rfl) (hOE := rfl)
+    (hnow := rfl) (hPL := rfl) (hAR := rfl) (hAE := fun _ _ _ e => e) (hRL := fun _ _ e => e)
+    (hPS := rfl) (hOE := rfl)
     (fun _ hm => hm) (fun _ _ hc => hc) h.genLe (fun msg _ _ => hcommit msg.src)
     (fun r => ⟨Nat.le_refl _, h.primaryTrafficLe r⟩) h.dataSentLe
     (fun r => Nat.le_trans (h.committedViewLen r) (hlog r).length_le)
@@ -578,6 +708,7 @@ theorem leaseInvariant_withCore {c : State Node} (hc : Invariant c)
       show (c.log r).take (a.committedView r) <+: c.hist
       rw [← prefix_take_eq (hlog r) (h.committedViewLen r)]
       exact h2.trans hhist)
+    (drop_mono h (congrArg Cfg.primary hcfg) rfl rfl (fun _ _ e => e) (fun _ hm => ⟨hm, id⟩))
 
 /-- MakeEligible by the current primary. The new eligible replica's recorded incarnation
 is its current one, so authority only grows; no lease state moves. -/
@@ -614,7 +745,8 @@ theorem leaseInvariant_makeEligible {p r : Node} (hp : ThinksPrimary a.core p)
   committedViewHist := h.committedViewHist
   sentLe := h.sentLe, genLe := h.genLe, commitLe := h.commitLe
   follows := fun msg hm hc hd =>
-    ⟨(hpo msg.dst).trans (h.follows msg hm hc hd).1, (h.follows msg hm hc hd).2⟩ }
+    ⟨(hpo msg.dst).trans (h.follows msg hm hc hd).1, (h.follows msg hm hc hd).2⟩
+  drop := drop_mono h rfl rfl rfl (fun _ _ e => e) (fun _ hm => ⟨hm, id⟩) }
 
 /-- The replication actions whose lease effects, if any, travel as messages. -/
 theorem leaseInvariant_core {m : Nat} {μ : Action Node} {c : State Node} (hs : Step m a.core μ c)
@@ -663,9 +795,10 @@ theorem leaseInvariant_core {m : Nat} {μ : Action Node} {c : State Node} (hs : 
 
 /-- A message is lost. -/
 theorem leaseInvariant_drop {msg : Msg Node} : LeaseInvariant P (dropMsg a msg) :=
-  leaseInvariant_frame h h.core rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
+  leaseInvariant_frame h h.core rfl rfl rfl rfl rfl rfl (fun _ _ _ e => e) (fun _ _ e => e) rfl rfl
     (fun _ hm => List.mem_of_mem_erase hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
     (fun r => ⟨Nat.le_refl _, h.primaryTrafficLe r⟩) h.dataSentLe h.committedViewLen h.committedViewHist
+    (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun _ hm => ⟨List.mem_of_mem_erase hm, id⟩))
 
 /-- A new message, before the step's own effect on leases: every old lease start, held
 or in flight, is still one, and a new start can only come from the new message. -/
@@ -696,7 +829,8 @@ theorem leaseInvariant_send {msg : Msg Node} (hg : msg.gs = a.gen msg.src ∧ ms
         msg.dst = p → primaryOf a.core msg.src = p)
     (hLS : ∀ x, msg.echo = some x → LeaseStart a msg.dst x ∨
       ((∃ b, a.ackReceived a.core.cfg.primary msg.dst = some b ∧ x ≤ b) ∧
-        IsAuthoritative a.core msg.dst ∧ (a.core.localCfg msg.dst).primary ≠ msg.dst)) :
+        IsAuthoritative a.core msg.dst ∧ (a.core.localCfg msg.dst).primary ≠ msg.dst))
+    (hDrop : DropInvariant (send a msg)) :
     LeaseInvariant P (send a msg) := by
   have hcur : ∀ m' ∈ (send a msg).net, m'.Current (send a msg) ↔ m'.Current a := fun _ _ => Iff.rfl
   exact {
@@ -754,13 +888,15 @@ theorem leaseInvariant_send {msg : Msg Node} (hg : msg.gs = a.gen msg.src ∧ ms
   follows := by
     intro m' hm hc hd; rcases List.mem_cons.1 hm with rfl | hm
     · exact hfollows hd
-    · exact h.follows m' hm hc hd }
+    · exact h.follows m' hm hc hd
+  drop := hDrop }
 
 /-- `p` sends `REPLCONF COMMIT` without an echo. -/
 theorem leaseInvariant_sendData {p r : Node} (hne : p ≠ r) (hf : primaryOf a.core r = p) :
     LeaseInvariant P (send a (.data p r (a.gen p) (a.gen r) a.now (a.core.commit p) none)) :=
   leaseInvariant_send h ⟨rfl, rfl⟩ rfl (fun c hc => by cases hc; exact Nat.le_refl _)
     (fun _ => ⟨hf, hne⟩) (fun _ hx => by cases hx) (fun _ hx => by cases hx)
+    (h.drop.sendMsg rfl (fun _ _ _ _ _ e => by cases e) (fun _ _ _ _ _ e => by cases e))
 
 include hM in
 /-- `p` sends `REPLCONF COMMIT` echoing `r`'s acknowledgement. The grant comes from the
@@ -771,7 +907,34 @@ theorem leaseInvariant_sendGrant {p r : Node} (hne : p ≠ r) (hf : primaryOf a.
   obtain ⟨hL, _, hel, hin⟩ := hg
   obtain ⟨hpp, hkn⟩ := leaseValid_current hM h hp hL
   refine leaseInvariant_send h ⟨rfl, rfl⟩ rfl (fun c hc => by cases hc; exact Nat.le_refl _)
-    (fun _ => ⟨hf, hne⟩) (fun _ hx => by cases hx) ?_
+    (fun _ => ⟨hf, hne⟩) (fun _ hx => by cases hx) ?_ ?_
+  rotate_left
+  · -- the current primary echoes nothing to a replica whose drop it has confirmed or
+    -- requested, since it has received no acknowledgement from it since.
+    have hnew : ∀ q x y, q = a.core.cfg.primary → p = q → r = x → a.ackEcho p r = some y →
+        a.ackEcho q x = none → False := by
+      intro q x y _ e1 e2 he hn; subst e1; subst e2; rw [hn] at he; cases he
+    exact {
+    confirmedNoEcho := h.drop.confirmedNoEcho
+    confirmedNoLease := by
+      intro q x hd hq y hy
+      rcases leaseStart_send' hy with hy | ⟨hd', he⟩
+      · exact h.drop.confirmedNoLease q x hd hq y hy
+      · exact hnew q x y hq (hpp.trans hq.symm) hd' he (h.drop.confirmedNoEcho q x hd)
+    requestNoEcho := by
+      intro q x gs gd t hm hc hn hq y hy
+      rcases List.mem_cons.1 hm with e | hm
+      · cases e
+      rcases inFlight_send hy with hy | ⟨hd', he⟩
+      · exact h.drop.requestNoEcho q x gs gd t hm hc hn hq y hy
+      · exact hnew q x y hq (hpp.trans hq.symm) hd' he hn
+    confirmNoLease := by
+      intro x q gs gd t hm hc hn hq y hy
+      rcases List.mem_cons.1 hm with e | hm
+      · cases e
+      rcases leaseStart_send' hy with hy | ⟨hd', he⟩
+      · exact h.drop.confirmNoLease x q gs gd t hm hc hn hq y hy
+      · exact hnew q x y hq (hpp.trans hq.symm) hd' he hn }
   intro e he
   obtain ⟨b, hb, heb⟩ := h.echoLe p r e he
   right
@@ -789,6 +952,7 @@ theorem leaseInvariant_sendAck {r : Node} (hne : primaryOf a.core r ≠ r) :
       cases hx
       exact ⟨h.dataSentLe r, fun p _ _ hd => hd⟩)
     (fun _ hx => by cases hx)
+    (h.drop.sendMsg rfl (fun _ _ _ _ _ e => by cases e) (fun _ _ _ _ _ e => by cases e))
 
 /-- The committed-view facts after a data message: with `L` the replica's log after the
 message (a prefix of its primary's, extending its old log) and `c` a committed offset of
@@ -957,7 +1121,14 @@ theorem leaseInvariant_deliverData {p r : Node} {gs gd t c : Nat} {e : Option Na
   sentLe := fun m' hm' => h.sentLe m' (List.mem_of_mem_erase hm')
   genLe := fun m' hm' => h.genLe m' (List.mem_of_mem_erase hm')
   commitLe := fun m' hm' => h.commitLe m' (List.mem_of_mem_erase hm')
-  follows := fun m' hm' => h.follows m' (List.mem_of_mem_erase hm') }
+  follows := fun m' hm' => h.follows m' (List.mem_of_mem_erase hm')
+  drop := h.drop.frame rfl (fun _ _ hd => ⟨hd, rfl⟩) (fun _ _ he => Or.inl he)
+    (fun x v hx => by
+      rcases hLS x v hx with hx | ⟨rfl, e0, rfl, he0, rfl⟩
+      · exact hx
+      · exact hmax e0 he0 (LeaseStart a x) (fun _ h => h))
+    (fun _ _ ⟨m, hm, hc, hd, he⟩ => ⟨m, List.mem_of_mem_erase hm, hc, hd, he⟩)
+    (fun _ hm hc => ⟨List.mem_of_mem_erase hm, hc⟩) }
 
 /-- A current acknowledgement from `r` reaches `p`. The primary's lease from `r` and its
 acknowledgement times for `r` move; everything else is the frame. -/
@@ -1031,7 +1202,23 @@ theorem leaseInvariant_deliverAck {r p : Node} {gs gd t d : Nat}
   sentLe := fun m' hm' => h.sentLe m' (List.mem_of_mem_erase hm')
   genLe := fun m' hm' => h.genLe m' (List.mem_of_mem_erase hm')
   commitLe := fun m' hm' => h.commitLe m' (List.mem_of_mem_erase hm')
-  follows := fun m' hm' => h.follows m' (List.mem_of_mem_erase hm') }
+  follows := fun m' hm' => h.follows m' (List.mem_of_mem_erase hm')
+  drop := by
+    refine h.drop.frame rfl ?_ ?_ hLS
+      (fun _ _ ⟨m, hm, hc, hd, he⟩ => ⟨m, List.mem_of_mem_erase hm, hc, hd, he⟩)
+      (fun _ hm hc => ⟨List.mem_of_mem_erase hm, hc⟩)
+    · -- the acknowledgement resets `p`'s confirmed drop of `r`.
+      intro q x hd
+      change update2 a.dropConfirmed p r false q x = true at hd
+      by_cases e : q = p ∧ x = r
+      · obtain ⟨rfl, rfl⟩ := e; rw [update2_self] at hd; cases hd
+      · rw [update2_of_ne _ _ e] at hd
+        exact ⟨hd, update2_of_ne _ _ e⟩
+    · intro q x he
+      change update2 a.ackEcho p r (some t) q x = none at he
+      by_cases e : q = p ∧ x = r
+      · obtain ⟨rfl, rfl⟩ := e; rw [update2_self] at he; cases he
+      · rw [update2_of_ne _ _ e] at he; exact Or.inl he }
 
 /-! ### Configuration changes -/
 
@@ -1117,7 +1304,8 @@ theorem leaseInvariant_learn {n : Node} (hnkl : ¬ KnowsLatest a.core n) :
     · exact h.selfPrimNoLease q hq v (hLS q v hx)
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
-  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
+  drop := drop_mono h rfl rfl rfl (fun _ _ e => e) hmono }
 
 omit h in
 include hM in
@@ -1139,11 +1327,12 @@ theorem lease_over_of_guards {now v : Nat} {ackReceived primarySince : Option Na
 
 include hM in
 /-- Demotion. The demoted replica's read lease, held or in flight, is over, by the two
-waits. -/
+waits, or it has none, by its confirmation. -/
 theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hkl : KnowsLatest a.core p)
-    (hel : a.core.cfg.eligible r = true) (hgo : GrantorOver P a.now (a.ackReceived p r) P.readDur)
-    (hwo : ∀ T, a.primarySince p = some T → a.oldEligible p r = true →
-      T + P.readDur + P.margin ≤ a.now + P.drift) :
+    (hel : a.core.cfg.eligible r = true)
+    (hWaited : (GrantorOver P a.now (a.ackReceived p r) P.readDur ∧
+      ∀ T, a.primarySince p = some T → a.oldEligible p r = true →
+        T + P.readDur + P.margin ≤ a.now + P.drift) ∨ a.dropConfirmed p r = true) :
     LeaseInvariant P (withCore a (makeIneligible a.core p r)) := by
   have hpp : p = a.core.cfg.primary := knowsLatest_iff_prim h.core hp hkl
   subst hpp
@@ -1161,7 +1350,10 @@ theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hkl : 
     have hx' := h.leaseAuth x v hx (fun hp' => hnp ((htp x).2 hp')) hv
     by_cases ex : x = r
     · exfalso; subst ex
-      exact lease_over_of_guards hM (h.leaseBound x v hx) hgo hwo hv
+      rcases hWaited with ⟨hgo, hwo⟩ | hdc
+      · exact lease_over_of_guards hM (h.leaseBound x v hx) hgo hwo hv
+      · -- a planned demotion: the replica has confirmed it holds no lease.
+        exact h.drop.confirmedNoLease _ x hdc rfl v hx
     · obtain ⟨h1, h2⟩ := hx'
       refine ⟨?_, h2⟩
       show (if x = r then false else a.core.cfg.eligible x) = true ∨ x = a.core.cfg.primary
@@ -1171,7 +1363,8 @@ theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hkl : 
   committedViewHist := h.committedViewHist
   sentLe := h.sentLe, genLe := h.genLe, commitLe := h.commitLe
   follows := fun msg hm hc hd =>
-    ⟨(hpo msg.dst).trans (h.follows msg hm hc hd).1, (h.follows msg hm hc hd).2⟩ }
+    ⟨(hpo msg.dst).trans (h.follows msg hm hc hd).1, (h.follows msg hm hc hd).2⟩
+  drop := drop_mono h rfl rfl rfl (fun _ _ e => e) (fun _ hm => ⟨hm, id⟩) }
 
 /-- Closing `n`'s connections: every message still current was current before and has
 neither end at `n`; generations only grow. -/
@@ -1294,7 +1487,27 @@ theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a
     rw [hK, if_neg e] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
-  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
+  drop := {
+    -- the new primary `n` has confirmed no drop and its drop messages were discarded.
+    confirmedNoEcho := by
+      intro q x hd
+      change update a.dropConfirmed n (fun _ => false) q x = true at hd
+      show update a.ackEcho n (fun _ => none) q x = none
+      by_cases e : q = n
+      · rw [e, update_self] at hd; cases hd
+      · rw [update_of_ne _ _ e] at hd; rw [update_of_ne _ _ e]; exact h.drop.confirmedNoEcho q x hd
+    confirmedNoLease := by
+      intro q x hd hq
+      change q = n at hq
+      change update a.dropConfirmed n (fun _ => false) q x = true at hd
+      rw [hq, update_self] at hd; cases hd
+    requestNoEcho := by
+      intro q x gs gd t hm hc _ hq
+      exact absurd hq (hcb _ hm hc).2.1
+    confirmNoLease := by
+      intro x q gs gd t hm hc _ hq
+      exact absurd hq (hcb _ hm hc).2.2 } }
 
 /-- A full resync: the replica's committed view starts over and its connections close. -/
 theorem leaseInvariant_resync {r : Node} (hne : primaryOf a.core r ≠ r)
@@ -1306,10 +1519,11 @@ theorem leaseInvariant_resync {r : Node} (hne : primaryOf a.core r ≠ r)
   obtain ⟨_, hcb, hgle⟩ := bump_facts h (a' := leaseResync a r) (n := r) rfl rfl
   exact leaseInvariant_frame h (invariant_resync h.core r hne hsy hke)
     (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl) (hnow := rfl) (hPL := rfl)
-    (hAR := rfl) (hAE := rfl) (hRL := rfl) (hPS := rfl) (hOE := rfl)
+    (hAR := rfl) (hAE := fun _ _ _ e => e) (hRL := fun _ _ e => e) (hPS := rfl) (hOE := rfl)
     (fun _ hm => hm) (fun msg hm hc => (hcb msg hm hc).1) hgle
     (fun msg hm hc => (resync_commit_other (s := a.core) (hcb msg hm hc).2.1).ge)
     (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe hCV hCH
+    (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun msg hm => ⟨hm, fun hc => (hcb msg hm hc).1⟩))
 
 /-! ### Restarts -/
 
@@ -1386,7 +1600,26 @@ theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c)
     change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := hCV
   committedViewHist := hCH
-  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
+  drop := by
+    refine h.drop.frame (congrArg Cfg.primary hcfg) ?_ ?_ (fun r x hx => (hLS r x hx).2)
+      (fun _ _ ⟨m, hm, hc, hd, he⟩ => ⟨m, hm, (hcb m hm hc).1, hd, he⟩)
+      (fun m hm hc => ⟨hm, (hcb m hm hc).1⟩)
+    · -- `n`'s echoes are cleared, but a confirmed drop already had none.
+      intro q x hd
+      refine ⟨hd, ?_⟩
+      show update a.ackEcho n (fun _ => none) q x = a.ackEcho q x
+      by_cases e : q = n
+      · rw [e, update_self]; rw [e] at hd; exact (h.drop.confirmedNoEcho n x hd).symm
+      · rw [update_of_ne _ _ e]
+    · -- `n`'s drop messages were discarded with its connections.
+      intro q x he
+      by_cases e : q = n
+      · right; intro m hm hc
+        have hm' := hcb m hm hc
+        exact ⟨fun ⟨h1, _⟩ => hm'.2.1 (h1.trans e), fun ⟨_, h2⟩ => hm'.2.2 (h2.trans e)⟩
+      · left; change update a.ackEcho n (fun _ => none) q x = none at he
+        rw [update_of_ne _ _ e] at he; exact he }
 
 theorem leaseInvariant_restartEmpty {n : Node} (hkl : KnowsLatest a.core n)
     (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) :
@@ -1415,6 +1648,111 @@ theorem leaseInvariant_restartPartialFresh {n : Node} {k : Nat} (hkl : KnowsLate
     (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e) rfl
     (fun _ e => restartEmpty_commit_other e)
 
+/-! ### Planned demotion -/
+
+/-- `p` asks `r` to drop its read lease: `p` clears its echo of `r`, closes the
+connection to `r` (discarding every message to or from `r` in flight), and sends the
+request on the new connection. -/
+theorem leaseInvariant_sendDropRequest {p r : Node} : LeaseInvariant P (sendDropRequest a p r) := by
+  set b : LeaseState Node := { a with ackEcho := update2 a.ackEcho p r none, gen := bumpGen a.gen r } with hbdef
+  obtain ⟨hmono, hcb, hgle⟩ := bump_facts h (a' := b) (n := r) rfl rfl
+  have hAE : ∀ q x e, b.ackEcho q x = some e → a.ackEcho q x = some e := by
+    intro q x e he
+    change update2 a.ackEcho p r none q x = some e at he
+    by_cases ex : q = p ∧ x = r
+    · obtain ⟨rfl, rfl⟩ := ex; rw [update2_self] at he; cases he
+    · rw [update2_of_ne _ _ ex] at he; exact he
+  have hdrop : DropInvariant b := by
+    refine h.drop.frame rfl ?_ ?_ (fun r x hx => leaseStart_mono a b (fun _ _ e => e) hmono hx)
+      (fun _ _ ⟨m, hm, hc, hd, he⟩ => ⟨m, hm, (hcb m hm hc).1, hd, he⟩)
+      (fun m hm hc => ⟨hm, (hcb m hm hc).1⟩)
+    · intro q x hd
+      refine ⟨hd, ?_⟩
+      change update2 a.ackEcho p r none q x = a.ackEcho q x
+      by_cases ex : q = p ∧ x = r
+      · obtain ⟨rfl, rfl⟩ := ex; rw [update2_self]; exact (h.drop.confirmedNoEcho q x hd).symm
+      · rw [update2_of_ne _ _ ex]
+    · intro q x he
+      by_cases ex : q = p ∧ x = r
+      · obtain ⟨rfl, rfl⟩ := ex
+        right; intro m hm hc
+        obtain ⟨_, hs, hd⟩ := hcb m hm hc
+        exact ⟨fun ⟨_, h2⟩ => hd h2, fun ⟨h1, _⟩ => hs h1⟩
+      · left; change update2 a.ackEcho p r none q x = none at he
+        rw [update2_of_ne _ _ ex] at he; exact he
+  have hb : LeaseInvariant P b :=
+    leaseInvariant_frame h h.core rfl rfl rfl rfl rfl rfl hAE (fun _ _ e => e) rfl rfl
+      (fun _ hm => hm) (fun msg hm hc => (hcb msg hm hc).1) hgle (fun _ _ _ => Nat.le_refl _)
+      (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist
+      hdrop
+  refine leaseInvariant_send hb ⟨rfl, rfl⟩ rfl (fun _ hx => by cases hx) (fun hx => by cases hx)
+    (fun _ hx => by cases hx) (fun _ hx => by cases hx) ?_
+  refine hb.drop.sendMsg rfl ?_ (fun _ _ _ _ _ e => by cases e)
+  -- no echo to `r` is current on the new connection.
+  intro q x gs gd t e _ _ y ⟨m, hm, hc, hd, _⟩
+  obtain ⟨-, rfl, -⟩ := Msg.dropReq.inj e
+  exact (hcb m hm hc).2.2 hd
+
+/-- A current drop request reaches `r`: `r` drops its read lease and confirms. -/
+theorem leaseInvariant_deliverDropRequest {p r : Node} {gs gd t : Nat}
+    (hm : Msg.dropReq p r gs gd t ∈ a.net) (hc : (Msg.dropReq p r gs gd t).Current a) :
+    LeaseInvariant P (deliverDropRequest a (.dropReq p r gs gd t) r p) := by
+  set c : LeaseState Node :=
+    { a with net := a.net.erase (.dropReq p r gs gd t), readLease := update a.readLease r none } with hcdef
+  have hRL : ∀ q x, c.readLease q = some x → a.readLease q = some x :=
+    fun q x e => (update_none_some _ _ _ e).2
+  have hnet : ∀ m ∈ c.net, m ∈ a.net ∧ (m.Current c → m.Current a) :=
+    fun m hm => ⟨List.mem_of_mem_erase hm, id⟩
+  have hcI : LeaseInvariant P c :=
+    leaseInvariant_frame h h.core rfl rfl rfl rfl rfl rfl (fun _ _ _ e => e) hRL rfl rfl
+      (fun _ hm => List.mem_of_mem_erase hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
+      (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist
+      (drop_mono h rfl rfl rfl hRL hnet)
+  refine leaseInvariant_send hcI ⟨rfl, rfl⟩ rfl (fun _ hx => by cases hx) (fun hx => by cases hx)
+    (fun _ hx => by cases hx) (fun _ hx => by cases hx) ?_
+  refine hcI.drop.sendMsg rfl (fun _ _ _ _ _ e => by cases e) ?_
+  -- `r` has just dropped its lease, and no echo to it was current while the request was.
+  intro x q gs' gd' t' e he hq y hy
+  obtain ⟨rfl, rfl, -⟩ := Msg.dropAck.inj e
+  rcases hy with hy | ⟨m, hm', hc', hd, he'⟩
+  · change update a.readLease r none r = some y at hy; rw [update_self] at hy; cases hy
+  · exact h.drop.requestNoEcho p r gs gd t hm hc he hq y ⟨m, List.mem_of_mem_erase hm', hc', hd, he'⟩
+
+/-- A current confirmation reaches `p`, which has received no acknowledgement from `r`
+since it asked: `p` records the confirmed drop. -/
+theorem leaseInvariant_deliverDropConfirm {r p : Node} {gs gd t : Nat}
+    (hm : Msg.dropAck r p gs gd t ∈ a.net) (hc : (Msg.dropAck r p gs gd t).Current a)
+    (hno : a.ackEcho p r = none) :
+    LeaseInvariant P (deliverDropConfirm a (.dropAck r p gs gd t) p r) := by
+  set a' := deliverDropConfirm a (.dropAck r p gs gd t) p r with ha'
+  have hnet : ∀ m ∈ a'.net, m ∈ a.net ∧ (m.Current a' → m.Current a) :=
+    fun m hm => ⟨List.mem_of_mem_erase hm, id⟩
+  have hLS : ∀ x y, LeaseStart a' x y → LeaseStart a x y :=
+    fun x y hy => leaseStart_mono a a' (fun _ _ e => e) hnet hy
+  have hdrop : DropInvariant a' := {
+    confirmedNoEcho := by
+      intro q x hd
+      change update2 a.dropConfirmed p r true q x = true at hd
+      by_cases ex : q = p ∧ x = r
+      · obtain ⟨rfl, rfl⟩ := ex; exact hno
+      · rw [update2_of_ne _ _ ex] at hd; exact h.drop.confirmedNoEcho q x hd
+    confirmedNoLease := by
+      intro q x hd hq y hy
+      change update2 a.dropConfirmed p r true q x = true at hd
+      by_cases ex : q = p ∧ x = r
+      · obtain ⟨rfl, rfl⟩ := ex; exact h.drop.confirmNoLease x q gs gd t hm hc hno hq y (hLS x y hy)
+      · rw [update2_of_ne _ _ ex] at hd; exact h.drop.confirmedNoLease q x hd hq y (hLS x y hy)
+    requestNoEcho := by
+      intro q x gs' gd' t' hm' hc' he hq y ⟨m, hmm, hmc, hd, hme⟩
+      exact h.drop.requestNoEcho q x gs' gd' t' (List.mem_of_mem_erase hm') hc' he hq y
+        ⟨m, List.mem_of_mem_erase hmm, hmc, hd, hme⟩
+    confirmNoLease := by
+      intro x q gs' gd' t' hm' hc' he hq y hy
+      exact h.drop.confirmNoLease x q gs' gd' t' (List.mem_of_mem_erase hm') hc' he hq y (hLS x y hy) }
+  exact leaseInvariant_frame h h.core rfl rfl rfl rfl rfl rfl (fun _ _ _ e => e) (fun _ _ e => e) rfl rfl
+    (fun _ hm => List.mem_of_mem_erase hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
+    (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist hdrop
+
 end preserve
 
 /-! ## Every step preserves the invariant; the theorem -/
@@ -1433,13 +1771,16 @@ theorem leaseInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m
   | deliverAck r p gs gd t d hm hc => exact leaseInvariant_deliverAck h hm hc
   | drop msg _ => exact leaseInvariant_drop h
   | learn n hnkl => exact leaseInvariant_learn h hnkl
-  | demote p r hp hkl hel hgo hwo => exact leaseInvariant_demote hM h hp hkl hel hgo hwo
+  | demote p r hp hkl hel hw => exact leaseInvariant_demote hM h hp hkl hel hw
   | takeover n hkl hel hnp hin hwait => exact leaseInvariant_takeover h hkl hel hnp hin hwait
   | resync r hne hnpre hsy hke => exact leaseInvariant_resync h hne hnpre hsy hke
   | restartEmpty n hkl hsurv => exact leaseInvariant_restartEmpty h hkl hsurv
   | restartKeep n hkl => exact leaseInvariant_restartKeep h hkl
   | restartPartialKeep n k hkl hk hkeep => exact leaseInvariant_restartPartialKeep h hkl hk hkeep
   | restartPartialFresh n k hkl hk hfresh hsurv => exact leaseInvariant_restartPartialFresh h hkl hk hfresh hsurv
+  | sendDropRequest p r _ _ _ => exact leaseInvariant_sendDropRequest h
+  | deliverDropRequest p r gs gd t hm hc => exact leaseInvariant_deliverDropRequest h hm hc
+  | deliverDropConfirm r p gs gd t hm hc hno => exact leaseInvariant_deliverDropConfirm h hm hc hno
 
 /-- The invariant holds in every reachable state. -/
 theorem leaseInvariant_reachable {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}

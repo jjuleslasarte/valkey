@@ -52,41 +52,55 @@ inductive Msg (Node : Type)
   /-- An acknowledgement from replica `src` to primary `dst`, sent at `sent`, confirming
   data that `dst` sent at `dataSent`. -/
   | ack (src dst : Node) (gs gd sent dataSent : Nat)
+  /-- A planned demotion: primary `src` asks replica `dst` to drop its read lease. -/
+  | dropReq (src dst : Node) (gs gd sent : Nat)
+  /-- Replica `src` tells primary `dst` it has dropped its read lease. -/
+  | dropAck (src dst : Node) (gs gd sent : Nat)
   deriving DecidableEq
 
 /-- The sender of a message. -/
 def Msg.src {Node : Type} : Msg Node → Node
   | .data p _ _ _ _ _ _ => p
   | .ack r _ _ _ _ _ => r
+  | .dropReq p _ _ _ _ => p
+  | .dropAck r _ _ _ _ => r
 /-- The receiver of a message. -/
 def Msg.dst {Node : Type} : Msg Node → Node
   | .data _ r _ _ _ _ _ => r
   | .ack _ p _ _ _ _ => p
+  | .dropReq _ r _ _ _ => r
+  | .dropAck _ p _ _ _ => p
 /-- The sender's connection generation at the send. -/
 def Msg.gs {Node : Type} : Msg Node → Nat
   | .data _ _ g _ _ _ _ => g
   | .ack _ _ g _ _ _ => g
+  | .dropReq _ _ g _ _ => g
+  | .dropAck _ _ g _ _ => g
 /-- The receiver's connection generation at the send. -/
 def Msg.gd {Node : Type} : Msg Node → Nat
   | .data _ _ _ g _ _ _ => g
   | .ack _ _ _ g _ _ => g
+  | .dropReq _ _ _ g _ => g
+  | .dropAck _ _ _ g _ => g
 /-- The send time. -/
 def Msg.sent {Node : Type} : Msg Node → Nat
   | .data _ _ _ _ t _ _ => t
   | .ack _ _ _ _ t _ => t
+  | .dropReq _ _ _ _ t => t
+  | .dropAck _ _ _ _ t => t
 /-- The echo a `REPLCONF COMMIT` carries: the start of the read lease it renews. -/
 def Msg.echo {Node : Type} : Msg Node → Option Nat
   | .data _ _ _ _ _ _ e => e
-  | .ack _ _ _ _ _ _ => none
+  | _ => none
 /-- The start of the primary lease an acknowledgement gives: the send time of the data
 it confirms. -/
 def Msg.ackStart {Node : Type} : Msg Node → Option Nat
-  | .data _ _ _ _ _ _ _ => none
   | .ack _ _ _ _ _ d => some d
+  | _ => none
 /-- The committed offset a `REPLCONF COMMIT` carries. -/
 def Msg.commitOf {Node : Type} : Msg Node → Option Nat
   | .data _ _ _ _ _ c _ => some c
-  | .ack _ _ _ _ _ _ => none
+  | _ => none
 
 /-- The lease parameters: the two durations, the drift bound and the margin. -/
 structure LeaseParams where
@@ -141,17 +155,24 @@ structure LeaseState (Node : Type) [DecidableEq Node] where
   /-- `gen n`: `n`'s connection generation. It goes up whenever `n`'s replication
   connections close, which discards every message to or from `n` still in flight. -/
   gen : Node → Nat
+  /-- `dropConfirmed p r`: `r` has confirmed to `p` that it dropped its read lease, and `p`
+  has received no acknowledgement from `r` since it asked. `p` may then demote `r`
+  without waiting out the lease (a planned demotion, design §4). -/
+  dropConfirmed : Node → Node → Bool
 
 variable {Node : Type} [DecidableEq Node]
 
 /-- The initial state: the replication model's initial state at time 0, no leases. -/
 def leaseInit (i : Node) : LeaseState Node :=
   ⟨init i, 0, fun _ => 0, fun _ _ => none, fun _ _ => none, fun _ _ => none, fun _ => none,
-   fun _ => 0, fun _ => 0, fun _ => none, fun _ _ => true, [], fun _ => 0⟩
+   fun _ => 0, fun _ => 0, fun _ => none, fun _ _ => true, [], fun _ => 0, fun _ _ => false⟩
 
 /-- A message is current while neither end's connections have closed since it was sent. -/
 def Msg.Current (a : LeaseState Node) (m : Msg Node) : Prop :=
   a.gen m.src = m.gs ∧ a.gen m.dst = m.gd
+
+instance (a : LeaseState Node) (m : Msg Node) : Decidable (m.Current a) := by
+  unfold Msg.Current; infer_instance
 
 /-- Close `n`'s connections. -/
 def bumpGen (g : Node → Nat) (n : Node) : Node → Nat := update g n (g n + 1)
@@ -254,7 +275,8 @@ def recvAck (a : LeaseState Node) (r : Node) (c : State Node) : LeaseState Node 
   { a with core := c,
            primaryLease := update2 a.primaryLease p r (some (maxOpt (a.primaryLease p r) (a.dataSent r))),
            ackReceived := update2 a.ackReceived p r (some a.now),
-           ackEcho := update2 a.ackEcho p r (some a.now) }
+           ackEcho := update2 a.ackEcho p r (some a.now),
+           dropConfirmed := update2 a.dropConfirmed p r false }
 
 /-- `n` learns the latest configuration and restarts its takeover timer ("Takeover
 timers restart on a configuration change"). -/
@@ -272,7 +294,8 @@ def leaseTakeover (a : LeaseState Node) (n : Node) : LeaseState Node :=
            ackReceived := update a.ackReceived n (fun _ => none),
            ackEcho := update a.ackEcho n (fun _ => none),
            readLease := update a.readLease n none,
-           gen := bumpGen a.gen n }
+           gen := bumpGen a.gen n,
+           dropConfirmed := update a.dropConfirmed n (fun _ => false) }
 
 /-- A full resync replaces `r`'s data; its committed view starts over. -/
 def leaseResync (a : LeaseState Node) (r : Node) : LeaseState Node :=
@@ -324,7 +347,25 @@ def deliverAck (a : LeaseState Node) (msg : Msg Node) (r p : Node) (t d : Nat) :
   { a with net := a.net.erase msg,
            primaryLease := update2 a.primaryLease p r (some (maxOpt (a.primaryLease p r) d)),
            ackReceived := update2 a.ackReceived p r (some a.now),
-           ackEcho := update2 a.ackEcho p r (some t) }
+           ackEcho := update2 a.ackEcho p r (some t),
+           dropConfirmed := update2 a.dropConfirmed p r false }
+
+/-- `p` asks `r` to drop its read lease (planned demotion). `p` stops echoing `r`'s
+acknowledgements until a new one arrives, and closes and reopens its connection to `r`,
+which discards every message to or from `r` still in flight; the request goes on the new
+connection. -/
+def sendDropRequest (a : LeaseState Node) (p r : Node) : LeaseState Node :=
+  send { a with ackEcho := update2 a.ackEcho p r none, gen := bumpGen a.gen r }
+    (.dropReq p r (bumpGen a.gen r p) (bumpGen a.gen r r) a.now)
+
+/-- Drop request `msg` from `p` reaches `r`: `r` drops its read lease and confirms. -/
+def deliverDropRequest (a : LeaseState Node) (msg : Msg Node) (r p : Node) : LeaseState Node :=
+  send { a with net := a.net.erase msg, readLease := update a.readLease r none }
+    (.dropAck r p (a.gen r) (a.gen p) a.now)
+
+/-- Confirmation `msg` from `r` reaches `p`. -/
+def deliverDropConfirm (a : LeaseState Node) (msg : Msg Node) (p r : Node) : LeaseState Node :=
+  { a with net := a.net.erase msg, dropConfirmed := update2 a.dropConfirmed p r true }
 
 /-- The replication actions that touch no lease state and keep their guards. -/
 def Action.isPlain : Action Node → Bool
@@ -347,6 +388,7 @@ inductive LeaseAction (Node : Type)
   | learn (n : Node) | demote (p r : Node) | takeover (n : Node) | resync (r : Node)
   | restartEmpty (n : Node) | restartKeep (n : Node) | restartPartial (n : Node) (k : Nat)
   | sendData (p r : Node) | sendAck (r : Node) | deliver (msg : Msg Node) | drop (msg : Msg Node)
+  | sendDropRequest (p r : Node)
 
 /-- The lease layer with instant messages: every message is delivered in the step that
 sends it. `instant_simulates` shows each step is a run of `InstantLeaseStep`. -/
@@ -449,12 +491,26 @@ inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActio
   /-- Demotion (design §4 and §5): the primary waits until the replica's read lease
   must have expired, measured from the last acknowledgement it received from it, and,
   for a replica of the configuration its takeover replaced, until one read lease plus
-  the margin after that takeover. -/
+  the margin after that takeover. Or, for a planned demotion, it has the replica's
+  confirmation that it dropped its lease. -/
   | demote (a p r) : (hThinksPrimary : ThinksPrimary a.core p) → (hKnowsLatest : KnowsLatest a.core p) → (hEligible : a.core.cfg.eligible r = true) →
-      GrantorOver P a.now (a.ackReceived p r) P.readDur →
-      (∀ T, a.primarySince p = some T → a.oldEligible p r = true →
-        T + P.readDur + P.margin ≤ a.now + P.drift) →
+      (hWaited : (GrantorOver P a.now (a.ackReceived p r) P.readDur ∧
+        ∀ T, a.primarySince p = some T → a.oldEligible p r = true →
+          T + P.readDur + P.margin ≤ a.now + P.drift) ∨ a.dropConfirmed p r = true) →
       LeaseStep m P a (.demote p r) (withCore a (makeIneligible a.core p r))
+  /-- A primary asks a replica that follows it to drop its read lease. -/
+  | sendDropRequest (a p r) : (hNotSelf : p ≠ r) → (hFollows : primaryOf a.core r = p) →
+      (hThinksPrimary : ThinksPrimary a.core p) →
+      LeaseStep m P a (.sendDropRequest p r) (sendDropRequest a p r)
+  /-- A current drop request reaches the replica. -/
+  | deliverDropRequest (a p r gs gd t) : (hIn : Msg.dropReq p r gs gd t ∈ a.net) →
+      (hCurrent : (Msg.dropReq p r gs gd t).Current a) →
+      LeaseStep m P a (.deliver (.dropReq p r gs gd t)) (deliverDropRequest a (.dropReq p r gs gd t) r p)
+  /-- A current confirmation reaches the primary, which has received no acknowledgement
+  from the replica since it asked. -/
+  | deliverDropConfirm (a r p gs gd t) : (hIn : Msg.dropAck r p gs gd t ∈ a.net) →
+      (hCurrent : (Msg.dropAck r p gs gd t).Current a) → (hNoAck : a.ackEcho p r = none) →
+      LeaseStep m P a (.deliver (.dropAck r p gs gd t)) (deliverDropConfirm a (.dropAck r p gs gd t) p r)
   /-- Takeover: the replica waits until the primary's lease must have expired, measured
   from the last traffic it received from the primary. -/
   | takeover (a n) : (hKnowsLatest : KnowsLatest a.core n) → (hEligible : a.core.cfg.eligible n = true) → (hNotPrimary : n ≠ a.core.cfg.primary) →

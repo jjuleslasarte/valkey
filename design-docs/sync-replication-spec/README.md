@@ -36,11 +36,15 @@ we show by a run that a smaller margin loses it. Separately, the lease timing le
 give the exact margin condition and a sufficient condition for the "Lease durations"
 rule.
 
-The proofs are about safety: of the replication log, and of linearizable reads under
-leases. They do not cover forced failover, liveness (that a held reply is ever
-released, or that a read is ever served), or client-visible read operations as a
-history. Section 5 lists every exclusion and every assumption that is stronger than
-the design.
+Over client histories of writes and reads, we prove that every reachable history is
+linearizable (Herlihy and Wing), with the same margin condition. Here the replication
+layer still moves log entries and acknowledgements in one step, so the result covers
+delayed lease messages but not delayed replication messages.
+
+The proofs are about safety: of the replication log, of linearizable reads under
+leases, and of client histories. They do not cover forced failover or liveness (that a
+held reply is ever released, or that a read is ever served). Section 5 lists every
+exclusion and every assumption that is stronger than the design.
 
 Every theorem is checked by Lean's kernel. There is no `sorry`, and the only axioms
 are Lean's standard three (`propext`, `Classical.choice`, `Quot.sound`).
@@ -123,9 +127,14 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   members that are eligible with a matching incarnation. Clocks may drift by at most
   `drift` over a lease; each holder subtracts a `margin` from its lease and assumes
   its clock slow, each grantor assumes its clock fast. A takeover waits out the
-  primary lease; a demotion waits out the read lease, and after a takeover the new
+  primary lease; a demotion waits out the read lease, or, for a planned demotion,
+  needs the replica's confirmation that it dropped its lease, and after a takeover the new
   primary also waits one read lease plus the margin before demoting a replica of the
   configuration it replaced (a replica it promoted itself needs no such wait). A
+  planned demotion runs: the primary asks the replica to drop its read lease, closing
+  and reopening its connection to it; the replica drops the lease and confirms; the
+  confirmation counts only if the primary has received no acknowledgement from the
+  replica since it asked, and a later acknowledgement cancels it. A
   restart clears a node's leases and committed view and restarts both waits, the
   takeover wait and the demotion wait, the latter for every replica since the node has
   forgotten which configuration it took over from; it does not otherwise delay reads.
@@ -320,7 +329,7 @@ clauses of the fence) hold
 only while it is authoritative: a primary that came back empty holds nothing, and
 nothing new is committed until an authoritative eligible replica takes over.
 
-Property 6 extends `Invariant` with seventeen more parts (`LeaseInvariant`,
+Property 6 extends `Invariant` with eighteen more parts (`LeaseInvariant`,
 `LeaseInvariant.lean`). A lease is counted whether it is held or still in flight: a read
 lease includes the echo of any `REPLCONF COMMIT` on its way to the replica, and a
 primary lease any acknowledgement on its way to the primary. Seven parts are
@@ -334,7 +343,12 @@ by an acknowledgement). Four are about messages in flight: each was sent in the 
 on a connection no newer than the current one; a `REPLCONF COMMIT` on an open
 connection carries no more than its sender's committed offset (an offset only goes down
 at a takeover, resync or restart, which closes the connections); and it goes from a
-replica's primary to that replica. Two carry the argument:
+replica's primary to that replica. One is about planned demotion (`drop`): a confirmed
+drop is cancelled by any later acknowledgement; while the current primary's request is
+in flight, or its confirmation, and no acknowledgement has arrived since, no echo is on
+its way to the replica, and once the replica has dropped its lease it holds none; so a
+confirmed drop by the current primary means the replica holds no read lease and has none
+in flight. Two carry the argument:
 - **A deposed primary's lease is over for good** (`deposed`). A primary `p` was deposed
   by a takeover of some `t`. `p` was current then, so it knew the latest configuration,
   and `t`'s takeover checked `t`'s eligibility in that configuration: `t` is eligible in
@@ -416,6 +430,7 @@ changes touch (`localCfgEq`, `primKnows`, `eligibleInOldConfig`) are corrected b
 | `genLe` | Lease (messages) | Takeover, Resync, Learn, the restarts (by use; not swept) |
 | `commitLe` | Lease (messages) | DeliverData (by use; not swept) |
 | `follows` | Lease (messages) | DeliverData (by use; not swept) |
+| `drop` | Lease (planned demotion) | Demote, SendGrant, DeliverDropRequest, DeliverDropConfirm (by use; not swept) |
 
 "Needed by" is about the current proof. No counterexample state was built for any
 conjunct (one that meets all the others, breaks this one, and reaches a violation in one
@@ -517,12 +532,16 @@ What these say about the design's own wording is in Appendix B.
 | Property 6 is not vacuous: a replica holding a read lease may serve a read | `SyncReplication.replCanRead_reachable` |
 | A new primary may demote a replica it promoted itself without the post-takeover wait | `SyncReplication.demoteNew_reachable` |
 | Resync's guard that the replica is not counted excludes a reachable state (no counterexample without it) | `SyncReplication.countedDiverged_reachable` |
+| A planned demotion, on the replica's confirmation and before the read-lease wait has passed, is reachable | `SyncReplication.plannedDemotion_reachable` |
+| Each rule of planned demotion is needed: the request closes the connection, a later acknowledgement cancels a confirmed drop, and a confirmation counts only with no acknowledgement since the request | `SyncReplication.noCloseOnRequest_stale`, `noResetOnAck_stale`, `noConfirmGuard_stale` |
 | Property 6 with lease messages delayed, reordered or lost: every instant-delivery run is a run of the delayed model, so the counterexamples and reachability witnesses carry over | `SyncReplication.instant_simulates`, `instantReachable_leaseReachable` |
 | A restart need not clear the node's grantor rows (primary leases, acknowledgement times, echoes) for property 6 | `SyncReplication.noStaleRead_keepGrantorRows` |
+| Every reachable client history is linearizable for the log (`margin ≥ 2 · drift`) | `SyncReplication.linearizable` |
+| Linearizability is not vacuous: a write released as OK and a later read that returns it | `SyncReplication.client_writeRead_reachable` |
 
-Size: the model is 1,112 lines (481 for the protocol, 140 for the held-reply layer,
-491 for the lease layer), the invariants and their lemmas 1,940 (475 for replication,
-1,465 for leases, which includes their preservation), the per-action contracts 616,
+Size: the model is 1,168 lines (481 for the protocol, 140 for the held-reply layer,
+547 for the lease layer), the invariants and their lemmas 2,281 (475 for replication,
+1,806 for leases, which includes their preservation), the per-action contracts 616,
 and the replication preservation proofs 2,551. Lean checks the whole of
 `SyncReplication` in about 20 seconds on a laptop-class machine.
 
@@ -536,19 +555,15 @@ statement is in the file section 6 names for it.
 - **Forced failover** (`CLUSTER FAILOVER FORCE`, `TAKEOVER`). The design accepts
   losses when the target is ineligible. Explored in TLA+ only (Appendix C).
 - **Reads as operations.** Property 6 is a state predicate: whenever a node *may*
-  serve a linearizable read, its log is the history. Client read operations, with
-  their invocation and response times, are not modelled, so no linearizability
-  statement over a history of reads and writes is made. Serializable (non-lease)
-  replica reads are not modelled.
+  serve a linearizable read, its log is the history. Client operations as a history
+  are in the client layer, which is proved linearizable (see *Linearizability*
+  below). Serializable (non-lease) replica reads are not modelled.
 - **Liveness.** Nothing proves that a held reply is ever released, as OK or as
   `UNCOMMITTED`, or that a lease is ever renewed, or that a read is ever served. The model's `UNCOMMITTED` (`abort`) fires only when the primaryship
   that took the write is no longer current. The design's other case, a healthy
   primary whose sync replica set fell below `min-sync-replicas` releasing held writes
   as `UNCOMMITTED`, is not modelled, and neither is the `CLUSTERDOWN` rejection path
   or client retry semantics.
-- **Planned demotion** (design §4 step 2: the primary asks a healthy replica to drop
-  its read lease and proceeds on its confirmation). Demotion always waits the read
-  lease out.
 - **Correlated data loss** is excluded by the survival condition. The design's
   detection of it (no eligible replica with a matching incarnation, so the shard
   stays unavailable) is not proven.
@@ -695,10 +710,90 @@ ones. `Writable` uses `Set.encard`, which is the usual cardinality on finite set
 `⊤` on infinite ones. The theorems hold for infinite node types too, but only the
 finite case corresponds to a real cluster.
 
+### Linearizability
+
+`lean/SyncReplication/Linearizable.lean` defines linearizability as in Herlihy and
+Wing (1990, §2). The pinned CSLib has no such definition. The generic part does not
+mention Valkey:
+- an event is an invocation or a response, with an operation id and a process;
+- a history is a list of events;
+- it is well-formed when ids are not reused and each response follows its
+  invocation;
+- `x <_H y` when the response of `x` comes before the invocation of `y`;
+- `Linearizable spec h` holds when some extension of `h` (responses added to some
+  pending invocations, the rest dropped) has a sequential order of its complete
+  operations that is legal for `spec` and keeps `<_H`.
+
+Each definition's docstring cites the step of the paper it encodes. The one change
+from the paper: invocations and responses pair by operation id, where the paper pairs
+them by process.
+
+The sequential specification is a log, defined separately: a write appends a value,
+and a read returns the whole log. A history is legal when each read returns exactly
+the writes before it.
+
+A write answered `UNCOMMITTED` has no response: it is pending forever, as it may
+still commit. The definition needs no special case for it, because an extension may
+either complete it or drop it. Five small histories check the definition:
+- a write followed by a read that sees it is linearizable;
+- a read that misses a write that responded before the read was invoked is not;
+- a later read may include an `UNCOMMITTED` write or omit it, and both histories are
+  linearizable;
+- a read that responded before the write was invoked cannot include it.
+
+`lean/SyncReplication/Client.lean` records client histories. The client layer wraps
+the lease layer and the reply layer's held replies. Each of its steps is one of:
+- a lease step;
+- a reply step;
+- both at once;
+- an event alone.
+
+Writes and reads map onto events as follows:
+- a write's value is its operation id;
+- a write responds OK when its reply is released;
+- a write answered `UNCOMMITTED`, or whose reply a restart drops, gets no response;
+- a read sent to node n responds with n's log once n may serve a linearizable read.
+
+A log entry is identified by its offset and replication ID. A read turns each entry
+into the id of the write that appended it. In this layer a restart is followed by a
+fresh replication ID for the restarted node, as a Valkey primary takes a new ID at
+startup. Appends happen only as client writes. `client_writeRead_reachable` is a
+reachable history in which a write is released as OK and a later read returns it.
+
+`SyncReplication.linearizable` (`lean/SyncReplication/ClientProof.lean`) proves that
+every reachable client history is `Linearizable LogLegal`. It holds for every
+`min-sync-replicas` value, when `margin ≥ 2 · drift`. Each operation has a
+linearization point:
+- a write's point is when its entry joins the committed history;
+- a read's point is when it responds.
+
+A ghost list records the operations linearized so far, with the history length at each
+point. The proof shows the following:
+- each point lies between the operation's invocation and its response;
+- the points are in order;
+- every response belongs to a linearized operation;
+- every read returns exactly the writes linearized before it.
+
+`Lin.linearizable_of_points` turns these facts into the definition. A write's OK comes
+after its point by `AckedDurable`. A read's answer is the committed history by
+`NoStaleRead`.
+
+Two facts make an entry name its write. No two appends share an offset and
+replication ID. Every entry of every log, and of the committed history, comes from an
+append. The first fact needs the fresh ID at each restart. The proof also shows that
+no two nodes that think they are primary share an ID.
+
+**Scope.** The replication layer still moves log entries and acknowledgements in one
+step: message delay is modelled for lease messages only. The result therefore covers
+delayed, reordered and lost lease messages, but not delayed replication messages. It
+is also bounded by the client layer's two narrowings:
+- a restart always takes a fresh replication ID;
+- every log entry is a client write.
+
 ### Future work
 
-Client read operations and a linearizability statement over histories, for which
-CSLib's `DistributedConsistency` definitions are the natural target.
+Delayed replication messages (log entries and acknowledgements through the network),
+and the linearizability proof over them.
 
 ## 6. How the proof is organized in code
 
@@ -706,19 +801,22 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 |---|---|---|
 | `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 481 |
 | `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 140 |
-| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 491 |
+| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 547 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 475 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
 | `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,551 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies`, `committed_inherited_first` | 109 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 278 |
 | `lean/SyncReplication/InstantLeases.lean` | The lease layer with instant messages is a special case (`instant_simulates`) | 148 |
-| `lean/SyncReplication/RestartGrantorRows.lean` | Restarts that keep the node's grantor rows: property 6 still holds (`noStaleRead_keepGrantorRows`) | 178 |
-| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,465 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,718 |
+| `lean/SyncReplication/RestartGrantorRows.lean` | Restarts that keep the node's grantor rows: property 6 still holds (`noStaleRead_keepGrantorRows`) | 182 |
+| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,806 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,928 |
+| `lean/SyncReplication/Linearizable.lean` | Linearizability (Herlihy and Wing), the log specification, five example histories; definition only | 340 |
+| `lean/SyncReplication/Client.lean` | The client layer: histories of client writes and reads over the lease and reply layers; a reachability witness | 285 |
+| `lean/SyncReplication/ClientProof.lean` | The client invariant and `linearizable`; `Lin.linearizable_of_points` | 1,561 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
-| `lean/Check.lean` | Prints the axioms of the 36 `SyncReplication` theorems | |
+| `lean/Check.lean` | Prints the axioms of the 47 `SyncReplication` theorems | |
 | `lean/LeaseCheck.lean` | Prints the axioms of the 12 `Lease` theorems | |
 
 Lean 4.35 with Mathlib `v4.35.0`, used for list-prefix lemmas and for `Set.encard`
@@ -755,7 +853,7 @@ property that does not hold gets a counterexample instead.
 cd lean
 lake exe cache get                # once: Mathlib's prebuilt files (about 7 GB)
 lake build                        # builds every proof
-lake env lean Check.lean          # axioms of the 36 SyncReplication theorems
+lake env lean Check.lean          # axioms of the 47 SyncReplication theorems
 lake env lean LeaseCheck.lean     # axioms of the 12 Lease theorems
 ```
 
@@ -1226,6 +1324,18 @@ run ending in a stale linearizable read at `min-sync-replicas = 0`:
   post-takeover window, demotes n2 and commits a write alone. n0 and n2 have not
   learned of it, so n2 still follows n0 and n0 still thinks it is primary; n2
   acknowledges and n0, holding no valid lease, echoes it. n2 serves a read of an empty log.
+- *Planned demotion* (`Counterexamples/PlannedDemotion.lean`). The design lets the
+  primary tell a healthy replica to drop its read lease and proceed once the replica
+  confirms. With messages delayed, the design's wording leaves three ways for a lease
+  to survive the drop, each shown by a run in which n0 demotes n1 on its confirmation,
+  commits a write alone, and n1 serves a read that misses it: an echo sent before the
+  request arrives after n1 dropped its lease, unless the request closes the connection
+  (`noCloseOnRequest_stale`); n1 acknowledges after confirming and n0 echoes that,
+  unless the acknowledgement cancels the confirmed drop (`noResetOnAck_stale`); n1
+  acknowledges before it receives the request and n0 echoes that, unless a
+  confirmation counts only with no acknowledgement since the request
+  (`noConfirmGuard_stale`). `plannedDemotion_reachable` shows a demotion on the
+  confirmation, before the read-lease wait has passed, in the model itself.
 That the design's narrower form of the post-takeover wait is what the model has, so
 that a new primary may demote a replica it promoted itself inside the window, is
 checked by `demoteNew_reachable`.
@@ -1302,7 +1412,10 @@ relation instead.
 The lease runs are in the lease layer with instant messages (`InstantLeaseStep`, plus
 the one weakened action). Every instant run is a run with delayed messages
 (`instant_simulates`), so the reachability witnesses hold in the model itself; a lease
-counterexample shows its rule is needed even when every message arrives at once.
+counterexample shows its rule is needed even when every message arrives at once. The
+planned-demotion runs are the exception: their rules matter only when messages are
+delayed, so they are in the delayed lease layer (`LeaseStep`, plus the one weakened
+action), from the shared prefix turned into a delayed run.
 
 Every counterexample is a concrete run on three nodes (`N := Fin 3`, node 0 the initial
 primary) in a weakened protocol: the model's `Step` plus one action with a rule
@@ -1329,6 +1442,7 @@ history is `[1]`, on n0 and n1).
 | `RestartDemotionWait.lean` | `LeaseStepRestartNoDemotionWait` | RestartKeep arms no demotion wait (`oldEligible n := fun _ => false`) | shared lease prefix, heartbeat 1 (grant), **restartKeep 0**, demote 0 1, append 0, commit 0 | `ReplCanRead` holds for n1 without the write |
 | `RestartTimer.lean` | `LeaseStepRestartForgetsTimer` | RestartKeep sets the restarted node's takeover timer to 0 (`primaryTraffic n := 0`) | addToSyncSet 0 1, makeEligible 0 1, learn 1, tick ×4, heartbeat 1, ack 1, **restartKeep 1**, takeover 1, append 1, commit 1 | `PrimCanRead` holds for the deposed n0 without the write |
 | `TakeoverDemotionWait.lean` | `LeaseStepTakeoverNoDemotionWait` (with `P3`) | Takeover arms no demotion wait (`oldEligible n := fun _ => false`) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, learn 2, heartbeat 1, ack 1, heartbeat 2, ack 2, tick ×4, heartbeat 2, ack 2, heartbeat 2 (grant), tick, **takeover 1**, demote 1 2, append 1, commit 1 | `ReplCanRead` holds for n2 without the write |
+| `PlannedDemotion.lean` | `LeaseStepNoCloseOnRequest`, `LeaseStepNoResetOnAck`, `LeaseStepNoConfirmGuard` (delayed messages) | the drop request keeps the connection open; an acknowledgement keeps a confirmed drop; a confirmation counts whatever arrived since the request | delayed lease prefix; then sendGrant 0 1, **sendDropRequest 0 1**, deliver request, deliver echo, deliver confirmation / sendDropRequest 0 1, deliver request, deliver confirmation, sendAck 1, **deliver ack**, sendGrant 0 1, deliver echo / sendDropRequest 0 1, sendAck 1, deliver ack, sendGrant 0 1, deliver request, deliver echo, **deliver confirmation**; then demote 0 1, append 0, commit 0 | `ReplCanRead` holds for n1 without the write |
 | `GrantPrimaryLease.lean` | `LeaseStepGrantWithoutPrimaryLease` | Echo without `PrimLeaseValid` (the rest of `MayGrant` kept) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, tick ×4, takeover 1, tick ×3, demote 1 2, append 1, commit 1, ack 2, **heartbeat 2 (grant)** by the deposed n0 | `ReplCanRead` holds for n2 without the write |
 | `RemoveFromSyncSet.lean` | `StepRemoveFromSyncSetElig` | RemoveFromSyncSet of an eligible counted replica | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **removeFromSyncSet 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, addToSyncSet 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
