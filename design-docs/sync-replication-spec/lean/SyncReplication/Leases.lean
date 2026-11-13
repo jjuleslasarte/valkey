@@ -15,14 +15,20 @@ The theorem, `SyncReplication.noStaleRead`, is in `LeaseInvariant.lean`.
   `now - start < dur - margin + drift` (its clock may run slow, `HolderValid`); a
   grantor's promise is over once `now - recv ≥ dur - drift` (its clock may run fast,
   `GrantorOver`). `None` as a lease start means "no lease".
-- Messages are instant, as in the replication model. A lease's start is therefore
-  the real time of the event it is measured from, which is the tightest case for a
-  lease argument: delivery delay only widens the gap between the holder's expiry and
-  the grantor's promise.
-- A data message from the primary carries its committed offset and the echo of the
-  replica's latest acknowledgement. `replicate` carries data without an echo; the
-  echo rides on a separate `heartbeat`. Since a heartbeat may follow any data
-  message immediately, this reaches the same states as putting the echo on both.
+- Lease messages are delayed. A `REPLCONF COMMIT` from a primary to a replica
+  (`Msg.data`: send time, the primary's committed offset, and optionally the echo of
+  the replica's acknowledgement) and an acknowledgement from a replica (`Msg.ack`:
+  send time, and the send time of the data it confirms) go into `net` when sent, and
+  are delivered later, in any order, or never (`drop`). Delay is unbounded. Log
+  entries and acknowledged offsets (`Step.replicate`, `Step.ack`) still move in one
+  step; delaying them too is the replication-layer change not made here.
+- Each node has a connection generation `gen`. A message records both ends'
+  generations when sent and is delivered only while both are unchanged: a restart,
+  a takeover, a resync, or learning a configuration with a different primary closes
+  the node's connections, as Valkey drops the link.
+- The instant lease layer, in which every message is delivered in the step that sends
+  it, is `InstantLeaseStep`. `instant_simulates` shows each of its steps is a run of
+  `LeaseStep`, so everything reachable with instant messages is reachable here.
 - Lease state is in memory: every restart clears the node's leases and committed view
   and restarts its takeover timer and its demotion timer (`primarySince`). For reads
   the model only clears the leases, so a restarted node may read as soon as it holds
@@ -36,6 +42,51 @@ The theorem, `SyncReplication.noStaleRead`, is in `LeaseInvariant.lean`.
 open Cslib
 
 namespace SyncReplication
+
+/-- A lease message in flight. `src` sent it to `dst`; `gs` and `gd` are their
+connection generations when it was sent. -/
+inductive Msg (Node : Type)
+  /-- `REPLCONF COMMIT` from primary `src` to replica `dst`, sent at `sent`, carrying
+  `src`'s committed offset and, if set, the echo of `dst`'s acknowledgement. -/
+  | data (src dst : Node) (gs gd sent commit : Nat) (echo : Option Nat)
+  /-- An acknowledgement from replica `src` to primary `dst`, sent at `sent`, confirming
+  data that `dst` sent at `dataSent`. -/
+  | ack (src dst : Node) (gs gd sent dataSent : Nat)
+  deriving DecidableEq
+
+/-- The sender of a message. -/
+def Msg.src {Node : Type} : Msg Node → Node
+  | .data p _ _ _ _ _ _ => p
+  | .ack r _ _ _ _ _ => r
+/-- The receiver of a message. -/
+def Msg.dst {Node : Type} : Msg Node → Node
+  | .data _ r _ _ _ _ _ => r
+  | .ack _ p _ _ _ _ => p
+/-- The sender's connection generation at the send. -/
+def Msg.gs {Node : Type} : Msg Node → Nat
+  | .data _ _ g _ _ _ _ => g
+  | .ack _ _ g _ _ _ => g
+/-- The receiver's connection generation at the send. -/
+def Msg.gd {Node : Type} : Msg Node → Nat
+  | .data _ _ _ g _ _ _ => g
+  | .ack _ _ _ g _ _ => g
+/-- The send time. -/
+def Msg.sent {Node : Type} : Msg Node → Nat
+  | .data _ _ _ _ t _ _ => t
+  | .ack _ _ _ _ t _ => t
+/-- The echo a `REPLCONF COMMIT` carries: the start of the read lease it renews. -/
+def Msg.echo {Node : Type} : Msg Node → Option Nat
+  | .data _ _ _ _ _ _ e => e
+  | .ack _ _ _ _ _ _ => none
+/-- The start of the primary lease an acknowledgement gives: the send time of the data
+it confirms. -/
+def Msg.ackStart {Node : Type} : Msg Node → Option Nat
+  | .data _ _ _ _ _ _ _ => none
+  | .ack _ _ _ _ _ d => some d
+/-- The committed offset a `REPLCONF COMMIT` carries. -/
+def Msg.commitOf {Node : Type} : Msg Node → Option Nat
+  | .data _ _ _ _ _ c _ => some c
+  | .ack _ _ _ _ _ _ => none
 
 /-- The lease parameters: the two durations, the drift bound and the margin. -/
 structure LeaseParams where
@@ -85,13 +136,25 @@ structure LeaseState (Node : Type) [DecidableEq Node] where
   ("a replica from the old configuration", design §5). After a restart, which forgets
   this, every replica counts as old. -/
   oldEligible : Node → Node → Bool
+  /-- The lease messages in flight. -/
+  net : List (Msg Node)
+  /-- `gen n`: `n`'s connection generation. It goes up whenever `n`'s replication
+  connections close, which discards every message to or from `n` still in flight. -/
+  gen : Node → Nat
 
 variable {Node : Type} [DecidableEq Node]
 
 /-- The initial state: the replication model's initial state at time 0, no leases. -/
 def leaseInit (i : Node) : LeaseState Node :=
   ⟨init i, 0, fun _ => 0, fun _ _ => none, fun _ _ => none, fun _ _ => none, fun _ => none,
-   fun _ => 0, fun _ => 0, fun _ => none, fun _ _ => true⟩
+   fun _ => 0, fun _ => 0, fun _ => none, fun _ _ => true, [], fun _ => 0⟩
+
+/-- A message is current while neither end's connections have closed since it was sent. -/
+def Msg.Current (a : LeaseState Node) (m : Msg Node) : Prop :=
+  a.gen m.src = m.gs ∧ a.gen m.dst = m.gd
+
+/-- Close `n`'s connections. -/
+def bumpGen (g : Node → Nat) (n : Node) : Node → Nat := update g n (g n + 1)
 
 /-- The later of a lease start and a new candidate. -/
 def maxOpt (x : Option Nat) (y : Nat) : Nat :=
@@ -196,7 +259,8 @@ def recvAck (a : LeaseState Node) (r : Node) (c : State Node) : LeaseState Node 
 /-- `n` learns the latest configuration and restarts its takeover timer ("Takeover
 timers restart on a configuration change"). -/
 def leaseLearn (a : LeaseState Node) (n : Node) : LeaseState Node :=
-  { a with core := learn a.core n, primaryTraffic := update a.primaryTraffic n a.now }
+  { a with core := learn a.core n, primaryTraffic := update a.primaryTraffic n a.now,
+           gen := if a.core.cfg.primary = (a.core.localCfg n).primary then a.gen else bumpGen a.gen n }
 
 /-- `n` takes over. It has heard nothing from its replicas as primary: no primary
 lease, no acknowledgements; it holds no read lease; its primaryship starts now. -/
@@ -207,11 +271,13 @@ def leaseTakeover (a : LeaseState Node) (n : Node) : LeaseState Node :=
            primaryLease := update a.primaryLease n (fun _ => none),
            ackReceived := update a.ackReceived n (fun _ => none),
            ackEcho := update a.ackEcho n (fun _ => none),
-           readLease := update a.readLease n none }
+           readLease := update a.readLease n none,
+           gen := bumpGen a.gen n }
 
 /-- A full resync replaces `r`'s data; its committed view starts over. -/
 def leaseResync (a : LeaseState Node) (r : Node) : LeaseState Node :=
-  { a with core := resync a.core r, committedView := update a.committedView r 0 }
+  { a with core := resync a.core r, committedView := update a.committedView r 0,
+           gen := bumpGen a.gen r }
 
 /-- `n` restarts, with replication state `c` afterwards. Lease state is in memory, so
 `n` loses its leases and its committed view, and its timers start afresh: it has just
@@ -229,12 +295,49 @@ def leaseRestart (a : LeaseState Node) (n : Node) (c : State Node) : LeaseState 
            primaryTraffic := update a.primaryTraffic n a.now,
            dataSent := update a.dataSent n a.now,
            primarySince := update a.primarySince n (some a.now),
-           oldEligible := update a.oldEligible n (fun _ => true) }
+           oldEligible := update a.oldEligible n (fun _ => true),
+           gen := bumpGen a.gen n }
+
+/-- A message is sent. -/
+def send (a : LeaseState Node) (msg : Msg Node) : LeaseState Node := { a with net := msg :: a.net }
+
+/-- A message is lost. -/
+def dropMsg (a : LeaseState Node) (msg : Msg Node) : LeaseState Node := { a with net := a.net.erase msg }
+
+/-- `REPLCONF COMMIT` `msg`, sent at `t` with committed offset `c` and echo `e`, reaches
+replica `r`. As `recvData`, with the message's committed offset, and with the data's
+send time `t` in place of now. -/
+def deliverData (a : LeaseState Node) (msg : Msg Node) (r : Node) (t c : Nat) (e : Option Nat) :
+    LeaseState Node :=
+  { a with net := a.net.erase msg,
+           committedView := update a.committedView r (max (a.committedView r) (min c (a.core.log r).length)),
+           primaryTraffic := update a.primaryTraffic r a.now,
+           dataSent := update a.dataSent r t,
+           readLease := match e with
+                 | none => a.readLease
+                 | some e => update a.readLease r (some (maxOpt (a.readLease r) e)) }
+
+/-- Acknowledgement `msg` from `r`, sent at `t` and confirming data sent at `d`, reaches
+`p`. As `recvAck`: `p`'s lease from `r` starts at `d`; `p` records the receipt now and
+will echo the acknowledgement's send time. -/
+def deliverAck (a : LeaseState Node) (msg : Msg Node) (r p : Node) (t d : Nat) : LeaseState Node :=
+  { a with net := a.net.erase msg,
+           primaryLease := update2 a.primaryLease p r (some (maxOpt (a.primaryLease p r) d)),
+           ackReceived := update2 a.ackReceived p r (some a.now),
+           ackEcho := update2 a.ackEcho p r (some t) }
 
 /-- The replication actions that touch no lease state and keep their guards. -/
 def Action.isPlain : Action Node → Bool
   | .append _ | .commit _ | .addToSyncSet _ _ | .removeFromSyncSet _ _ | .makeEligible _ _ => true
   | _ => false
+
+/-- The replication actions that `LeaseStep` takes as they are: the plain ones, and
+Replicate and Ack, whose lease effects travel separately as messages. -/
+def Action.isCore : Action Node → Bool
+  | .append _ | .replicate _ | .ack _ | .commit _ | .addToSyncSet _ _ | .removeFromSyncSet _ _
+  | .makeEligible _ _ => true
+  | .makeIneligible _ _ | .learn _ | .takeover _ | .resync _ | .restartEmpty _ | .restartKeep _
+  | .restartPartial _ _ => false
 
 /-- The actions of the lease layer. -/
 inductive LeaseAction (Node : Type)
@@ -243,34 +346,104 @@ inductive LeaseAction (Node : Type)
   | replicate (r : Node) | heartbeat (r : Node) | ack (r : Node)
   | learn (n : Node) | demote (p r : Node) | takeover (n : Node) | resync (r : Node)
   | restartEmpty (n : Node) | restartKeep (n : Node) | restartPartial (n : Node) (k : Nat)
+  | sendData (p r : Node) | sendAck (r : Node) | deliver (msg : Msg Node) | drop (msg : Msg Node)
 
-/-- The step relation. `m` is `min-sync-replicas`, `P` the lease parameters. -/
-inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseAction Node → LeaseState Node → Prop
+/-- The lease layer with instant messages: every message is delivered in the step that
+sends it. `instant_simulates` shows each step is a run of `InstantLeaseStep`. -/
+inductive InstantLeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseAction Node → LeaseState Node → Prop
   /-- Real time advances. -/
-  | tick (a) : LeaseStep m P a .tick (tick a)
+  | tick (a) : InstantLeaseStep m P a .tick (tick a)
   /-- A replication action that touches no lease state: AppendWrite, Commit, AddToSyncSet,
   RemoveFromSyncSet, MakeEligible, with their guards. -/
-  | core (a μ c) : Step m a.core μ c → μ.isPlain = true → LeaseStep m P a (.core μ) (withCore a c)
+  | core (a μ c) : Step m a.core μ c → μ.isPlain = true → InstantLeaseStep m P a (.core μ) (withCore a c)
   /-- A replica copies the next entry of its primary's log; the message carries the
   primary's committed offset. -/
   | replicate (a r) : primaryOf a.core r ≠ r → a.core.log r <+: a.core.log (primaryOf a.core r) →
       (a.core.log r).length < (a.core.log (primaryOf a.core r)).length →
-      LeaseStep m P a (.replicate r) (recvData a r (replicate a.core r) none)
+      InstantLeaseStep m P a (.replicate r) (recvData a r (replicate a.core r) none)
   /-- A heartbeat from the primary: committed offset, no echo. -/
   | heartbeat (a r) : primaryOf a.core r ≠ r → a.core.log r <+: a.core.log (primaryOf a.core r) →
-      LeaseStep m P a (.heartbeat r) (recvData a r a.core none)
+      InstantLeaseStep m P a (.heartbeat r) (recvData a r a.core none)
   /-- A heartbeat that echoes `r`'s latest acknowledgement, renewing its read lease. -/
   | heartbeatGrant (a r) : primaryOf a.core r ≠ r → ThinksPrimary a.core (primaryOf a.core r) →
       a.core.log r <+: a.core.log (primaryOf a.core r) → MayGrant P a (primaryOf a.core r) r →
-      LeaseStep m P a (.heartbeat r) (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
+      InstantLeaseStep m P a (.heartbeat r) (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
   /-- An acknowledgement of new entries. -/
   | ack (a r) : primaryOf a.core r ≠ r → a.core.log r <+: a.core.log (primaryOf a.core r) →
       a.core.acked (primaryOf a.core r) r < (a.core.log r).length →
-      LeaseStep m P a (.ack r) (recvAck a r (ack a.core r))
+      InstantLeaseStep m P a (.ack r) (recvAck a r (ack a.core r))
   /-- An acknowledgement that confirms nothing new (a heartbeat reply); it still renews
   the leases. -/
   | ackRenew (a r) : primaryOf a.core r ≠ r → a.core.log r <+: a.core.log (primaryOf a.core r) →
-      LeaseStep m P a (.ack r) (recvAck a r a.core)
+      InstantLeaseStep m P a (.ack r) (recvAck a r a.core)
+  /-- A node learns the latest configuration. -/
+  | learn (a n) : (hStale : ¬ KnowsLatest a.core n) → InstantLeaseStep m P a (.learn n) (leaseLearn a n)
+  /-- Demotion (design §4 and §5): the primary waits until the replica's read lease
+  must have expired, measured from the last acknowledgement it received from it, and,
+  for a replica of the configuration its takeover replaced, until one read lease plus
+  the margin after that takeover. -/
+  | demote (a p r) : (hThinksPrimary : ThinksPrimary a.core p) → (hKnowsLatest : KnowsLatest a.core p) → (hEligible : a.core.cfg.eligible r = true) →
+      GrantorOver P a.now (a.ackReceived p r) P.readDur →
+      (∀ T, a.primarySince p = some T → a.oldEligible p r = true →
+        T + P.readDur + P.margin ≤ a.now + P.drift) →
+      InstantLeaseStep m P a (.demote p r) (withCore a (makeIneligible a.core p r))
+  /-- Takeover: the replica waits until the primary's lease must have expired, measured
+  from the last traffic it received from the primary. -/
+  | takeover (a n) : (hKnowsLatest : KnowsLatest a.core n) → (hEligible : a.core.cfg.eligible n = true) → (hNotPrimary : n ≠ a.core.cfg.primary) →
+      a.core.cfg.incarnation n = a.core.incarnation n →
+      a.primaryTraffic n + P.primDur ≤ a.now + P.drift →
+      InstantLeaseStep m P a (.takeover n) (leaseTakeover a n)
+  /-- A full resync. -/
+  | resync (a r) : primaryOf a.core r ≠ r → ¬ (a.core.log r <+: a.core.log (primaryOf a.core r)) →
+      a.core.sync (primaryOf a.core r) r = false → (a.core.localCfg (primaryOf a.core r)).eligible r = false →
+      InstantLeaseStep m P a (.resync r) (leaseResync a r)
+  /-- The restarts, each clearing the node's lease state. -/
+  | restartEmpty (a n) : (hKnowsLatest : KnowsLatest a.core n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      InstantLeaseStep m P a (.restartEmpty n) (leaseRestart a n (restartEmpty a.core n))
+  | restartKeep (a n) : (hKnowsLatest : KnowsLatest a.core n) →
+      InstantLeaseStep m P a (.restartKeep n) (leaseRestart a n (restartKeep a.core n))
+  | restartPartialKeep (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hCoversAcks : a.core.ackHigh n ≤ k) →
+      InstantLeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialKeep a.core n k))
+  | restartPartialFresh (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) →
+      (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      InstantLeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialFresh a.core n k))
+
+/-- The step relation. `m` is `min-sync-replicas`, `P` the lease parameters. Lease
+messages go through `net`: a send adds one, a delivery takes any current one, in any
+order, at any later time, and a drop loses one. -/
+inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseAction Node → LeaseState Node → Prop
+  /-- Real time advances. -/
+  | tick (a) : LeaseStep m P a .tick (tick a)
+  /-- A replication action whose lease effects, if any, travel as messages: AppendWrite,
+  Replicate, Ack, Commit, AddToSyncSet, RemoveFromSyncSet, MakeEligible, with their
+  guards. -/
+  | core (a μ c) : Step m a.core μ c → μ.isCore = true → LeaseStep m P a (.core μ) (withCore a c)
+  /-- `p` sends `REPLCONF COMMIT` to a replica that follows it: its committed offset, no echo. -/
+  | sendData (a p r) : (hNotSelf : p ≠ r) → (hFollows : primaryOf a.core r = p) →
+      LeaseStep m P a (.sendData p r)
+        (send a (.data p r (a.gen p) (a.gen r) a.now (a.core.commit p) none))
+  /-- `p` sends `REPLCONF COMMIT` echoing `r`'s latest acknowledgement, renewing its read
+  lease. The grant is checked when it is sent. -/
+  | sendGrant (a p r) : (hNotSelf : p ≠ r) → (hFollows : primaryOf a.core r = p) →
+      (hThinksPrimary : ThinksPrimary a.core p) → (hMayGrant : MayGrant P a p r) →
+      LeaseStep m P a (.sendData p r)
+        (send a (.data p r (a.gen p) (a.gen r) a.now (a.core.commit p) (a.ackEcho p r)))
+  /-- A replica acknowledges to its primary the data it last received. -/
+  | sendAck (a r) : (hNotSelf : primaryOf a.core r ≠ r) →
+      LeaseStep m P a (.sendAck r)
+        (send a (.ack r (primaryOf a.core r) (a.gen r) (a.gen (primaryOf a.core r)) a.now (a.dataSent r)))
+  /-- A current `REPLCONF COMMIT` reaches a replica that still follows its sender and
+  whose log is a prefix of the sender's. -/
+  | deliverData (a p r gs gd t c e) : (hIn : Msg.data p r gs gd t c e ∈ a.net) →
+      (hCurrent : (Msg.data p r gs gd t c e).Current a) → (hFollows : primaryOf a.core r = p) →
+      (hPrefix : a.core.log r <+: a.core.log p) →
+      LeaseStep m P a (.deliver (.data p r gs gd t c e)) (deliverData a (.data p r gs gd t c e) r t c e)
+  /-- A current acknowledgement reaches the primary it was sent to. -/
+  | deliverAck (a r p gs gd t d) : (hIn : Msg.ack r p gs gd t d ∈ a.net) →
+      (hCurrent : (Msg.ack r p gs gd t d).Current a) →
+      LeaseStep m P a (.deliver (.ack r p gs gd t d)) (deliverAck a (.ack r p gs gd t d) r p t d)
+  /-- A message is lost. -/
+  | drop (a msg) : (hIn : msg ∈ a.net) → LeaseStep m P a (.drop msg) (dropMsg a msg)
   /-- A node learns the latest configuration. -/
   | learn (a n) : (hStale : ¬ KnowsLatest a.core n) → LeaseStep m P a (.learn n) (leaseLearn a n)
   /-- Demotion (design §4 and §5): the primary waits until the replica's read lease
@@ -292,7 +465,7 @@ inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActio
   | resync (a r) : primaryOf a.core r ≠ r → ¬ (a.core.log r <+: a.core.log (primaryOf a.core r)) →
       a.core.sync (primaryOf a.core r) r = false → (a.core.localCfg (primaryOf a.core r)).eligible r = false →
       LeaseStep m P a (.resync r) (leaseResync a r)
-  /-- The restarts, each clearing the node's lease state. -/
+  /-- The restarts, each clearing the node's lease state and closing its connections. -/
   | restartEmpty (a n) : (hKnowsLatest : KnowsLatest a.core n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       LeaseStep m P a (.restartEmpty n) (leaseRestart a n (restartEmpty a.core n))
   | restartKeep (a n) : (hKnowsLatest : KnowsLatest a.core n) →
@@ -306,6 +479,10 @@ inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActio
 /-- The lease layer as a labelled transition system. -/
 def leaseTransitionSystem (m : Nat) (P : LeaseParams) : LTS (LeaseState Node) (LeaseAction Node) where
   Tr := LeaseStep m P
+
+/-- The instant lease layer as a labelled transition system. -/
+def instantTransitionSystem (m : Nat) (P : LeaseParams) : LTS (LeaseState Node) (LeaseAction Node) where
+  Tr := InstantLeaseStep m P
 
 /-- The states reachable from `leaseInit i`. -/
 def LeaseReachable (m : Nat) (P : LeaseParams) (i : Node) (a : LeaseState Node) : Prop :=

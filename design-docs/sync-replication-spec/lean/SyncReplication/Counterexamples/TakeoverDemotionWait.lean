@@ -9,7 +9,7 @@ configuration may still hold a read lease granted by the old primary. The model'
 takeover therefore records which replicas were eligible before (`oldEligible`) and
 the demotion guard waits one read lease plus the margin after the takeover for those.
 
-`LeaseStepTakeoverNoDemotionWait` is `LeaseStep` plus a takeover that marks no replica
+`LeaseStepTakeoverNoDemotionWait` is `InstantLeaseStep` plus a takeover that marks no replica
 as old, so no wait follows it. The run uses `P3` (primary lease 6, read lease 3, drift
 1, margin 2), within the design's duration rule: with a read lease of 2 (`P0`) a lease
 granted at the last moment the old primary may grant has expired by the earliest
@@ -28,12 +28,12 @@ replaced configuration, so no demotion wait follows the takeover. -/
 def leaseTakeoverWithoutDemotionWait (a : LeaseState N) (n : N) : LeaseState N :=
   { leaseTakeover a n with oldEligible := update a.oldEligible n (fun _ => false) }
 
-/-- `LeaseStep`, plus a takeover without the demotion wait. -/
+/-- `InstantLeaseStep`, plus a takeover without the demotion wait. -/
 inductive LeaseStepTakeoverNoDemotionWait (m : Nat) (P : LeaseParams) :
     LeaseState N → LeaseAction N → LeaseState N → Prop
   /-- Every step of the lease layer. -/
-  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepTakeoverNoDemotionWait m P a μ a'
-  /-- Takeover, with every guard of `LeaseStep.takeover`, arming no demotion wait. -/
+  | step {a μ a'} : InstantLeaseStep m P a μ a' → LeaseStepTakeoverNoDemotionWait m P a μ a'
+  /-- Takeover, with every guard of `InstantLeaseStep.takeover`, arming no demotion wait. -/
   | takeover (a : LeaseState N) (n : N) : KnowsLatest a.core n → a.core.cfg.eligible n = true →
       n ≠ a.core.cfg.primary → a.core.cfg.incarnation n = a.core.incarnation n →
       a.primaryTraffic n + P.primDur ≤ a.now + P.drift →
@@ -69,32 +69,32 @@ theorem takeoverNoDemotionWait_run : (leaseTransitionSystemTakeoverNoDemotionWai
      .learn 1, .learn 2, .heartbeat 1, .ack 1, .heartbeat 2, .ack 2,
      .tick, .tick, .tick, .tick, .heartbeat 2, .ack 2, .heartbeat 2, .tick,
      .takeover 1, .demote 1 2, .core (.append 1), .core (.commit 1)] lt22 :=
-  .stepL (.step (LeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li2 _ _ (Step.addToSyncSet li2.core 0 2 (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core li2 _ _ (Step.addToSyncSet li2.core 0 2 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li3 _ _ (Step.makeEligible li3.core 0 2 (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core li3 _ _ (Step.makeEligible li3.core 0 2 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.learn li4 1 (by decide))) <|
-  .stepL (.step (LeaseStep.learn lt5 2 (by decide))) <|
-  .stepL (.step (LeaseStep.heartbeat lt6 1 (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.ackRenew lt7 1 (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.heartbeat lt8 2 (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.ackRenew lt9 2 (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.tick lt10)) <| .stepL (.step (LeaseStep.tick lt11)) <|
-  .stepL (.step (LeaseStep.tick lt12)) <| .stepL (.step (LeaseStep.tick lt13)) <|
-  .stepL (.step (LeaseStep.heartbeat lt14 2 (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.ackRenew lt15 2 (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.heartbeatGrant lt16 2 (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.tick lt17)) <|
+  .stepL (.step (InstantLeaseStep.learn li4 1 (by decide))) <|
+  .stepL (.step (InstantLeaseStep.learn lt5 2 (by decide))) <|
+  .stepL (.step (InstantLeaseStep.heartbeat lt6 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lt7 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.heartbeat lt8 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lt9 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.tick lt10)) <| .stepL (.step (InstantLeaseStep.tick lt11)) <|
+  .stepL (.step (InstantLeaseStep.tick lt12)) <| .stepL (.step (InstantLeaseStep.tick lt13)) <|
+  .stepL (.step (InstantLeaseStep.heartbeat lt14 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lt15 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.heartbeatGrant lt16 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.tick lt17)) <|
   .stepL (LeaseStepTakeoverNoDemotionWait.takeover lt18 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) <|
-  .stepL (.step (LeaseStep.demote lt19 1 2 (by decide) (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.demote lt19 1 2 (by decide) (by decide) (by decide) (by decide)
     (by decide))) <|
-  .stepL (.step (LeaseStep.core lt20 _ _ (Step.append lt20.core 1 (by decide) (writable_zero _ _)) rfl)) <|
-  .stepL (.step (LeaseStep.core lt21 _ _ (Step.commit lt21.core 1 (by decide) (writable_zero _ _)
+  .stepL (.step (InstantLeaseStep.core lt20 _ _ (Step.append lt20.core 1 (by decide) (writable_zero _ _)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core lt21 _ _ (Step.commit lt21.core 1 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .refl
 

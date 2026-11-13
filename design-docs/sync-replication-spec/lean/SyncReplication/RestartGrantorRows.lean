@@ -1,4 +1,4 @@
-import SyncReplication.LeaseInvariant
+import SyncReplication.InstantLeases
 
 /-!
 # A restart need not clear the node's grantor rows
@@ -64,10 +64,10 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
     (hkl : KnowsLatest a.core n)
     (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
     (hinc : ∀ x, x ≠ n → c.incarnation x = a.core.incarnation x)
-    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hhist : c.hist = a.core.hist) :
+    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hhist : c.hist = a.core.hist)
+    (hcommit : ∀ x, x ≠ n → c.commit x = a.core.commit x) :
     LeaseInvariant P (leaseRestartKeepGrantorRows a n c) := by
   have hPT := primaryTraffic_bump h n
-  obtain ⟨hCV, hCH⟩ := committedView_reset h n hlog hhist
   have hPS : ∀ p T, update a.primarySince n (some a.now) p = some T → T ≤ a.now := by
     intro q T hT; by_cases e : q = n
     · subst e; rw [update_self] at hT; cases hT; exact Nat.le_refl _
@@ -77,11 +77,28 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
     intro q x T b hT hb; by_cases e : q = n
     · subst e; right; rw [update_self]
     · rw [update_of_ne _ _ e] at hT; rw [update_of_ne _ _ e]; exact h.primarySinceAck q x T b hT hb
+  obtain ⟨hCV, hCH⟩ := committedView_reset h n hlog hhist
+  obtain ⟨_, hcb, hgle⟩ := bump_facts h (a' := leaseRestartKeepGrantorRows a n c) (n := n) rfl rfl
+  have hLS : ∀ r x, LeaseStart (leaseRestartKeepGrantorRows a n c) r x → r ≠ n ∧ LeaseStart a r x := by
+    intro r x hx
+    rcases hx with hx | ⟨msg, hm, hc, hd, he⟩
+    · obtain ⟨hrn, hx⟩ := update_none_some _ _ _ hx; exact ⟨hrn, Or.inl hx⟩
+    · obtain ⟨hc', _, hdn⟩ := hcb msg hm hc
+      exact ⟨hd ▸ hdn, Or.inr ⟨msg, hm, hc', hd, he⟩⟩
+  have hPLS : ∀ p r x, PrimStart (leaseRestartKeepGrantorRows a n c) p r x → PrimStart a p r x := by
+    intro p r x hx
+    rcases hx with hx | ⟨msg, hm, hc, hd, hs, he⟩
+    · exact Or.inl hx
+    · exact Or.inr ⟨msg, hm, (hcb msg hm hc).1, hd, hs, he⟩
+  obtain ⟨hS1, hS2, hS3, hS4⟩ := msgs_frame h (a' := leaseRestartKeepGrantorRows a n c) (Nat.le_refl _) (fun _ hm => hm)
+    (fun msg hm hc => (hcb msg hm hc).1) hgle
+    (fun msg hm hc => (hcommit _ (hcb msg hm hc).2.1).ge)
+    (fun msg _ _ => congrArg (fun f => (f msg.dst).primary) hlocalCfg)
   exact {
   core := hc
   primaryTrafficLe := fun x => (hPT x).2
   ackReceivedLe := h.ackReceivedLe, primarySinceLe := hPS, echoLe := h.echoLe, primarySinceAck := hPA
-  primaryLeaseLe := fun q x v hv => Nat.le_trans (h.primaryLeaseLe q x v hv) (hPT x).1
+  primaryLeaseLe := fun q x v hv => Nat.le_trans (h.primaryLeaseLe q x v (hPLS q x v hv)) (hPT x).1
   dataSentLe := by
     intro x; show update a.dataSent n a.now x ≤ update a.primaryTraffic n a.now x
     unfold update; split_ifs
@@ -93,11 +110,12 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
     have hqn : q ≠ n := by
       intro e; subst e; change (c.localCfg q).epoch < c.cfg.epoch at hv
       rw [hlocalCfg, hcfg] at hv; unfold KnowsLatest at hkl; omega
-    exact deposed_frame h (hcfg := hcfg) (hlocalCfg := hlocalCfg)
-      ((thinksPrimary_congr hlocalCfg (hinc q hqn)).1 hq) hv
+    obtain ⟨t, h1, h2, h3, h4⟩ :=
+      deposed_frame h (hcfg := hcfg) (hlocalCfg := hlocalCfg) ((thinksPrimary_congr hlocalCfg (hinc q hqn)).1 hq) hv
+    exact ⟨t, h1, h2, h3, fun x hx => h4 x (hPLS q t x hx)⟩
   leaseBound := by
     intro x v hx
-    obtain ⟨hxn, hx⟩ := update_none_some _ _ _ hx
+    obtain ⟨hxn, hx⟩ := hLS x v hx
     show (∃ b, a.ackReceived c.cfg.primary x = some b ∧ v ≤ b) ∨
       (∃ T, update a.primarySince n (some a.now) c.cfg.primary = some T ∧ v ≤ T ∧
         (update a.oldEligible n (fun _ => true) c.cfg.primary x = true ∨
@@ -106,24 +124,20 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
     by_cases hpn : a.core.cfg.primary = n
     · -- the primary restarted: every remaining lease is bounded by its new primaryship.
       rw [hpn, update_self, update_self]
-      right; exact ⟨a.now, rfl, h.readLeaseLe x v hx, Or.inl rfl⟩
+      right; exact ⟨a.now, rfl, h.leaseStartLe x v hx, Or.inl rfl⟩
     · rw [update_of_ne _ _ hpn, update_of_ne _ _ hpn]; exact h.leaseBound x v hx
   leaseAuth := by
-    intro x hnp hv
-    change HolderValid P a.now (update a.readLease n none x) P.readDur at hv
-    by_cases ex : x = n
-    · subst ex; rw [update_self] at hv; exact hv.elim
-    · rw [update_of_ne _ _ ex] at hv
-      exact (isAuthoritative_congr hcfg (hinc x ex)).2
-        (h.leaseAuth x (fun hp => hnp ((thinksPrimary_congr hlocalCfg (hinc x ex)).2 hp)) hv)
+    intro x v hx hnp hv
+    obtain ⟨ex, hx⟩ := hLS x v hx
+    exact (isAuthoritative_congr hcfg (hinc x ex)).2
+      (h.leaseAuth x v hx (fun hp => hnp ((thinksPrimary_congr hlocalCfg (hinc x ex)).2 hp)) hv)
   selfPrimNoLease := by
-    intro q hq
-    show update a.readLease n none q = none
-    unfold update; split_ifs with e
-    · rfl
-    · change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq
+    intro q hq v hx
+    obtain ⟨_, hx⟩ := hLS q v hx
+    change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := hCV
-  committedViewHist := hCH }
+  committedViewHist := hCH
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
 
 /-- Every step of the variant preserves the lease invariant. -/
 theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}
@@ -134,16 +148,19 @@ theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift �
   | restartEmpty n hkl hsurv =>
     exact leaseInvariant_restartKeepGrantorRows h (invariant_restartEmpty h.core n hkl hsurv) hkl rfl rfl
       (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e) rfl
+      (fun _ e => restartEmpty_commit_other e)
   | restartKeep n hkl =>
     exact leaseInvariant_restartKeepGrantorRows h (invariant_restartKeep h.core n hkl) hkl rfl rfl
-      (fun _ _ => rfl) (fun _ _ => rfl) rfl
+      (fun _ _ => rfl) (fun _ _ => rfl) rfl (fun _ e => restartKeep_commit_other e)
   | restartPartialKeep n k hkl hk hkeep =>
     exact leaseInvariant_restartKeepGrantorRows h (invariant_restartPartialKeep h.core n k hkl hk hkeep)
       hkl rfl rfl (fun _ _ => rfl) (fun _ e => restartPartialKeep_log_other e) rfl
+      (fun _ e => restartKeep_commit_other e)
   | restartPartialFresh n k hkl hk hfresh hsurv =>
     exact leaseInvariant_restartKeepGrantorRows h
       (invariant_restartPartialFresh h.core n k hkl hsurv hk hfresh) hkl rfl rfl
       (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e) rfl
+      (fun _ e => restartEmpty_commit_other e)
 
 /-- **Clearing the grantor rows at a restart is not needed for `NoStaleRead`.** With
 `margin ≥ 2 · drift`, every state reachable when restarts keep the restarted node's

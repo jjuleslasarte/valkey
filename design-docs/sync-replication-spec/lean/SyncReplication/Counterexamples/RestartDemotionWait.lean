@@ -9,7 +9,7 @@ every replica. The model's restart therefore starts a new primaryship at `now` a
 marks every replica as old (`oldEligible n := fun _ => true`), so the primary waits one
 read lease plus the margin before demoting anyone.
 
-`LeaseStepRestartNoDemotionWait` is `LeaseStep` plus RestartKeep that does not arm
+`LeaseStepRestartNoDemotionWait` is `InstantLeaseStep` plus RestartKeep that does not arm
 that wait: it marks no replica as old. The run, at `P0` and `min-sync-replicas = 0`: the
 shared prefix and one echo, so n1 holds a read lease from n0 (as in
 `replCanRead_reachable`); n0 restarts with its data, demotes n1 at once, writes and
@@ -25,11 +25,11 @@ configuration, so no demotion wait follows the restart. -/
 def leaseRestartWithoutDemotionWait (a : LeaseState N) (n : N) (c : State N) : LeaseState N :=
   { leaseRestart a n c with oldEligible := update a.oldEligible n (fun _ => false) }
 
-/-- `LeaseStep`, plus RestartKeep without the demotion wait. -/
+/-- `InstantLeaseStep`, plus RestartKeep without the demotion wait. -/
 inductive LeaseStepRestartNoDemotionWait (m : Nat) (P : LeaseParams) :
     LeaseState N → LeaseAction N → LeaseState N → Prop
   /-- Every step of the lease layer. -/
-  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepRestartNoDemotionWait m P a μ a'
+  | step {a μ a'} : InstantLeaseStep m P a μ a' → LeaseStepRestartNoDemotionWait m P a μ a'
   /-- RestartKeep, with its guard, arming no demotion wait. -/
   | restartKeep (a : LeaseState N) (n : N) : KnowsLatest a.core n →
       LeaseStepRestartNoDemotionWait m P a (.restartKeep n)
@@ -51,12 +51,12 @@ theorem restartNoDemotionWait_run : (leaseTransitionSystemRestartNoDemotionWait 
      .heartbeat 1, .restartKeep 0, .demote 0 1, .core (.append 0), .core (.commit 0)] lp10 :=
   LTS.MTr.comp (leaseTransitionSystemRestartNoDemotionWait 0 P0)
     (leaseMtr_of_step LeaseStepRestartNoDemotionWait.step (leases_prefix P0)) <|
-  .stepL (.step (LeaseStep.heartbeatGrant l5 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.heartbeatGrant l5 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (LeaseStepRestartNoDemotionWait.restartKeep l6 0 (by decide)) <|
-  .stepL (.step (LeaseStep.demote lp7 0 1 (by decide) (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.demote lp7 0 1 (by decide) (by decide) (by decide) (by decide)
     (by decide))) <|
-  .stepL (.step (LeaseStep.core lp8 _ _ (Step.append lp8.core 0 (by decide) (writable_zero _ _)) rfl)) <|
-  .stepL (.step (LeaseStep.core lp9 _ _ (Step.commit lp9.core 0 (by decide) (writable_zero _ _)
+  .stepL (.step (InstantLeaseStep.core lp8 _ _ (Step.append lp8.core 0 (by decide) (writable_zero _ _)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core lp9 _ _ (Step.commit lp9.core 0 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .refl
 

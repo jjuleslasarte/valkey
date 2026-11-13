@@ -9,7 +9,7 @@ without its data, it would come back empty, with committed view 0, still believi
 its lease valid: nothing uncommitted, so it may serve a linearizable read of an empty
 log.
 
-`LeaseStepRestartKeepsReadLease` is `LeaseStep` plus RestartEmpty that keeps the
+`LeaseStepRestartKeepsReadLease` is `InstantLeaseStep` plus RestartEmpty that keeps the
 node's read lease. The run, at `P0` and `min-sync-replicas = 0`: the shared prefix,
 then n0 writes, n1 replicates and acknowledges, n0 commits (the history is `[1]`),
 echoes n1's acknowledgement (n1's read lease starts), and n1 restarts empty with no
@@ -24,11 +24,11 @@ namespace SyncReplication
 def leaseRestartKeepingReadLease (a : LeaseState N) (n : N) (c : State N) : LeaseState N :=
   { leaseRestart a n c with readLease := a.readLease }
 
-/-- `LeaseStep`, plus RestartEmpty that keeps the restarted node's read lease. -/
+/-- `InstantLeaseStep`, plus RestartEmpty that keeps the restarted node's read lease. -/
 inductive LeaseStepRestartKeepsReadLease (m : Nat) (P : LeaseParams) :
     LeaseState N → LeaseAction N → LeaseState N → Prop
   /-- Every step of the lease layer. -/
-  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepRestartKeepsReadLease m P a μ a'
+  | step {a μ a'} : InstantLeaseStep m P a μ a' → LeaseStepRestartKeepsReadLease m P a μ a'
   /-- RestartEmpty, with its guards, leaving `readLease n` as it was. -/
   | restartEmpty (a : LeaseState N) (n : N) : KnowsLatest a.core n →
       (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
@@ -52,12 +52,12 @@ theorem restartKeepsReadLease_run : (leaseTransitionSystemRestartKeepsReadLease 
      .core (.append 0), .replicate 1, .ack 1, .core (.commit 0), .heartbeat 1, .restartEmpty 1] lk11 :=
   LTS.MTr.comp (leaseTransitionSystemRestartKeepsReadLease 0 P0)
     (leaseMtr_of_step LeaseStepRestartKeepsReadLease.step (leases_prefix P0)) <|
-  .stepL (.step (LeaseStep.core l5 _ _ (Step.append l5.core 0 (by decide) (writable_zero _ _)) rfl)) <|
-  .stepL (.step (LeaseStep.replicate lk6 1 (by decide) (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.ack lk7 1 (by decide) (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.core lk8 _ _ (Step.commit lk8.core 0 (by decide) (writable_zero _ _)
+  .stepL (.step (InstantLeaseStep.core l5 _ _ (Step.append l5.core 0 (by decide) (writable_zero _ _)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.replicate lk6 1 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ack lk7 1 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.core lk8 _ _ (Step.commit lk8.core 0 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.heartbeatGrant lk9 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.heartbeatGrant lk9 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (LeaseStepRestartKeepsReadLease.restartEmpty lk10 1 (by decide) ⟨0, by decide, by decide⟩) <|
   .refl
 

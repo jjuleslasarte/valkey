@@ -8,7 +8,7 @@ replica it knows of (`PrimLeaseValid`): a deposed primary stops granting (design
 "Leases across a failover"). A deposed primary that has not learned of the takeover
 still thinks it is primary, and a replica that has not learned of it still follows it.
 
-`LeaseStepGrantWithoutPrimaryLease` is `LeaseStep` plus an echo that checks every part
+`LeaseStepGrantWithoutPrimaryLease` is `InstantLeaseStep` plus an echo that checks every part
 of `MayGrant` except `PrimLeaseValid`. The run, at `P0` and `min-sync-replicas = 0`:
 n0 promotes n1 and n2; n1 learns the configuration, waits out n0's lease and takes over;
 after its post-takeover wait it demotes n2, writes and commits alone. n0 and n2 have
@@ -20,12 +20,12 @@ open Cslib
 
 namespace SyncReplication
 
-/-- `LeaseStep`, plus an echo from a node that need not hold its primary lease. -/
+/-- `InstantLeaseStep`, plus an echo from a node that need not hold its primary lease. -/
 inductive LeaseStepGrantWithoutPrimaryLease (m : Nat) (P : LeaseParams) :
     LeaseState N → LeaseAction N → LeaseState N → Prop
   /-- Every step of the lease layer. -/
-  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepGrantWithoutPrimaryLease m P a μ a'
-  /-- The echo with every guard of `LeaseStep.heartbeatGrant` except `PrimLeaseValid`:
+  | step {a μ a'} : InstantLeaseStep m P a μ a' → LeaseStepGrantWithoutPrimaryLease m P a μ a'
+  /-- The echo with every guard of `InstantLeaseStep.heartbeatGrant` except `PrimLeaseValid`:
   `r` is a sync member, eligible with a matching incarnation, in its primary's
   configuration. -/
   | heartbeatGrant (a : LeaseState N) (r : N) : primaryOf a.core r ≠ r →
@@ -60,26 +60,26 @@ theorem grantWithoutPrimaryLease_run : (leaseTransitionSystemGrantWithoutPrimary
     [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .core (.addToSyncSet 0 2), .core (.makeEligible 0 2),
      .learn 1, .tick, .tick, .tick, .tick, .takeover 1, .tick, .tick, .tick, .demote 1 2,
      .core (.append 1), .core (.commit 1), .ack 2, .heartbeat 2] lq18 :=
-  .stepL (.step (LeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li2 _ _ (Step.addToSyncSet li2.core 0 2 (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core li2 _ _ (Step.addToSyncSet li2.core 0 2 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core li3 _ _ (Step.makeEligible li3.core 0 2 (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core li3 _ _ (Step.makeEligible li3.core 0 2 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.learn li4 1 (by decide))) <|
-  .stepL (.step (LeaseStep.tick lq5)) <| .stepL (.step (LeaseStep.tick lq6)) <|
-  .stepL (.step (LeaseStep.tick lq7)) <| .stepL (.step (LeaseStep.tick lq8)) <|
-  .stepL (.step (LeaseStep.takeover lq9 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.tick lq10)) <| .stepL (.step (LeaseStep.tick lq11)) <|
-  .stepL (.step (LeaseStep.tick lq12)) <|
-  .stepL (.step (LeaseStep.demote lq13 1 2 (by decide) (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.learn li4 1 (by decide))) <|
+  .stepL (.step (InstantLeaseStep.tick lq5)) <| .stepL (.step (InstantLeaseStep.tick lq6)) <|
+  .stepL (.step (InstantLeaseStep.tick lq7)) <| .stepL (.step (InstantLeaseStep.tick lq8)) <|
+  .stepL (.step (InstantLeaseStep.takeover lq9 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.tick lq10)) <| .stepL (.step (InstantLeaseStep.tick lq11)) <|
+  .stepL (.step (InstantLeaseStep.tick lq12)) <|
+  .stepL (.step (InstantLeaseStep.demote lq13 1 2 (by decide) (by decide) (by decide) (by decide)
     (by decide))) <|
-  .stepL (.step (LeaseStep.core lq14 _ _ (Step.append lq14.core 1 (by decide) (writable_zero _ _)) rfl)) <|
-  .stepL (.step (LeaseStep.core lq15 _ _ (Step.commit lq15.core 1 (by decide) (writable_zero _ _)
+  .stepL (.step (InstantLeaseStep.core lq14 _ _ (Step.append lq14.core 1 (by decide) (writable_zero _ _)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core lq15 _ _ (Step.commit lq15.core 1 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.ackRenew lq16 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lq16 2 (by decide) (by decide))) <|
   .stepL (LeaseStepGrantWithoutPrimaryLease.heartbeatGrant lq17 2 (by decide) (by decide) (by decide)
     (by decide) (by decide) (by decide)) <|
   .refl

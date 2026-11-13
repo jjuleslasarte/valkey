@@ -12,6 +12,7 @@ import SyncReplication.Counterexamples.CatchUp
 import SyncReplication.Counterexamples.ResyncEligible
 import SyncReplication.Counterexamples.ResyncCounted
 import SyncReplication.LeaseInvariant
+import SyncReplication.InstantLeases
 import SyncReplication.RestartGrantorRows
 import SyncReplication.Counterexamples.Leases
 import SyncReplication.Counterexamples.RestartReadLease

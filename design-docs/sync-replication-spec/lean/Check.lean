@@ -33,3 +33,5 @@ import SyncReplication
 #print axioms SyncReplication.takeoverNoDemotionWait_stale
 #print axioms SyncReplication.grantWithoutPrimaryLease_stale
 #print axioms SyncReplication.noStaleRead_keepGrantorRows
+#print axioms SyncReplication.instant_simulates
+#print axioms SyncReplication.instantReachable_leaseReachable

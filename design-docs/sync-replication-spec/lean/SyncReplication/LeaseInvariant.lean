@@ -17,7 +17,8 @@ eligible in `p`'s configuration. `t` waited until `p`'s lease must have expired,
 measured from the last traffic `t` received from `p`, and `p`'s lease from `t` started
 no later than that traffic. `t` now follows someone else, so its acknowledgements never
 reach `p` again and the lease is never renewed: it is over for good (`deposed`), and
-`p` cannot hold a valid lease from every eligible replica it knows. The current primary, by the
+`p` cannot hold a valid lease from every eligible replica it knows. An acknowledgement
+from `t` still in flight was sent on a connection the takeover closed. The current primary, by the
 replication invariant, has the whole committed history below its committed offset or
 its catch-up point; with nothing uncommitted, its log is the history.
 
@@ -46,13 +47,14 @@ which `leaseAuth` needs to survive a takeover or a Learn.
 ## Reading the preservation proofs
 
 Most actions move few fields. The frame lemmas say which conjuncts survive which kind
-of change: `leaseInvariant_frame` for a replication step that moves no lease state
-(data messages, resync, the plain actions), `deposed_frame` and `deposed_cfgBump` for
+of change: `leaseInvariant_frame` for a step that moves no lease state (resync, a
+dropped message, the plain actions), `msgs_frame` for the conjuncts about messages in
+flight, `deposed_frame` and `deposed_cfgBump` for
 the deposed primary's witness, `cleared_rows` for a node whose lease rows are cleared
 (takeover, restart), `committedView_reset` for a node whose view starts over (resync,
 restart), `primaryTraffic_bump` for a node whose traffic timer restarts. Each
-preservation proof is then left with the conjuncts its action touches: the renewal of a
-read lease in `heartbeatGrant`, the deposed primary's new witness and the bound on
+preservation proof is then left with the conjuncts its action touches: the grant of a
+read lease in `sendGrant` and its arrival in `deliverData`, the deposed primary's new witness and the bound on
 existing read leases in `takeover`, the two demotion waits in `demote`.
 -/
 
@@ -100,6 +102,53 @@ theorem isAuthoritative_congr {s c : State Node} {x : Node} (hcfg : c.cfg = s.cf
     (hinc : c.incarnation x = s.incarnation x) : IsAuthoritative c x ↔ IsAuthoritative s x := by
   unfold IsAuthoritative; rw [hcfg, hinc]
 
+/-! ## Lease starts, held and in flight -/
+
+/-- `x` is the start of a read lease `r` holds, or of one that a current echo in flight
+to `r` would give it. -/
+def LeaseStart (a : LeaseState Node) (r : Node) (x : Nat) : Prop :=
+  a.readLease r = some x ∨ ∃ msg ∈ a.net, msg.Current a ∧ msg.dst = r ∧ msg.echo = some x
+
+/-- `x` is the start of the primary lease `p` holds from `r`, or of one that a current
+acknowledgement in flight from `r` to `p` would give it. -/
+def PrimStart (a : LeaseState Node) (p r : Node) (x : Nat) : Prop :=
+  a.primaryLease p r = some x ∨
+    ∃ msg ∈ a.net, msg.Current a ∧ msg.dst = p ∧ msg.src = r ∧ msg.ackStart = some x
+
+/-- A step that keeps or shrinks the read leases and the current messages keeps or
+shrinks the lease starts. -/
+theorem leaseStart_mono (a a' : LeaseState Node)
+    (hRL : ∀ r x, a'.readLease r = some x → a.readLease r = some x)
+    (hnet : ∀ msg ∈ a'.net, msg ∈ a.net ∧ (msg.Current a' → msg.Current a))
+    {r : Node} {x : Nat} (h : LeaseStart a' r x) : LeaseStart a r x := by
+  rcases h with h | ⟨msg, hm, hc, hd, he⟩
+  · exact Or.inl (hRL r x h)
+  · obtain ⟨hm', hc'⟩ := hnet msg hm; exact Or.inr ⟨msg, hm', hc' hc, hd, he⟩
+
+/-- The same for primary-lease starts. -/
+theorem primStart_mono (a a' : LeaseState Node)
+    (hPL : ∀ p r x, a'.primaryLease p r = some x → a.primaryLease p r = some x)
+    (hnet : ∀ msg ∈ a'.net, msg ∈ a.net ∧ (msg.Current a' → msg.Current a))
+    {p r : Node} {x : Nat} (h : PrimStart a' p r x) : PrimStart a p r x := by
+  rcases h with h | ⟨msg, hm, hc, hd, hs, he⟩
+  · exact Or.inl (hPL p r x h)
+  · obtain ⟨hm', hc'⟩ := hnet msg hm; exact Or.inr ⟨msg, hm', hc' hc, hd, hs, he⟩
+
+/-- After `n`'s connections close, a message still current was current before and has
+neither end at `n`. -/
+theorem current_of_bump {a a' : LeaseState Node} {n : Node} (hg : a'.gen = bumpGen a.gen n)
+    {msg : Msg Node} (hle : msg.gs ≤ a.gen msg.src ∧ msg.gd ≤ a.gen msg.dst) (hc : msg.Current a') :
+    msg.Current a ∧ msg.src ≠ n ∧ msg.dst ≠ n := by
+  unfold Msg.Current at *; rw [hg] at hc; unfold bumpGen at hc
+  obtain ⟨h1, h2⟩ := hc
+  obtain ⟨hl1, hl2⟩ := hle
+  have hs : msg.src ≠ n := by
+    intro e; rw [e, update_self] at h1; rw [e] at hl1; omega
+  have hd : msg.dst ≠ n := by
+    intro e; rw [e, update_self] at h2; rw [e] at hl2; omega
+  rw [update_of_ne _ _ hs] at h1; rw [update_of_ne _ _ hd] at h2
+  exact ⟨⟨h1, h2⟩, hs, hd⟩
+
 /-! ## The invariant -/
 
 /-- The inductive invariant of the lease layer. -/
@@ -112,8 +161,9 @@ structure LeaseInvariant (P : LeaseParams) (a : LeaseState Node) : Prop where
   primarySinceLe      : ∀ p T, a.primarySince p = some T → T ≤ a.now
   /-- The data a replica would acknowledge was sent no later than its last traffic. -/
   dataSentLe    : ∀ r, a.dataSent r ≤ a.primaryTraffic r
-  /-- A primary lease starts no later than the holder's last traffic to the grantor. -/
-  primaryLeaseLe       : ∀ p r x, a.primaryLease p r = some x → x ≤ a.primaryTraffic r
+  /-- A primary lease, held or in flight, starts no later than the grantor's last
+  traffic from its primary. -/
+  primaryLeaseLe       : ∀ p r x, PrimStart a p r x → x ≤ a.primaryTraffic r
   /-- The acknowledgement a primary would echo was sent no later than it was received. -/
   echoLe     : ∀ p r e, a.ackEcho p r = some e → ∃ b, a.ackReceived p r = some b ∧ e ≤ b
   /-- Every acknowledgement a primary holds arrived during its current primaryship, or
@@ -123,40 +173,56 @@ structure LeaseInvariant (P : LeaseParams) (a : LeaseState Node) : Prop where
   grantor rows (`RestartGrantorRows.lean`). -/
   primarySinceAck     : ∀ p r T b, a.primarySince p = some T → a.ackReceived p r = some b →
     T ≤ b ∨ a.oldEligible p r = true
-  /-- A deposed primary's lease from the replica that deposed it is over for good. That
-  replica is eligible in the deposed primary's configuration and follows someone else,
-  so its acknowledgements never reach the deposed primary again and the lease is never
-  renewed. -/
+  /-- A deposed primary's lease from the replica that deposed it is over for good, and so
+  is any such lease still in flight. That replica is eligible in the deposed primary's
+  configuration and follows someone else, so its acknowledgements never reach the
+  deposed primary again and the lease is never renewed. -/
   deposed    : ∀ p, ThinksPrimary a.core p → (a.core.localCfg p).epoch < a.core.cfg.epoch →
     ∃ t, t ≠ p ∧ (a.core.localCfg p).eligible t = true ∧ (a.core.localCfg t).primary ≠ p ∧
-      ∀ x, a.primaryLease p t = some x → x + P.primDur ≤ a.now + P.drift
-  /-- A read lease started no later than the current primary's last acknowledgement from
-  its holder, or no later than the current primary's takeover; in the latter case the
-  holder was eligible in the configuration the takeover replaced, or the lease has
-  already expired. -/
-  leaseBound : ∀ r x, a.readLease r = some x →
+      ∀ x, PrimStart a p t x → x + P.primDur ≤ a.now + P.drift
+  /-- A read lease, held or in flight, started no later than the current primary's last
+  acknowledgement from its holder, or no later than the current primary's takeover; in
+  the latter case the holder was eligible in the configuration the takeover replaced, or
+  the lease has already expired. -/
+  leaseBound : ∀ r x, LeaseStart a r x →
     (∃ b, a.ackReceived a.core.cfg.primary r = some b ∧ x ≤ b) ∨
     (∃ T, a.primarySince a.core.cfg.primary = some T ∧ x ≤ T ∧
       (a.oldEligible a.core.cfg.primary r = true ∨ ¬ HolderValid P a.now (some x) P.readDur))
-  /-- A replica with a valid read lease is authoritative. -/
-  leaseAuth  : ∀ r, ¬ ThinksPrimary a.core r → ReadLeaseValid P a r → IsAuthoritative a.core r
-  /-- A node whose configuration names it primary holds no read lease. Keeps a deposed
-  primary out of the read-lease holders, which `leaseAuth` needs across Takeover and
-  Learn. -/
-  selfPrimNoLease : ∀ p, (a.core.localCfg p).primary = p → a.readLease p = none
+  /-- A replica with a valid read lease, held or in flight, is authoritative. -/
+  leaseAuth  : ∀ r x, LeaseStart a r x → ¬ ThinksPrimary a.core r →
+    HolderValid P a.now (some x) P.readDur → IsAuthoritative a.core r
+  /-- A node whose configuration names it primary holds no read lease and has none in
+  flight. Keeps a deposed primary out of the read-lease holders, which `leaseAuth` needs
+  across Takeover and Learn. -/
+  selfPrimNoLease : ∀ p, (a.core.localCfg p).primary = p → ∀ x, ¬ LeaseStart a p x
   /-- A replica's committed view is within its log and is a committed prefix. -/
   committedViewLen   : ∀ r, a.committedView r ≤ (a.core.log r).length
   committedViewHist  : ∀ r, a.committedView r ≤ a.core.hist.length ∧ (a.core.log r).take (a.committedView r) <+: a.core.hist
+  /-- Every message in flight was sent in the past, by connections no newer than now's. -/
+  sentLe : ∀ msg ∈ a.net, msg.sent ≤ a.now
+  genLe : ∀ msg ∈ a.net, msg.gs ≤ a.gen msg.src ∧ msg.gd ≤ a.gen msg.dst
+  /-- A current `REPLCONF COMMIT` carries no more than its sender's committed offset: a
+  committed offset only goes down at a takeover, resync or restart, which closes the
+  connections. -/
+  commitLe : ∀ msg ∈ a.net, msg.Current a → ∀ c, msg.commitOf = some c → c ≤ a.core.commit msg.src
+  /-- A current `REPLCONF COMMIT` goes from a replica's primary to the replica. -/
+  follows : ∀ msg ∈ a.net, msg.Current a → msg.commitOf.isSome →
+    primaryOf a.core msg.dst = msg.src ∧ msg.src ≠ msg.dst
 
-/-- Every read lease started in the past. A lease is bounded by an acknowledgement time
-or a primaryship start (`leaseBound`), and both are in the past (`ackReceivedLe`,
-`primarySinceLe`). Formerly a conjunct of `LeaseInvariant`. -/
-theorem LeaseInvariant.readLeaseLe {P : LeaseParams} {a : LeaseState Node} (h : LeaseInvariant P a) :
-    ∀ r x, a.readLease r = some x → x ≤ a.now := by
+/-- Every read lease, held or in flight, started in the past. A lease is bounded by an
+acknowledgement time or a primaryship start (`leaseBound`), and both are in the past
+(`ackReceivedLe`, `primarySinceLe`). -/
+theorem LeaseInvariant.leaseStartLe {P : LeaseParams} {a : LeaseState Node} (h : LeaseInvariant P a) :
+    ∀ r x, LeaseStart a r x → x ≤ a.now := by
   intro r x hx
   rcases h.leaseBound r x hx with ⟨b, hb, hxb⟩ | ⟨T, hT, hxT, _⟩
   · exact hxb.trans (h.ackReceivedLe _ r b hb)
   · exact hxT.trans (h.primarySinceLe _ T hT)
+
+/-- The same, for a held read lease. -/
+theorem LeaseInvariant.readLeaseLe {P : LeaseParams} {a : LeaseState Node} (h : LeaseInvariant P a) :
+    ∀ r x, a.readLease r = some x → x ≤ a.now :=
+  fun r x hx => h.leaseStartLe r x (Or.inl hx)
 
 theorem leaseInvariant_init (P : LeaseParams) (i : Node) : LeaseInvariant P (leaseInit i) where
   core := invariant_init i
@@ -164,15 +230,31 @@ theorem leaseInvariant_init (P : LeaseParams) (i : Node) : LeaseInvariant P (lea
   ackReceivedLe := by intro _ _ _ h; simp [leaseInit] at h
   primarySinceLe := by intro _ _ h; simp [leaseInit] at h
   dataSentLe := fun _ => Nat.le_refl _
-  primaryLeaseLe := by intro _ _ _ h; simp [leaseInit] at h
+  primaryLeaseLe := by
+    intro _ _ _ h; rcases h with h | ⟨_, hm, _⟩
+    · simp [leaseInit] at h
+    · simp [leaseInit] at hm
   echoLe := by intro _ _ _ h; simp [leaseInit] at h
   primarySinceAck := by intro _ _ _ _ h; simp [leaseInit] at h
   deposed := by intro p _ hv; simp [leaseInit, init, initCfg] at hv
-  leaseBound := by intro _ _ h; simp [leaseInit] at h
-  leaseAuth := by intro r _ hv; simp [ReadLeaseValid, HolderValid, leaseInit] at hv
-  selfPrimNoLease := by intro _ _; rfl
+  leaseBound := by
+    intro _ _ h; rcases h with h | ⟨_, hm, _⟩
+    · simp [leaseInit] at h
+    · simp [leaseInit] at hm
+  leaseAuth := by
+    intro _ _ h; rcases h with h | ⟨_, hm, _⟩
+    · simp [leaseInit] at h
+    · simp [leaseInit] at hm
+  selfPrimNoLease := by
+    intro _ _ _ h; rcases h with h | ⟨_, hm, _⟩
+    · simp [leaseInit] at h
+    · simp [leaseInit] at hm
   committedViewLen := by intro _; simp [leaseInit]
   committedViewHist := by intro _; simp [leaseInit, init]
+  sentLe := by intro _ hm; simp [leaseInit] at hm
+  genLe := by intro _ hm; simp [leaseInit] at hm
+  commitLe := by intro _ hm; simp [leaseInit] at hm
+  follows := by intro _ hm; simp [leaseInit] at hm
 
 /-! ## The current primary is the only one that can hold its lease -/
 
@@ -188,7 +270,7 @@ theorem deposed_not_leaseValid {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin)
   split at this
   · exact this
   · rename_i x hx
-    have := hpl x hx
+    have := hpl x (Or.inl hx)
     -- `now + margin < x + primDur + drift` against `x + primDur ≤ now + drift`: needs
     -- `margin ≥ 2 · drift` (`hM`).
     omega
@@ -224,7 +306,11 @@ theorem leaseInvariant_noStaleRead {P : LeaseParams} (hM : 2 * P.drift ≤ P.mar
     rw [hc, List.take_length] at this
     rw [this, ← hc, he, List.take_length]
   · intro r ⟨hnp, hL, hv⟩
-    have hauth := h.leaseAuth r hnp hL
+    have hauth : IsAuthoritative a.core r := by
+      unfold ReadLeaseValid HolderValid at hL
+      cases hx : a.readLease r with
+      | none => rw [hx] at hL; exact hL.elim
+      | some x => rw [hx] at hL; exact h.leaseAuth r x (Or.inl hx) hnp hL
     have hholds := h.core.eligibleHoldsCommitted r hauth
     obtain ⟨_, hpre⟩ := h.committedViewHist r
     rw [hv, List.take_length] at hpre
@@ -269,10 +355,14 @@ theorem leaseInvariant_tick : LeaseInvariant P (tick a) where
       · exact Or.inl hold
       · right; show ¬ HolderValid P (a.now + 1) (some x) P.readDur
         exact fun hv => hold (holderValid_mono (Nat.le_succ _) hv)
-  leaseAuth := fun r hnp hv => h.leaseAuth r hnp (holderValid_mono (Nat.le_succ _) hv)
+  leaseAuth := fun r x hx hnp hv => h.leaseAuth r x hx hnp (holderValid_mono (Nat.le_succ _) hv)
   selfPrimNoLease := h.selfPrimNoLease
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
+  sentLe := fun msg hm => Nat.le_succ_of_le (h.sentLe msg hm)
+  genLe := h.genLe
+  commitLe := h.commitLe
+  follows := h.follows
 
 /-! ### Frames -/
 
@@ -280,7 +370,10 @@ theorem leaseInvariant_tick : LeaseInvariant P (tick a) where
 (`selfPrimNoLease`); in particular, no node that thinks it is primary does. -/
 theorem not_readLeaseValid_of_selfPrim {q : Node} (hq : (a.core.localCfg q).primary = q) :
     ¬ ReadLeaseValid P a q := by
-  unfold ReadLeaseValid HolderValid; rw [h.selfPrimNoLease q hq]; intro hv; exact hv
+  unfold ReadLeaseValid HolderValid
+  cases hx : a.readLease q with
+  | none => exact id
+  | some x => exact fun _ => h.selfPrimNoLease q hq x (Or.inl hx)
 
 /-- Setting node `n`'s last traffic to now moves no traffic time backwards and keeps
 every one in the past. -/
@@ -295,7 +388,7 @@ a deposed primary keeps its witness. -/
 theorem deposed_frame {c : State Node} (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
     {p : Node} (hp : ThinksPrimary a.core p) (hv : (c.localCfg p).epoch < c.cfg.epoch) :
     ∃ t, t ≠ p ∧ (c.localCfg p).eligible t = true ∧ (c.localCfg t).primary ≠ p ∧
-      ∀ x, a.primaryLease p t = some x → x + P.primDur ≤ a.now + P.drift := by
+      ∀ x, PrimStart a p t x → x + P.primDur ≤ a.now + P.drift := by
   rw [hlocalCfg]; rw [hlocalCfg, hcfg] at hv; exact h.deposed p hp hv
 
 /-- A configuration change by the current primary (MakeEligible, MakeIneligible) deposes
@@ -308,7 +401,7 @@ theorem deposed_cfgBump {c : State Node} {cfg' : Cfg Node} (hcfg : c.cfg = cfg')
     (htp : ∀ x, ThinksPrimary c x ↔ ThinksPrimary a.core x) {q : Node}
     (hq : ThinksPrimary c q) (hv : (c.localCfg q).epoch < c.cfg.epoch) :
     ∃ t, t ≠ q ∧ (c.localCfg q).eligible t = true ∧ (c.localCfg t).primary ≠ q ∧
-      ∀ x, a.primaryLease q t = some x → x + P.primDur ≤ a.now + P.drift := by
+      ∀ x, PrimStart a q t x → x + P.primDur ≤ a.now + P.drift := by
   have hq' := (htp q).1 hq
   have hqp : q ≠ a.core.cfg.primary := by
     intro e; rw [hlocalCfg, if_pos e, hcfg] at hv; exact Nat.lt_irrefl _ hv
@@ -329,10 +422,20 @@ state: the primary's new copy still names it, and no other copy changes. -/
 theorem selfPrimNoLease_cfgBump {c : State Node} {cfg' : Cfg Node}
     (hkp : a.core.localCfg a.core.cfg.primary = a.core.cfg)
     (hlocalCfg : ∀ x, c.localCfg x = if x = a.core.cfg.primary then cfg' else a.core.localCfg x)
-    {q : Node} (hq : (c.localCfg q).primary = q) : a.readLease q = none := by
+    {q : Node} (hq : (c.localCfg q).primary = q) : ∀ x, ¬ LeaseStart a q x := by
   rw [hlocalCfg] at hq; split_ifs at hq with e
   · subst e; exact h.selfPrimNoLease _ (by rw [hkp])
   · exact h.selfPrimNoLease q hq
+
+/-- The same configuration change keeps every node's primary in the configuration it knows. -/
+theorem primaryOf_cfgBump {c : State Node} {cfg' : Cfg Node}
+    (hkp : a.core.localCfg a.core.cfg.primary = a.core.cfg)
+    (hlocalCfg : ∀ x, c.localCfg x = if x = a.core.cfg.primary then cfg' else a.core.localCfg x)
+    (hprim : cfg'.primary = a.core.cfg.primary)
+    (x : Node) : primaryOf c x = primaryOf a.core x := by
+  unfold primaryOf; rw [hlocalCfg]; split_ifs with e
+  · subst e; rw [hprim, hkp]
+  · rfl
 
 /-- Resetting node `n`'s committed view to 0 (Resync, Restart) keeps the committed-view
 conjuncts whatever happened to `n`'s log, as long as the other logs and the history are
@@ -375,60 +478,98 @@ theorem cleared_rows {a' : LeaseState Node} (n : Node) (hnow : a'.now = a.now)
     obtain ⟨hqn, hb⟩ := update_row_some _ _ _ _ hb
     rw [update_of_ne _ _ hqn] at hT; rw [hOE q hqn]; exact h.primarySinceAck q x T b hT hb
 
+/-- The four conjuncts about messages in flight, after a step that keeps or shrinks the
+messages, closes no connection it then uses, and lowers no committed offset of a
+sender whose connections are still open. -/
+theorem msgs_frame {a' : LeaseState Node} (hnow : a.now ≤ a'.now)
+    (hNet : ∀ msg ∈ a'.net, msg ∈ a.net)
+    (hCur : ∀ msg ∈ a.net, msg.Current a' → msg.Current a)
+    (hGenLe : ∀ msg ∈ a.net, msg.gs ≤ a'.gen msg.src ∧ msg.gd ≤ a'.gen msg.dst)
+    (hCommit : ∀ msg ∈ a.net, msg.Current a' → a.core.commit msg.src ≤ a'.core.commit msg.src)
+    (hPrim : ∀ msg ∈ a.net, msg.Current a' → primaryOf a'.core msg.dst = primaryOf a.core msg.dst) :
+    (∀ msg ∈ a'.net, msg.sent ≤ a'.now) ∧
+    (∀ msg ∈ a'.net, msg.gs ≤ a'.gen msg.src ∧ msg.gd ≤ a'.gen msg.dst) ∧
+    (∀ msg ∈ a'.net, msg.Current a' → ∀ c, msg.commitOf = some c → c ≤ a'.core.commit msg.src) ∧
+    (∀ msg ∈ a'.net, msg.Current a' → msg.commitOf.isSome →
+      primaryOf a'.core msg.dst = msg.src ∧ msg.src ≠ msg.dst) := by
+  refine ⟨fun msg hm => Nat.le_trans (h.sentLe msg (hNet msg hm)) hnow,
+    fun msg hm => hGenLe msg (hNet msg hm), ?_, ?_⟩
+  · intro msg hm hc c hcm
+    have hm' := hNet msg hm
+    exact Nat.le_trans (h.commitLe msg hm' (hCur msg hm' hc) c hcm) (hCommit msg hm' hc)
+  · intro msg hm hc hd
+    have hm' := hNet msg hm
+    rw [hPrim msg hm' hc]; exact h.follows msg hm' (hCur msg hm' hc) hd
+
 /-- The frame for steps that keep the configuration, every node's copy of it and every
-incarnation, and move no lease start, acknowledgement time or primaryship time. Traffic
-times may only move forward, to now; the caller supplies the facts about the data-sent
-times and the committed views, the only other fields such a step may change. -/
+incarnation, move no lease start, acknowledgement time or primaryship time, and only
+shrink the messages in flight or close connections. Traffic times may only move
+forward, to now; the caller supplies the facts about the data-sent times and the
+committed views, and about committed offsets of senders whose connections stay open. -/
 theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core)
     (hcfg : a'.core.cfg = a.core.cfg) (hlocalCfg : a'.core.localCfg = a.core.localCfg)
     (hinc : a'.core.incarnation = a.core.incarnation) (hnow : a'.now = a.now)
     (hPL : a'.primaryLease = a.primaryLease) (hAR : a'.ackReceived = a.ackReceived)
     (hAE : a'.ackEcho = a.ackEcho) (hRL : a'.readLease = a.readLease)
     (hPS : a'.primarySince = a.primarySince) (hOE : a'.oldEligible = a.oldEligible)
+    (hNet : ∀ msg ∈ a'.net, msg ∈ a.net)
+    (hCur : ∀ msg ∈ a.net, msg.Current a' → msg.Current a)
+    (hGenLe : ∀ msg ∈ a.net, msg.gs ≤ a'.gen msg.src ∧ msg.gd ≤ a'.gen msg.dst)
+    (hCommit : ∀ msg ∈ a.net, msg.Current a' → a.core.commit msg.src ≤ a'.core.commit msg.src)
     (hPT : ∀ r, a.primaryTraffic r ≤ a'.primaryTraffic r ∧ a'.primaryTraffic r ≤ a.now)
     (hDS : ∀ r, a'.dataSent r ≤ a'.primaryTraffic r)
     (hCV : ∀ r, a'.committedView r ≤ (a'.core.log r).length)
     (hCH : ∀ r, a'.committedView r ≤ a'.core.hist.length ∧
       (a'.core.log r).take (a'.committedView r) <+: a'.core.hist) :
-    LeaseInvariant P a' where
+    LeaseInvariant P a' := by
+  have hmono : ∀ msg ∈ a'.net, msg ∈ a.net ∧ (msg.Current a' → msg.Current a) :=
+    fun msg hm => ⟨hNet msg hm, hCur msg (hNet msg hm)⟩
+  have hLS : ∀ r x, LeaseStart a' r x → LeaseStart a r x :=
+    fun r x hx => leaseStart_mono a _ (fun r x e => by rw [hRL] at e; exact e) hmono hx
+  have hPLS : ∀ p r x, PrimStart a' p r x → PrimStart a p r x :=
+    fun p r x hx => primStart_mono a _ (fun p r x e => by rw [hPL] at e; exact e) hmono hx
+  obtain ⟨hS1, hS2, hS3, hS4⟩ := msgs_frame h (le_of_eq hnow.symm) hNet hCur hGenLe hCommit
+    (fun _ _ _ => by unfold primaryOf; rw [hlocalCfg])
+  exact {
   core := hc
   primaryTrafficLe := fun r => by rw [hnow]; exact (hPT r).2
   ackReceivedLe := by rw [hAR, hnow]; exact h.ackReceivedLe
   primarySinceLe := by rw [hPS, hnow]; exact h.primarySinceLe
   dataSentLe := hDS
-  primaryLeaseLe := by
-    intro p r x hx; rw [hPL] at hx; exact Nat.le_trans (h.primaryLeaseLe p r x hx) (hPT r).1
+  primaryLeaseLe := fun p r x hx => Nat.le_trans (h.primaryLeaseLe p r x (hPLS p r x hx)) (hPT r).1
   echoLe := by rw [hAE, hAR]; exact h.echoLe
   primarySinceAck := by rw [hPS, hAR, hOE]; exact h.primarySinceAck
   deposed := by
     intro p hp hv
     obtain ⟨t, h1, h2, h3, h4⟩ :=
       deposed_frame h (hcfg := hcfg) (hlocalCfg := hlocalCfg) ((thinksPrimary_congr hlocalCfg (congrFun hinc p)).1 hp) hv
-    exact ⟨t, h1, h2, h3, by rw [hPL, hnow]; exact h4⟩
+    exact ⟨t, h1, h2, h3, fun x hx => by rw [hnow]; exact h4 x (hPLS p t x hx)⟩
   leaseBound := by
-    intro r x hx; rw [hRL] at hx; rw [hAR, hPS, hOE, hcfg, hnow]; exact h.leaseBound r x hx
+    intro r x hx; rw [hAR, hPS, hOE, hcfg, hnow]; exact h.leaseBound r x (hLS r x hx)
   leaseAuth := by
-    intro r hnp hv
-    unfold ReadLeaseValid at hv; rw [hRL, hnow] at hv
+    intro r x hx hnp hv
+    rw [hnow] at hv
     exact (isAuthoritative_congr hcfg (congrFun hinc r)).2
-      (h.leaseAuth r (fun hp => hnp ((thinksPrimary_congr hlocalCfg (congrFun hinc r)).2 hp)) hv)
+      (h.leaseAuth r x (hLS r x hx) (fun hp => hnp ((thinksPrimary_congr hlocalCfg (congrFun hinc r)).2 hp)) hv)
   selfPrimNoLease := by
-    intro p hp; rw [hlocalCfg] at hp; rw [hRL]; exact h.selfPrimNoLease p hp
+    intro p hp x hx; rw [hlocalCfg] at hp; exact h.selfPrimNoLease p hp x (hLS p x hx)
   committedViewLen := hCV
   committedViewHist := hCH
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
 
 /-! ### Replication actions that touch no lease state -/
 
 /-- A replication step that changes neither the configuration, nor any node's copy of
-it, nor any incarnation, and only extends logs and the history, keeps the lease
-invariant with the lease state unchanged. -/
+it, nor any incarnation, lowers no committed offset, and only extends logs and the
+history, keeps the lease invariant with the lease state unchanged. -/
 theorem leaseInvariant_withCore {c : State Node} (hc : Invariant c)
     (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
-    (hinc : c.incarnation = a.core.incarnation)
+    (hinc : c.incarnation = a.core.incarnation) (hcommit : ∀ x, a.core.commit x ≤ c.commit x)
     (hlog : ∀ x, a.core.log x <+: c.log x) (hhist : a.core.hist <+: c.hist) :
     LeaseInvariant P (withCore a c) :=
   leaseInvariant_frame h hc (hcfg := hcfg) (hlocalCfg := hlocalCfg) (hinc := hinc)
     (hnow := rfl) (hPL := rfl) (hAR := rfl) (hAE := rfl) (hRL := rfl) (hPS := rfl) (hOE := rfl)
+    (fun _ hm => hm) (fun _ _ hc => hc) h.genLe (fun msg _ _ => hcommit msg.src)
     (fun r => ⟨Nat.le_refl _, h.primaryTrafficLe r⟩) h.dataSentLe
     (fun r => Nat.le_trans (h.committedViewLen r) (hlog r).length_le)
     (fun r => by
@@ -449,6 +590,7 @@ theorem leaseInvariant_makeEligible {p r : Node} (hp : ThinksPrimary a.core p)
   subst hpp
   have hkp : a.core.localCfg a.core.cfg.primary = a.core.cfg := h.core.localCfgEq _ hkl
   have htp := makeEligible_thinksPrimary (s := a.core) (r := r) hkp hrp
+  have hpo := primaryOf_cfgBump h hkp (makeEligible_localCfg (s := a.core) (r := r)) rfl
   exact {
   core := invariant_makeEligible h.core hp hkl hs hel
   primaryTrafficLe := h.primaryTrafficLe, ackReceivedLe := h.ackReceivedLe, primarySinceLe := h.primarySinceLe
@@ -456,8 +598,8 @@ theorem leaseInvariant_makeEligible {p r : Node} (hp : ThinksPrimary a.core p)
   deposed := fun q hq hv => deposed_cfgBump h rfl makeEligible_localCfg rfl rfl htp hq hv
   leaseBound := h.leaseBound
   leaseAuth := by
-    intro x hnp hv
-    obtain ⟨h1, h2⟩ := h.leaseAuth x (fun hp' => hnp ((htp x).2 hp')) hv
+    intro x v hx hnp hv
+    obtain ⟨h1, h2⟩ := h.leaseAuth x v hx (fun hp' => hnp ((htp x).2 hp')) hv
     refine ⟨?_, ?_⟩
     · show (if x = r then true else a.core.cfg.eligible x) = true ∨ x = a.core.cfg.primary
       split_ifs with e
@@ -469,223 +611,400 @@ theorem leaseInvariant_makeEligible {p r : Node} (hp : ThinksPrimary a.core p)
       · exact h2
   selfPrimNoLease := fun q hq => selfPrimNoLease_cfgBump h hkp makeEligible_localCfg hq
   committedViewLen := h.committedViewLen
-  committedViewHist := h.committedViewHist }
+  committedViewHist := h.committedViewHist
+  sentLe := h.sentLe, genLe := h.genLe, commitLe := h.commitLe
+  follows := fun msg hm hc hd =>
+    ⟨(hpo msg.dst).trans (h.follows msg hm hc hd).1, (h.follows msg hm hc hd).2⟩ }
 
-/-- The replication actions that touch no lease state. -/
+/-- The replication actions whose lease effects, if any, travel as messages. -/
 theorem leaseInvariant_core {m : Nat} {μ : Action Node} {c : State Node} (hs : Step m a.core μ c)
-    (hpl : μ.isPlain = true) : LeaseInvariant P (withCore a c) := by
+    (hpl : μ.isCore = true) : LeaseInvariant P (withCore a c) := by
+  have hcore := invariant_step h.core hs
   cases hs
   case append p _ _ =>
-    refine leaseInvariant_withCore h (invariant_append h.core p) rfl rfl rfl ?_ (List.prefix_refl _)
+    refine leaseInvariant_withCore h hcore rfl rfl rfl (fun _ => Nat.le_refl _) ?_
+      (List.prefix_refl _)
     intro x; show a.core.log x <+: update a.core.log p (a.core.log p ++ _) x
     unfold update; split_ifs with e
     · subst e; exact List.prefix_append _ _
     · exact List.prefix_refl _
-  case commit p hp _ hlen hcap =>
-    refine leaseInvariant_withCore h (invariant_commit h.core p hp hlen hcap) rfl rfl rfl
-      (fun _ => List.prefix_refl _) ?_
-    show a.core.hist <+: (if a.core.commit p = a.core.hist.length then _ else _)
-    split_ifs
-    · exact List.prefix_append _ _
+  case replicate r hne hpre hlt =>
+    refine leaseInvariant_withCore h hcore rfl rfl rfl
+      (fun _ => Nat.le_refl _) ?_ (List.prefix_refl _)
+    intro x; show a.core.log x <+: update a.core.log r (a.core.log r ++ _) x
+    unfold update; split_ifs with e
+    · subst e; exact List.prefix_append _ _
     · exact List.prefix_refl _
+  case ack r hne hpre hlt =>
+    exact leaseInvariant_withCore h hcore rfl rfl rfl
+      (fun _ => Nat.le_refl _) (fun _ => List.prefix_refl _) (List.prefix_refl _)
+  case commit p hp _ hlen hcap =>
+    refine leaseInvariant_withCore h hcore rfl rfl rfl ?_
+      (fun _ => List.prefix_refl _) ?_
+    · intro x; show a.core.commit x ≤ update a.core.commit p (a.core.commit p + 1) x
+      unfold update; split_ifs with e
+      · subst e; exact Nat.le_succ _
+      · exact Nat.le_refl _
+    · show a.core.hist <+: (if a.core.commit p = a.core.hist.length then _ else _)
+      split_ifs
+      · exact List.prefix_append _ _
+      · exact List.prefix_refl _
   case addToSyncSet p r hp hrp hf _ hle =>
-    exact leaseInvariant_withCore h (invariant_addToSyncSet h.core p r hp hrp hf hle) rfl rfl rfl
-      (fun _ => List.prefix_refl _) (List.prefix_refl _)
+    exact leaseInvariant_withCore h hcore rfl rfl rfl
+      (fun _ => Nat.le_refl _) (fun _ => List.prefix_refl _) (List.prefix_refl _)
   case removeFromSyncSet p r hp hsy hel =>
-    exact leaseInvariant_withCore h (invariant_removeFromSyncSet h.core p r hp hsy hel) rfl rfl rfl
-      (fun _ => List.prefix_refl _) (List.prefix_refl _)
+    exact leaseInvariant_withCore h hcore rfl rfl rfl
+      (fun _ => Nat.le_refl _) (fun _ => List.prefix_refl _) (List.prefix_refl _)
   case makeEligible p r hp hkl hsy hel => exact leaseInvariant_makeEligible h hp hkl hsy hel
-  -- the remaining actions are not plain
-  all_goals simp [Action.isPlain] at hpl
+  -- the remaining actions are not core actions of the lease layer
+  all_goals simp [Action.isCore] at hpl
 
-/-! ### Data messages -/
+/-! ### Messages: send, deliver, drop -/
 
-omit h in
-/-- After copying one entry, the replica's log is still a prefix of its primary's. -/
-theorem replicate_log_prefix {s : State Node} {r : Node} (hpre : s.log r <+: s.log (primaryOf s r))
-    (hlt : (s.log r).length < (s.log (primaryOf s r)).length) :
-    (replicate s r).log r <+: s.log (primaryOf s r) := by
-  show update s.log r (s.log r ++ [(s.log (primaryOf s r)).getD (s.log r).length 0]) r <+: _
-  rw [update_self]
-  obtain ⟨t, ht⟩ := hpre
-  have hne : t ≠ [] := by
-    intro e; subst e; simp at ht; rw [← ht] at hlt; exact absurd hlt (Nat.lt_irrefl _)
-  obtain ⟨x, t', rfl⟩ := List.exists_cons_of_ne_nil hne
-  have hx : (s.log (primaryOf s r)).getD (s.log r).length 0 = x := by
-    rw [← ht]; simp [List.getD_eq_getElem?_getD, List.getElem?_append_right (Nat.le_refl _)]
-  rw [hx, ← ht]
-  exact ⟨t', by simp⟩
+/-- A message is lost. -/
+theorem leaseInvariant_drop {msg : Msg Node} : LeaseInvariant P (dropMsg a msg) :=
+  leaseInvariant_frame h h.core rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
+    (fun _ hm => List.mem_of_mem_erase hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
+    (fun r => ⟨Nat.le_refl _, h.primaryTrafficLe r⟩) h.dataSentLe h.committedViewLen h.committedViewHist
+
+/-- A new message, before the step's own effect on leases: every old lease start, held
+or in flight, is still one, and a new start can only come from the new message. -/
+theorem leaseStart_send {msg : Msg Node} {r : Node} {x : Nat} (hx : LeaseStart (send a msg) r x) :
+    LeaseStart a r x ∨ (msg.dst = r ∧ msg.echo = some x) := by
+  rcases hx with hx | ⟨m', hm, hc, hd, he⟩
+  · exact Or.inl (Or.inl hx)
+  · rcases List.mem_cons.1 hm with rfl | hm
+    · exact Or.inr ⟨hd, he⟩
+    · exact Or.inl (Or.inr ⟨m', hm, hc, hd, he⟩)
+
+theorem primStart_send {msg : Msg Node} {p r : Node} {x : Nat} (hx : PrimStart (send a msg) p r x) :
+    PrimStart a p r x ∨ (msg.dst = p ∧ msg.src = r ∧ msg.ackStart = some x) := by
+  rcases hx with hx | ⟨m', hm, hc, hd, hs, he⟩
+  · exact Or.inl (Or.inl hx)
+  · rcases List.mem_cons.1 hm with rfl | hm
+    · exact Or.inr ⟨hd, hs, he⟩
+    · exact Or.inl (Or.inr ⟨m', hm, hc, hd, hs, he⟩)
+
+/-- Sending: the new message is current, was sent now, and the caller supplies what it
+carries. -/
+theorem leaseInvariant_send {msg : Msg Node} (hg : msg.gs = a.gen msg.src ∧ msg.gd = a.gen msg.dst)
+    (hsent : msg.sent = a.now)
+    (hcommit : ∀ c, msg.commitOf = some c → c ≤ a.core.commit msg.src)
+    (hfollows : msg.commitOf.isSome → primaryOf a.core msg.dst = msg.src ∧ msg.src ≠ msg.dst)
+    (hPS : ∀ x, msg.ackStart = some x → x ≤ a.primaryTraffic msg.src ∧
+      ∀ p, ThinksPrimary a.core p → (a.core.localCfg p).epoch < a.core.cfg.epoch →
+        msg.dst = p → primaryOf a.core msg.src = p)
+    (hLS : ∀ x, msg.echo = some x → LeaseStart a msg.dst x ∨
+      ((∃ b, a.ackReceived a.core.cfg.primary msg.dst = some b ∧ x ≤ b) ∧
+        IsAuthoritative a.core msg.dst ∧ (a.core.localCfg msg.dst).primary ≠ msg.dst)) :
+    LeaseInvariant P (send a msg) := by
+  have hcur : ∀ m' ∈ (send a msg).net, m'.Current (send a msg) ↔ m'.Current a := fun _ _ => Iff.rfl
+  exact {
+  core := h.core
+  primaryTrafficLe := h.primaryTrafficLe, ackReceivedLe := h.ackReceivedLe, primarySinceLe := h.primarySinceLe
+  dataSentLe := h.dataSentLe, echoLe := h.echoLe, primarySinceAck := h.primarySinceAck
+  primaryLeaseLe := by
+    intro p r x hx
+    rcases primStart_send h hx with hx | ⟨_, rfl, he⟩
+    · exact h.primaryLeaseLe p r x hx
+    · exact (hPS x he).1
+  deposed := by
+    intro p hp hv
+    obtain ⟨t, h1, h2, h3, h4⟩ := h.deposed p hp hv
+    refine ⟨t, h1, h2, h3, fun x hx => ?_⟩
+    rcases primStart_send h hx with hx | ⟨hd, rfl, he⟩
+    · exact h4 x hx
+    · -- the witness follows someone other than `p`, so it sends `p` no acknowledgement.
+      exact absurd ((hPS x he).2 p hp hv hd) h3
+  leaseBound := by
+    intro r x hx
+    rcases leaseStart_send h hx with hx | ⟨rfl, he⟩
+    · exact h.leaseBound r x hx
+    · rcases hLS x he with hx | ⟨hb, _, _⟩
+      · exact h.leaseBound _ x hx
+      · exact Or.inl hb
+  leaseAuth := by
+    intro r x hx hnp hv
+    rcases leaseStart_send h hx with hx | ⟨rfl, he⟩
+    · exact h.leaseAuth r x hx hnp hv
+    · rcases hLS x he with hx | ⟨_, ha, _⟩
+      · exact h.leaseAuth _ x hx hnp hv
+      · exact ha
+  selfPrimNoLease := by
+    intro q hq x hx
+    rcases leaseStart_send h hx with hx | ⟨rfl, he⟩
+    · exact h.selfPrimNoLease q hq x hx
+    · rcases hLS x he with hx | ⟨_, _, hne⟩
+      · exact h.selfPrimNoLease _ hq x hx
+      · exact hne hq
+  committedViewLen := h.committedViewLen
+  committedViewHist := h.committedViewHist
+  sentLe := by
+    intro m' hm; rcases List.mem_cons.1 hm with rfl | hm
+    · rw [hsent]; rfl
+    · exact h.sentLe m' hm
+  genLe := by
+    intro m' hm; rcases List.mem_cons.1 hm with rfl | hm
+    · exact ⟨le_of_eq hg.1, le_of_eq hg.2⟩
+    · exact h.genLe m' hm
+  commitLe := by
+    intro m' hm hc c hcm; rcases List.mem_cons.1 hm with rfl | hm
+    · exact hcommit c hcm
+    · exact h.commitLe m' hm hc c hcm
+  follows := by
+    intro m' hm hc hd; rcases List.mem_cons.1 hm with rfl | hm
+    · exact hfollows hd
+    · exact h.follows m' hm hc hd }
+
+/-- `p` sends `REPLCONF COMMIT` without an echo. -/
+theorem leaseInvariant_sendData {p r : Node} (hne : p ≠ r) (hf : primaryOf a.core r = p) :
+    LeaseInvariant P (send a (.data p r (a.gen p) (a.gen r) a.now (a.core.commit p) none)) :=
+  leaseInvariant_send h ⟨rfl, rfl⟩ rfl (fun c hc => by cases hc; exact Nat.le_refl _)
+    (fun _ => ⟨hf, hne⟩) (fun _ hx => by cases hx) (fun _ hx => by cases hx)
+
+include hM in
+/-- `p` sends `REPLCONF COMMIT` echoing `r`'s acknowledgement. The grant comes from the
+current primary and goes to an eligible replica with a matching incarnation. -/
+theorem leaseInvariant_sendGrant {p r : Node} (hne : p ≠ r) (hf : primaryOf a.core r = p)
+    (hp : ThinksPrimary a.core p) (hg : MayGrant P a p r) :
+    LeaseInvariant P (send a (.data p r (a.gen p) (a.gen r) a.now (a.core.commit p) (a.ackEcho p r))) := by
+  obtain ⟨hL, _, hel, hin⟩ := hg
+  obtain ⟨hpp, hkn⟩ := leaseValid_current hM h hp hL
+  refine leaseInvariant_send h ⟨rfl, rfl⟩ rfl (fun c hc => by cases hc; exact Nat.le_refl _)
+    (fun _ => ⟨hf, hne⟩) (fun _ hx => by cases hx) ?_
+  intro e he
+  obtain ⟨b, hb, heb⟩ := h.echoLe p r e he
+  right
+  refine ⟨⟨b, by rw [← hpp]; exact hb, heb⟩, ?_, ?_⟩
+  · rw [hkn] at hel hin; exact ⟨Or.inl hel, hin⟩
+  · show (a.core.localCfg r).primary ≠ r
+    intro e'; apply hne; rw [← hf]; exact e'
+
+/-- A replica acknowledges to its primary. -/
+theorem leaseInvariant_sendAck {r : Node} (hne : primaryOf a.core r ≠ r) :
+    LeaseInvariant P (send a (.ack r (primaryOf a.core r) (a.gen r) (a.gen (primaryOf a.core r))
+      a.now (a.dataSent r))) :=
+  leaseInvariant_send h ⟨rfl, rfl⟩ rfl (fun _ hx => by cases hx) (fun hx => by cases hx)
+    (fun x hx => by
+      cases hx
+      exact ⟨h.dataSentLe r, fun p _ _ hd => hd⟩)
+    (fun _ hx => by cases hx)
 
 /-- The committed-view facts after a data message: with `L` the replica's log after the
-message (a prefix of its primary's, extending its old log), the new view
-`max (committedView r) (min (commit p) |L|)` is within `L`, within the history, and a
-committed prefix. -/
-theorem rview_data_ok {r : Node} {L : List Nat} (hpre : L <+: a.core.log (primaryOf a.core r))
-    (hgrow : a.core.log r <+: L) :
-    max (a.committedView r) (min (a.core.commit (primaryOf a.core r)) L.length) ≤ L.length ∧
-    max (a.committedView r) (min (a.core.commit (primaryOf a.core r)) L.length) ≤ a.core.hist.length ∧
-    L.take (max (a.committedView r) (min (a.core.commit (primaryOf a.core r)) L.length)) <+: a.core.hist := by
+message (a prefix of its primary's, extending its old log) and `c` a committed offset of
+the primary, the new view `max (committedView r) (min c |L|)` is within `L`, within the
+history, and a committed prefix. -/
+theorem rview_data_ok {r q : Node} {L : List Nat} {c : Nat} (hpre : L <+: a.core.log q)
+    (hgrow : a.core.log r <+: L) (hc : c ≤ a.core.commit q) :
+    max (a.committedView r) (min c L.length) ≤ L.length ∧
+    max (a.committedView r) (min c L.length) ≤ a.core.hist.length ∧
+    L.take (max (a.committedView r) (min c L.length)) <+: a.core.hist := by
   obtain ⟨h1, h2⟩ := h.committedViewHist r
   have hrl := h.committedViewLen r
-  have hcH := h.core.commitWithinHistory (primaryOf a.core r)
-  have hcE := h.core.committedIsHistoryPrefix (primaryOf a.core r)
+  have hcH := h.core.commitWithinHistory q
+  have hcE := h.core.committedIsHistoryPrefix q
+  have hk : min c L.length ≤ a.core.commit q := Nat.le_trans (Nat.min_le_left _ _) hc
   refine ⟨?_, ?_, ?_⟩
   · exact Nat.max_le.2 ⟨Nat.le_trans hrl hgrow.length_le, Nat.min_le_right _ _⟩
-  · exact Nat.max_le.2 ⟨h1, Nat.le_trans (Nat.min_le_left _ _) hcH⟩
-  · rcases Nat.le_total (a.committedView r) (min (a.core.commit (primaryOf a.core r)) L.length) with hle | hle
+  · exact Nat.max_le.2 ⟨h1, Nat.le_trans hk hcH⟩
+  · rcases Nat.le_total (a.committedView r) (min c L.length) with hle | hle
     · rw [Nat.max_eq_right hle]
       rw [prefix_take_eq hpre (Nat.min_le_right _ _)]
-      have : (a.core.log (primaryOf a.core r)).take (min (a.core.commit (primaryOf a.core r)) L.length) =
-          ((a.core.log (primaryOf a.core r)).take (a.core.commit (primaryOf a.core r))).take
-            (min (a.core.commit (primaryOf a.core r)) L.length) := by
-        rw [List.take_take, Nat.min_eq_left (Nat.min_le_left _ _)]
-      rw [this, hcE, List.take_take, Nat.min_eq_left (Nat.min_le_left _ _)]
+      have : (a.core.log q).take (min c L.length) =
+          ((a.core.log q).take (a.core.commit q)).take (min c L.length) := by
+        rw [List.take_take, Nat.min_eq_left hk]
+      rw [this, hcE, List.take_take, Nat.min_eq_left hk]
       exact List.take_prefix _ _
     · rw [Nat.max_eq_left hle, ← prefix_take_eq hgrow hrl]; exact h2
 
-/-- A data message without an echo, applied to a replication state `c` that only
-extends `r`'s log and changes nothing else. -/
-theorem leaseInvariant_recvData_noEcho {r : Node} {c : State Node} (hc : Invariant c)
-    (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
-    (hinc : c.incarnation = a.core.incarnation) (hhist : c.hist = a.core.hist)
-    (hlogo : ∀ x, x ≠ r → c.log x = a.core.log x)
-    (hpre : c.log r <+: a.core.log (primaryOf a.core r)) (hgrow : a.core.log r <+: c.log r) :
-    LeaseInvariant P (recvData a r c none) := by
-  obtain ⟨hv1, hv2, hv3⟩ := rview_data_ok h hpre hgrow
-  refine leaseInvariant_frame h hc (hcfg := hcfg) (hlocalCfg := hlocalCfg) (hinc := hinc)
-    (hnow := rfl) (hPL := rfl) (hAR := rfl) (hAE := rfl) (hRL := rfl) (hPS := rfl) (hOE := rfl)
-    (primaryTraffic_bump h r) ?_ ?_ ?_
-  · intro x; show update a.dataSent r a.now x ≤ update a.primaryTraffic r a.now x
-    unfold update; split_ifs
-    · exact Nat.le_refl _
-    · exact h.dataSentLe x
-  · intro x; show update a.committedView r _ x ≤ (c.log x).length
-    unfold update; split_ifs with e
-    · subst e; exact hv1
-    · rw [hlogo x e]; exact h.committedViewLen x
-  · intro x
-    show update a.committedView r _ x ≤ c.hist.length ∧ (c.log x).take (update a.committedView r _ x) <+: c.hist
-    rw [hhist]
-    unfold update; split_ifs with e
-    · subst e; exact ⟨hv2, hv3⟩
-    · rw [hlogo x e]; exact h.committedViewHist x
+/-- Two lease starts that each satisfy `leaseBound` have a later one that does too. -/
+theorem bound_max {r : Node} {v e : Nat}
+    (hv : (∃ b, a.ackReceived a.core.cfg.primary r = some b ∧ v ≤ b) ∨
+      (∃ T, a.primarySince a.core.cfg.primary = some T ∧ v ≤ T ∧
+        (a.oldEligible a.core.cfg.primary r = true ∨ ¬ HolderValid P a.now (some v) P.readDur)))
+    (he : (∃ b, a.ackReceived a.core.cfg.primary r = some b ∧ e ≤ b) ∨
+      (∃ T, a.primarySince a.core.cfg.primary = some T ∧ e ≤ T ∧
+        (a.oldEligible a.core.cfg.primary r = true ∨ ¬ HolderValid P a.now (some e) P.readDur))) :
+    (∃ b, a.ackReceived a.core.cfg.primary r = some b ∧ max v e ≤ b) ∨
+      (∃ T, a.primarySince a.core.cfg.primary = some T ∧ max v e ≤ T ∧
+        (a.oldEligible a.core.cfg.primary r = true ∨ ¬ HolderValid P a.now (some (max v e)) P.readDur)) := by
+  -- an acknowledgement bound and a primaryship bound: `primarySinceAck` orders them.
+  have mixed : ∀ {x y : Nat} (b T : Nat), a.ackReceived a.core.cfg.primary r = some b → x ≤ b →
+      a.primarySince a.core.cfg.primary = some T → y ≤ T →
+      (∃ b, a.ackReceived a.core.cfg.primary r = some b ∧ max x y ≤ b) ∨
+        (∃ T, a.primarySince a.core.cfg.primary = some T ∧ max x y ≤ T ∧
+          (a.oldEligible a.core.cfg.primary r = true ∨ ¬ HolderValid P a.now (some (max x y)) P.readDur)) ∨
+        (a.oldEligible a.core.cfg.primary r = false ∧ T ≤ b) := by
+    intro x y b T hb hxb hT hyT
+    rcases h.primarySinceAck _ r T b hT hb with hTb | hold
+    · exact Or.inl ⟨b, hb, Nat.max_le.2 ⟨hxb, Nat.le_trans hyT hTb⟩⟩
+    · by_cases hTb : T ≤ b
+      · exact Or.inl ⟨b, hb, Nat.max_le.2 ⟨hxb, Nat.le_trans hyT hTb⟩⟩
+      · exact Or.inr (Or.inl ⟨T, hT, Nat.max_le.2 ⟨by omega, hyT⟩, Or.inl hold⟩)
+  rcases hv with ⟨b, hb, hvb⟩ | ⟨T, hT, hvT, hvo⟩ <;> rcases he with ⟨b', hb', heb⟩ | ⟨T', hT', heT, heo⟩
+  · rw [hb] at hb'; cases hb'; exact Or.inl ⟨b, hb, Nat.max_le.2 ⟨hvb, heb⟩⟩
+  · rcases mixed b T' hb hvb hT' heT with h1 | h1 | ⟨_, hTb⟩
+    · exact Or.inl h1
+    · exact Or.inr h1
+    · exact Or.inl ⟨b, hb, Nat.max_le.2 ⟨hvb, Nat.le_trans heT hTb⟩⟩
+  · rcases mixed b' T hb' heb hT hvT with h1 | h1 | ⟨_, hTb⟩
+    · obtain ⟨b, hb, hm⟩ := h1; exact Or.inl ⟨b, hb, by rw [Nat.max_comm]; exact hm⟩
+    · obtain ⟨T, hT, hm, ho⟩ := h1
+      exact Or.inr ⟨T, hT, by rw [Nat.max_comm]; exact hm, by rw [Nat.max_comm]; exact ho⟩
+    · exact Or.inl ⟨b', hb', Nat.max_le.2 ⟨Nat.le_trans hvT hTb, heb⟩⟩
+  · rw [hT] at hT'; cases hT'
+    refine Or.inr ⟨T, hT, Nat.max_le.2 ⟨hvT, heT⟩, ?_⟩
+    rcases hvo with hvo | hvo
+    · exact Or.inl hvo
+    · rcases heo with heo | heo
+      · exact Or.inl heo
+      · right; intro hmv; unfold HolderValid at hmv hvo heo
+        rcases Nat.le_total v e with hle | hle
+        · rw [Nat.max_eq_right hle] at hmv; exact heo hmv
+        · rw [Nat.max_eq_left hle] at hmv; exact hvo hmv
 
-theorem leaseInvariant_replicate {r : Node}
-    (hpre : a.core.log r <+: a.core.log (primaryOf a.core r))
-    (hlt : (a.core.log r).length < (a.core.log (primaryOf a.core r)).length) :
-    LeaseInvariant P (recvData a r (replicate a.core r) none) := by
-  refine leaseInvariant_recvData_noEcho h (invariant_replicate h.core r) rfl rfl rfl rfl ?_
-    (replicate_log_prefix hpre hlt) ?_
-  · intro x hx; show update a.core.log r _ x = a.core.log x; exact update_of_ne _ _ hx
-  · show a.core.log r <+: update a.core.log r (a.core.log r ++ _) r
-    rw [update_self]; exact List.prefix_append _ _
-
-theorem leaseInvariant_heartbeat {r : Node}
-    (hpre : a.core.log r <+: a.core.log (primaryOf a.core r)) :
-    LeaseInvariant P (recvData a r a.core none) :=
-  leaseInvariant_recvData_noEcho h h.core rfl rfl rfl rfl (fun _ _ => rfl) hpre (List.prefix_refl _)
-
-include hM in
-/-- A heartbeat that echoes `r`'s acknowledgement. The grant comes from the current
-primary and goes to an eligible replica with a matching incarnation. -/
-theorem leaseInvariant_heartbeatGrant {r : Node} (hne : primaryOf a.core r ≠ r)
-    (hp : ThinksPrimary a.core (primaryOf a.core r))
-    (hpre : a.core.log r <+: a.core.log (primaryOf a.core r))
-    (hg : MayGrant P a (primaryOf a.core r) r) :
-    LeaseInvariant P (recvData a r a.core (a.ackEcho (primaryOf a.core r) r)) := by
-  obtain ⟨hL, _, hel, hin⟩ := hg
-  obtain ⟨hpp, hkn⟩ := leaseValid_current hM h hp hL
-  have hbase := leaseInvariant_heartbeat h hpre
-  cases hecho : a.ackEcho (primaryOf a.core r) r with
-  | none => exact hbase
-  | some e =>
-    obtain ⟨b, hb, heb⟩ := h.echoLe _ r e hecho
-    have hbn := h.ackReceivedLe _ r b hb
-    -- The renewed lease starts no later than `b`, the current primary's last
-    -- acknowledgement from `r`: the echo does, and so does any lease `r` already held.
-    have hnew : (∃ b', a.ackReceived a.core.cfg.primary r = some b' ∧ maxOpt (a.readLease r) e ≤ b') ∨
-        (∃ T, a.primarySince a.core.cfg.primary = some T ∧ maxOpt (a.readLease r) e ≤ T ∧
-          (a.oldEligible a.core.cfg.primary r = true ∨
-            ¬ HolderValid P a.now (some (maxOpt (a.readLease r) e)) P.readDur)) := by
-      unfold maxOpt
-      cases hv : a.readLease r with
-      | none => exact Or.inl ⟨b, by rw [← hpp]; exact hb, heb⟩
-      | some v =>
-        rcases h.leaseBound r v hv with ⟨b', hb', hvb⟩ | ⟨T, hT, hvT, _⟩
-        · rw [← hpp, hb] at hb'; cases hb'
-          exact Or.inl ⟨b, by rw [← hpp]; exact hb, Nat.max_le.2 ⟨hvb, heb⟩⟩
-        · have hT' := hT; rw [← hpp] at hT'
-          rcases h.primarySinceAck _ r T b hT' hb with hTb | hold
-          · exact Or.inl ⟨b, by rw [← hpp]; exact hb, Nat.max_le.2 ⟨Nat.le_trans hvT hTb, heb⟩⟩
-          · by_cases hTb : T ≤ b
-            · exact Or.inl ⟨b, by rw [← hpp]; exact hb, Nat.max_le.2 ⟨Nat.le_trans hvT hTb, heb⟩⟩
-            · refine Or.inr ⟨T, hT, Nat.max_le.2 ⟨hvT, by omega⟩, Or.inl ?_⟩
-              rw [← hpp]; exact hold
-    exact {
-    core := hbase.core
-    primaryTrafficLe := hbase.primaryTrafficLe, ackReceivedLe := hbase.ackReceivedLe, primarySinceLe := hbase.primarySinceLe
-    dataSentLe := hbase.dataSentLe, primaryLeaseLe := hbase.primaryLeaseLe, echoLe := hbase.echoLe, primarySinceAck := hbase.primarySinceAck
-    deposed := hbase.deposed
-    leaseBound := by
-      intro x v hx
-      change update a.readLease r (some (maxOpt (a.readLease r) e)) x = some v at hx
-      show (∃ b, a.ackReceived a.core.cfg.primary x = some b ∧ v ≤ b) ∨
-        (∃ T, a.primarySince a.core.cfg.primary = some T ∧ v ≤ T ∧
-          (a.oldEligible a.core.cfg.primary x = true ∨ ¬ HolderValid P a.now (some v) P.readDur))
-      unfold update at hx; split_ifs at hx with ex
-      · subst ex; cases hx; exact hnew
-      · exact h.leaseBound x v hx
-    leaseAuth := by
-      intro x hnp hv
-      change HolderValid P a.now (update a.readLease r (some (maxOpt (a.readLease r) e)) x) P.readDur at hv
-      show IsAuthoritative a.core x
-      by_cases ex : x = r
-      · subst ex; rw [hkn] at hel hin; exact ⟨Or.inl hel, hin⟩
-      · unfold update at hv; rw [if_neg ex] at hv
-        exact h.leaseAuth x hnp hv
-    selfPrimNoLease := by
-      intro q hq; show update a.readLease r (some (maxOpt (a.readLease r) e)) q = none
-      unfold update; split_ifs with eq
-      · subst eq; exact absurd hq hne
-      · exact h.selfPrimNoLease q hq
-    committedViewLen := hbase.committedViewLen
-    committedViewHist := hbase.committedViewHist }
-
-/-! ### Acknowledgements -/
-
-/-- An acknowledgement from `r`, applied to a replication state `c` that changes only
-`acked` and `ackHigh`. The primary's lease from `r` and its acknowledgement times for
-`r` move; everything else is the frame. -/
-theorem leaseInvariant_recvAck {r : Node} {c : State Node} (hc : Invariant c)
-    (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
-    (hinc : c.incarnation = a.core.incarnation) (hlog : c.log = a.core.log)
-    (hhist : c.hist = a.core.hist) :
-    LeaseInvariant P (recvAck a r c) := by
-  set p := primaryOf a.core r with hp
-  have hAR : (recvAck a r c).ackReceived = update2 a.ackReceived p r (some a.now) := rfl
-  have hAE : (recvAck a r c).ackEcho = update2 a.ackEcho p r (some a.now) := rfl
-  have hPL : (recvAck a r c).primaryLease = update2 a.primaryLease p r (some (maxOpt (a.primaryLease p r) (a.dataSent r))) := rfl
+/-- A current `REPLCONF COMMIT` from `p` reaches `r`, which follows `p` and whose log is
+a prefix of `p`'s. -/
+theorem leaseInvariant_deliverData {p r : Node} {gs gd t c : Nat} {e : Option Nat}
+    (hm : Msg.data p r gs gd t c e ∈ a.net) (hc : (Msg.data p r gs gd t c e).Current a)
+    (hf : primaryOf a.core r = p) (hpre : a.core.log r <+: a.core.log p) :
+    LeaseInvariant P (deliverData a (.data p r gs gd t c e) r t c e) := by
+  set msg := Msg.data p r gs gd t c e with hmsg
+  have hcp : c ≤ a.core.commit p := h.commitLe msg hm hc c rfl
+  have hpr : p ≠ r := (h.follows msg hm hc rfl).2
+  have htn : t ≤ a.now := h.sentLe msg hm
+  obtain ⟨hv1, hv2, hv3⟩ := rview_data_ok h (r := r) hpre (List.prefix_refl _) hcp
+  have hnet : ∀ m' ∈ (deliverData a msg r t c e).net, m' ∈ a.net ∧
+      (m'.Current (deliverData a msg r t c e) → m'.Current a) :=
+    fun m' hm' => ⟨List.mem_of_mem_erase hm', id⟩
+  have hPLS : ∀ q x v, PrimStart (deliverData a msg r t c e) q x v → PrimStart a q x v :=
+    fun q x v hx => primStart_mono a (deliverData a msg r t c e) (fun _ _ _ e => e) hnet hx
+  -- every lease start after the delivery was one before, or is the later of `r`'s held
+  -- lease and the echo, both of which were.
+  have hLS : ∀ x v, LeaseStart (deliverData a msg r t c e) x v →
+      LeaseStart a x v ∨ (x = r ∧ ∃ e0, e = some e0 ∧ LeaseStart a r e0 ∧
+        v = maxOpt (a.readLease r) e0) := by
+    intro x v hx
+    rcases hx with hx | hx
+    · cases e with
+      | none => exact Or.inl (Or.inl hx)
+      | some e0 =>
+        change update a.readLease r (some (maxOpt (a.readLease r) e0)) x = some v at hx
+        by_cases ex : x = r
+        · subst ex; rw [update_self] at hx; cases hx
+          exact Or.inr ⟨rfl, e0, rfl, Or.inr ⟨msg, hm, hc, rfl, rfl⟩, rfl⟩
+        · rw [update_of_ne _ _ ex] at hx; exact Or.inl (Or.inl hx)
+    · obtain ⟨m', hm', hc', hd, he⟩ := hx
+      exact Or.inl (Or.inr ⟨m', List.mem_of_mem_erase hm', hc', hd, he⟩)
+  -- the later of two starts is one of them.
+  have hmax : ∀ (e0 : Nat), LeaseStart a r e0 → ∀ (Q : Nat → Prop), (∀ v, LeaseStart a r v → Q v) →
+      Q (maxOpt (a.readLease r) e0) := by
+    intro e0 he0 Q hQ
+    cases hv : a.readLease r with
+    | none => exact hQ e0 he0
+    | some w =>
+      show Q (max w e0)
+      rcases Nat.le_total w e0 with hle | hle
+      · rw [Nat.max_eq_right hle]; exact hQ e0 he0
+      · rw [Nat.max_eq_left hle]; exact hQ w (Or.inl hv)
+  have hPT := primaryTraffic_bump h r
   exact {
-  core := hc
+  core := h.core
+  primaryTrafficLe := fun x => (hPT x).2
+  ackReceivedLe := h.ackReceivedLe, primarySinceLe := h.primarySinceLe
+  dataSentLe := by
+    intro x; show update a.dataSent r t x ≤ update a.primaryTraffic r a.now x
+    unfold update; split_ifs
+    · exact htn
+    · exact h.dataSentLe x
+  primaryLeaseLe := fun q x v hx => Nat.le_trans (h.primaryLeaseLe q x v (hPLS q x v hx)) (hPT x).1
+  echoLe := h.echoLe, primarySinceAck := h.primarySinceAck
+  deposed := by
+    intro q hq hv
+    obtain ⟨w, h1, h2, h3, h4⟩ := h.deposed q hq hv
+    exact ⟨w, h1, h2, h3, fun x hx => h4 x (hPLS q w x hx)⟩
+  leaseBound := by
+    intro x v hx
+    rcases hLS x v hx with hx | ⟨rfl, e0, rfl, he0, rfl⟩
+    · exact h.leaseBound x v hx
+    · cases hv : a.readLease x with
+      | none => exact h.leaseBound x e0 he0
+      | some w => exact bound_max h (h.leaseBound x w (Or.inl hv)) (h.leaseBound x e0 he0)
+  leaseAuth := by
+    intro x v hx hnp hv
+    rcases hLS x v hx with hx | ⟨rfl, e0, rfl, he0, rfl⟩
+    · exact h.leaseAuth x v hx hnp hv
+    · revert hv
+      exact hmax e0 he0 (fun v => HolderValid P a.now (some v) P.readDur → IsAuthoritative a.core x)
+        (fun v hv' => h.leaseAuth x v hv' hnp)
+  selfPrimNoLease := by
+    intro q hq v hx
+    rcases hLS q v hx with hx | ⟨rfl, _, _, _, _⟩
+    · exact h.selfPrimNoLease q hq v hx
+    · exact hpr (by rw [← hf]; exact hq)
+  committedViewLen := by
+    intro x; show update a.committedView r _ x ≤ (a.core.log x).length
+    unfold update; split_ifs with ex
+    · subst ex; exact hv1
+    · exact h.committedViewLen x
+  committedViewHist := by
+    intro x
+    show update a.committedView r _ x ≤ a.core.hist.length ∧
+      (a.core.log x).take (update a.committedView r _ x) <+: a.core.hist
+    unfold update; split_ifs with ex
+    · subst ex; exact ⟨hv2, hv3⟩
+    · exact h.committedViewHist x
+  sentLe := fun m' hm' => h.sentLe m' (List.mem_of_mem_erase hm')
+  genLe := fun m' hm' => h.genLe m' (List.mem_of_mem_erase hm')
+  commitLe := fun m' hm' => h.commitLe m' (List.mem_of_mem_erase hm')
+  follows := fun m' hm' => h.follows m' (List.mem_of_mem_erase hm') }
+
+/-- A current acknowledgement from `r` reaches `p`. The primary's lease from `r` and its
+acknowledgement times for `r` move; everything else is the frame. -/
+theorem leaseInvariant_deliverAck {r p : Node} {gs gd t d : Nat}
+    (hm : Msg.ack r p gs gd t d ∈ a.net) (hc : (Msg.ack r p gs gd t d).Current a) :
+    LeaseInvariant P (deliverAck a (.ack r p gs gd t d) r p t d) := by
+  set msg := Msg.ack r p gs gd t d with hmsg
+  set a' := deliverAck a msg r p t d with ha'
+  have htn : t ≤ a.now := h.sentLe msg hm
+  have hd : PrimStart a p r d := Or.inr ⟨msg, hm, hc, rfl, rfl, rfl⟩
+  have hAR : a'.ackReceived = update2 a.ackReceived p r (some a.now) := rfl
+  have hAE : a'.ackEcho = update2 a.ackEcho p r (some t) := rfl
+  have hnet : ∀ m' ∈ a'.net, m' ∈ a.net ∧ (m'.Current a' → m'.Current a) :=
+    fun m' hm' => ⟨List.mem_of_mem_erase hm', id⟩
+  have hLS : ∀ x v, LeaseStart a' x v → LeaseStart a x v :=
+    fun x v hx => leaseStart_mono a a' (fun _ _ e => e) hnet hx
+  -- a primary-lease start after the delivery was one before, or is the later of `p`'s
+  -- lease from `r` and the acknowledged data's send time, both of which were.
+  have hPLS : ∀ q x v, PrimStart a' q x v → ∀ (Q : Nat → Prop), (∀ w, PrimStart a q x w → Q w) → Q v := by
+    intro q x v hx Q hQ
+    rcases hx with hx | ⟨m', hm', hc', hd', hs', he'⟩
+    · change update2 a.primaryLease p r (some (maxOpt (a.primaryLease p r) d)) q x = some v at hx
+      by_cases e : q = p ∧ x = r
+      · obtain ⟨rfl, rfl⟩ := e; rw [update2_self] at hx; cases hx
+        cases hw : a.primaryLease q x with
+        | none => exact hQ d hd
+        | some w =>
+          show Q (max w d)
+          rcases Nat.le_total w d with hle | hle
+          · rw [Nat.max_eq_right hle]; exact hQ d hd
+          · rw [Nat.max_eq_left hle]; exact hQ w (Or.inl hw)
+      · rw [update2_of_ne _ _ e] at hx; exact hQ v (Or.inl hx)
+    · exact hQ v (Or.inr ⟨m', List.mem_of_mem_erase hm', hc', hd', hs', he'⟩)
+  exact {
+  core := h.core
   primaryTrafficLe := h.primaryTrafficLe, primarySinceLe := h.primarySinceLe, dataSentLe := h.dataSentLe
   ackReceivedLe := by
     intro q x b hb; rw [hAR] at hb
     by_cases e : q = p ∧ x = r
     · obtain ⟨rfl, rfl⟩ := e; rw [update2_self] at hb; cases hb; exact Nat.le_refl _
     · rw [update2_of_ne _ _ e] at hb; exact h.ackReceivedLe q x b hb
-  primaryLeaseLe := by
-    intro q x v hv; rw [hPL] at hv; show v ≤ a.primaryTraffic x
-    by_cases e : q = p ∧ x = r
-    · obtain ⟨rfl, rfl⟩ := e; rw [update2_self] at hv; cases hv
-      unfold maxOpt; split
-      · exact h.dataSentLe _
-      · rename_i w hw; exact Nat.max_le.2 ⟨h.primaryLeaseLe _ _ w hw, h.dataSentLe _⟩
-    · rw [update2_of_ne _ _ e] at hv; exact h.primaryLeaseLe q x v hv
+  primaryLeaseLe := fun q x v hx => hPLS q x v hx _ (fun w hw => h.primaryLeaseLe q x w hw)
   echoLe := by
     intro q x e he; rw [hAE] at he; rw [hAR]
     by_cases hqx : q = p ∧ x = r
     · obtain ⟨rfl, rfl⟩ := hqx; rw [update2_self] at he; cases he
-      exact ⟨a.now, update2_self _ _ _ _, Nat.le_refl _⟩
+      exact ⟨a.now, update2_self _ _ _ _, htn⟩
     · rw [update2_of_ne _ _ hqx] at he; rw [update2_of_ne _ _ hqx]; exact h.echoLe q x e he
   primarySinceAck := by
     intro q x T b hT hb; rw [hAR] at hb
@@ -694,45 +1013,31 @@ theorem leaseInvariant_recvAck {r : Node} {c : State Node} (hc : Invariant c)
     · rw [update2_of_ne _ _ e] at hb; exact h.primarySinceAck q x T b hT hb
   deposed := by
     intro q hq hv
-    obtain ⟨t, h1, h2, h3, h4⟩ :=
-      deposed_frame h (hcfg := hcfg) (hlocalCfg := hlocalCfg) ((thinksPrimary_congr hlocalCfg (congrFun hinc q)).1 hq) hv
-    refine ⟨t, h1, h2, h3, fun x hx => ?_⟩
-    rw [hPL] at hx
-    by_cases e : q = p ∧ t = r
-    · -- the witness `t` follows someone other than `q`, so this is not its acknowledgement.
-      exfalso; obtain ⟨rfl, rfl⟩ := e; exact h3 (by rw [hlocalCfg]; rfl)
-    · rw [update2_of_ne _ _ e] at hx; exact h4 x hx
+    obtain ⟨w, h1, h2, h3, h4⟩ := h.deposed q hq hv
+    exact ⟨w, h1, h2, h3, fun x hx => hPLS q w x hx _ (fun v hv => h4 v hv)⟩
   leaseBound := by
     intro x v hx
-    show (∃ b, update2 a.ackReceived p r (some a.now) c.cfg.primary x = some b ∧ v ≤ b) ∨
-      (∃ T, a.primarySince c.cfg.primary = some T ∧ v ≤ T ∧
-        (a.oldEligible c.cfg.primary x = true ∨ ¬ HolderValid P a.now (some v) P.readDur))
-    rw [hcfg]
+    have hx' := hLS x v hx
+    show (∃ b, update2 a.ackReceived p r (some a.now) a.core.cfg.primary x = some b ∧ v ≤ b) ∨
+      (∃ T, a.primarySince a.core.cfg.primary = some T ∧ v ≤ T ∧
+        (a.oldEligible a.core.cfg.primary x = true ∨ ¬ HolderValid P a.now (some v) P.readDur))
     by_cases e : a.core.cfg.primary = p ∧ x = r
-    · obtain ⟨e1, rfl⟩ := e; rw [e1, update2_self]; left; exact ⟨a.now, rfl, h.readLeaseLe x v hx⟩
-    · rw [update2_of_ne _ _ e]; exact h.leaseBound x v hx
-  leaseAuth := fun x hnp hv => (isAuthoritative_congr hcfg (congrFun hinc x)).2
-    (h.leaseAuth x (fun hp => hnp ((thinksPrimary_congr hlocalCfg (congrFun hinc x)).2 hp)) hv)
-  selfPrimNoLease := by
-    intro q hq; change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq
-  committedViewLen := by intro x; show a.committedView x ≤ (c.log x).length; rw [hlog]; exact h.committedViewLen x
-  committedViewHist := by
-    intro x; show a.committedView x ≤ c.hist.length ∧ (c.log x).take (a.committedView x) <+: c.hist
-    rw [hlog, hhist]; exact h.committedViewHist x }
-
-theorem leaseInvariant_ack {r : Node} (hne : primaryOf a.core r ≠ r)
-    (hpre : a.core.log r <+: a.core.log (primaryOf a.core r))
-    (hlt : a.core.acked (primaryOf a.core r) r < (a.core.log r).length) :
-    LeaseInvariant P (recvAck a r (ack a.core r)) :=
-  leaseInvariant_recvAck h (invariant_ack h.core r hne hpre hlt) rfl rfl rfl rfl rfl
-
-theorem leaseInvariant_ackRenew {r : Node} : LeaseInvariant P (recvAck a r a.core) :=
-  leaseInvariant_recvAck h h.core rfl rfl rfl rfl rfl
+    · obtain ⟨e1, rfl⟩ := e; rw [e1, update2_self]; left; exact ⟨a.now, rfl, h.leaseStartLe x v hx'⟩
+    · rw [update2_of_ne _ _ e]; exact h.leaseBound x v hx'
+  leaseAuth := fun x v hx hnp hv => h.leaseAuth x v (hLS x v hx) hnp hv
+  selfPrimNoLease := fun q hq v hx => h.selfPrimNoLease q hq v (hLS q v hx)
+  committedViewLen := h.committedViewLen
+  committedViewHist := h.committedViewHist
+  sentLe := fun m' hm' => h.sentLe m' (List.mem_of_mem_erase hm')
+  genLe := fun m' hm' => h.genLe m' (List.mem_of_mem_erase hm')
+  commitLe := fun m' hm' => h.commitLe m' (List.mem_of_mem_erase hm')
+  follows := fun m' hm' => h.follows m' (List.mem_of_mem_erase hm') }
 
 /-! ### Configuration changes -/
 
-/-- Learn. The learner restarts its takeover timer; a deposed primary that learns stops
-thinking it is primary, and held no read lease. -/
+/-- Learn. The learner restarts its takeover timer, and closes its connections if its
+primary changes; a deposed primary that learns stops thinking it is primary, and held no
+read lease. -/
 theorem leaseInvariant_learn {n : Node} (hnkl : ¬ KnowsLatest a.core n) :
     LeaseInvariant P (leaseLearn a n) := by
   have hnp : n ≠ a.core.cfg.primary := by
@@ -742,12 +1047,46 @@ theorem leaseInvariant_learn {n : Node} (hnkl : ¬ KnowsLatest a.core n) :
   have htp : ∀ x, ThinksPrimary (learn a.core n) x → x ≠ n ∧ ThinksPrimary a.core x :=
     fun _ => learn_thinksPrimary hnp
   have hPT := primaryTraffic_bump h n
+  -- the connections still open after the step were open before, and every current
+  -- message's receiver still follows the same primary.
+  have hcur : ∀ msg ∈ a.net, msg.Current (leaseLearn a n) →
+      msg.Current a ∧ primaryOf (learn a.core n) msg.dst = primaryOf a.core msg.dst := by
+    intro msg hm hc
+    by_cases hsame : a.core.cfg.primary = (a.core.localCfg n).primary
+    · have hg : (leaseLearn a n).gen = a.gen := by simp [leaseLearn, hsame]
+      refine ⟨by unfold Msg.Current at hc ⊢; rw [hg] at hc; exact hc, ?_⟩
+      unfold primaryOf; rw [hK]; split_ifs with e
+      · rw [e]; exact hsame
+      · rfl
+    · have hg : (leaseLearn a n).gen = bumpGen a.gen n := by simp [leaseLearn, hsame]
+      obtain ⟨hc', _, hd⟩ := current_of_bump hg (h.genLe msg hm) hc
+      refine ⟨hc', ?_⟩
+      unfold primaryOf; rw [hK, if_neg hd]
+  have hgen : ∀ x, a.gen x ≤ (leaseLearn a n).gen x := by
+    intro x
+    by_cases hsame : a.core.cfg.primary = (a.core.localCfg n).primary
+    · have hg : (leaseLearn a n).gen = a.gen := by simp [leaseLearn, hsame]
+      rw [hg]
+    · have hg : (leaseLearn a n).gen = bumpGen a.gen n := by simp [leaseLearn, hsame]
+      rw [hg]; unfold bumpGen update; split_ifs with e
+      · subst e; omega
+      · exact Nat.le_refl _
+  have hmono : ∀ msg ∈ (leaseLearn a n).net, msg ∈ a.net ∧ (msg.Current (leaseLearn a n) → msg.Current a) :=
+    fun msg hm => ⟨hm, fun hc => (hcur msg hm hc).1⟩
+  have hLS : ∀ r x, LeaseStart (leaseLearn a n) r x → LeaseStart a r x :=
+    fun r x hx => leaseStart_mono a (leaseLearn a n) (fun _ _ e => e) hmono hx
+  have hPLS : ∀ p r x, PrimStart (leaseLearn a n) p r x → PrimStart a p r x :=
+    fun p r x hx => primStart_mono a (leaseLearn a n) (fun _ _ _ e => e) hmono hx
+  obtain ⟨hS1, hS2, hS3, hS4⟩ := msgs_frame h (a' := leaseLearn a n) (Nat.le_refl _) (fun _ hm => hm)
+    (fun msg hm hc => (hcur msg hm hc).1)
+    (fun msg hm => ⟨Nat.le_trans (h.genLe msg hm).1 (hgen _), Nat.le_trans (h.genLe msg hm).2 (hgen _)⟩)
+    (fun _ _ _ => Nat.le_refl _) (fun msg hm hc => (hcur msg hm hc).2)
   exact {
   core := invariant_learn h.core n hnkl
   primaryTrafficLe := fun x => (hPT x).2
   ackReceivedLe := h.ackReceivedLe, primarySinceLe := h.primarySinceLe
   dataSentLe := fun x => Nat.le_trans (h.dataSentLe x) (hPT x).1
-  primaryLeaseLe := fun p x v hv => Nat.le_trans (h.primaryLeaseLe p x v hv) (hPT x).1
+  primaryLeaseLe := fun p x v hv => Nat.le_trans (h.primaryLeaseLe p x v (hPLS p x v hv)) (hPT x).1
   echoLe := h.echoLe, primarySinceAck := h.primarySinceAck
   deposed := by
     intro p hp hv
@@ -756,27 +1095,29 @@ theorem leaseInvariant_learn {n : Node} (hnkl : ¬ KnowsLatest a.core n) :
       have := hv; change ((learn a.core n).localCfg p).epoch < (learn a.core n).cfg.epoch at this
       rwa [hK, if_neg hpn, hcfg] at this
     obtain ⟨t, h1, h2, h3, h4⟩ := h.deposed p hp' hv'
-    refine ⟨t, h1, ?_, ?_, h4⟩
+    refine ⟨t, h1, ?_, ?_, fun x hx => h4 x (hPLS p t x hx)⟩
     · show ((learn a.core n).localCfg p).eligible t = true; rw [hK, if_neg hpn]; exact h2
     · show ((learn a.core n).localCfg t).primary ≠ p
       rw [hK]; split_ifs with e
       · show a.core.cfg.primary ≠ p; exact (stale_ne_prim h.core hv').symm
       · exact h3
-  leaseBound := h.leaseBound
+  leaseBound := fun r x hx => h.leaseBound r x (hLS r x hx)
   leaseAuth := by
-    intro x hnp hv
+    intro x v hx hnp hv
     show IsAuthoritative a.core x
-    by_cases hx : ThinksPrimary a.core x
-    · exact absurd hv (not_readLeaseValid_of_selfPrim h hx.1)
-    · exact h.leaseAuth x hx hv
+    have hx' := hLS x v hx
+    by_cases hxp : ThinksPrimary a.core x
+    · exact absurd hx' (h.selfPrimNoLease x hxp.1 v)
+    · exact h.leaseAuth x v hx' hxp hv
   selfPrimNoLease := by
-    intro q hq
+    intro q hq v hx
     change ((learn a.core n).localCfg q).primary = q at hq
     rw [hK] at hq; split_ifs at hq with e
-    · subst e; exact absurd hq.symm hnp
-    · exact h.selfPrimNoLease q hq
+    · subst e; exact hnp hq.symm
+    · exact h.selfPrimNoLease q hq v (hLS q v hx)
   committedViewLen := h.committedViewLen
-  committedViewHist := h.committedViewHist }
+  committedViewHist := h.committedViewHist
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
 
 omit h in
 include hM in
@@ -797,7 +1138,8 @@ theorem lease_over_of_guards {now v : Nat} {ackReceived primarySince : Option Na
   · exact hold hv
 
 include hM in
-/-- Demotion. The demoted replica's read lease is over, by the two waits. -/
+/-- Demotion. The demoted replica's read lease, held or in flight, is over, by the two
+waits. -/
 theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hkl : KnowsLatest a.core p)
     (hel : a.core.cfg.eligible r = true) (hgo : GrantorOver P a.now (a.ackReceived p r) P.readDur)
     (hwo : ∀ T, a.primarySince p = some T → a.oldEligible p r = true →
@@ -807,6 +1149,7 @@ theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hkl : 
   subst hpp
   have hkp : a.core.localCfg a.core.cfg.primary = a.core.cfg := h.core.localCfgEq _ hkl
   have htp := makeIneligible_thinksPrimary (s := a.core) (r := r) hkp
+  have hpo := primaryOf_cfgBump h hkp (makeIneligible_localCfg (s := a.core) (r := r)) rfl
   exact {
   core := invariant_makeIneligible h.core hp hkl hel
   primaryTrafficLe := h.primaryTrafficLe, ackReceivedLe := h.ackReceivedLe, primarySinceLe := h.primarySinceLe
@@ -814,27 +1157,42 @@ theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hkl : 
   deposed := fun q hq hv => deposed_cfgBump h rfl makeIneligible_localCfg rfl rfl htp hq hv
   leaseBound := h.leaseBound
   leaseAuth := by
-    intro x hnp hv
-    have hx := h.leaseAuth x (fun hp' => hnp ((htp x).2 hp')) hv
+    intro x v hx hnp hv
+    have hx' := h.leaseAuth x v hx (fun hp' => hnp ((htp x).2 hp')) hv
     by_cases ex : x = r
     · exfalso; subst ex
-      change HolderValid P a.now (a.readLease x) P.readDur at hv
-      cases hrl : a.readLease x with
-      | none => rw [hrl] at hv; exact hv
-      | some v =>
-        rw [hrl] at hv
-        exact lease_over_of_guards hM (h.leaseBound x v hrl) hgo hwo hv
-    · obtain ⟨h1, h2⟩ := hx
+      exact lease_over_of_guards hM (h.leaseBound x v hx) hgo hwo hv
+    · obtain ⟨h1, h2⟩ := hx'
       refine ⟨?_, h2⟩
       show (if x = r then false else a.core.cfg.eligible x) = true ∨ x = a.core.cfg.primary
       rw [if_neg ex]; exact h1
   selfPrimNoLease := fun q hq => selfPrimNoLease_cfgBump h hkp makeIneligible_localCfg hq
   committedViewLen := h.committedViewLen
-  committedViewHist := h.committedViewHist }
+  committedViewHist := h.committedViewHist
+  sentLe := h.sentLe, genLe := h.genLe, commitLe := h.commitLe
+  follows := fun msg hm hc hd =>
+    ⟨(hpo msg.dst).trans (h.follows msg hm hc hd).1, (h.follows msg hm hc hd).2⟩ }
+
+/-- Closing `n`'s connections: every message still current was current before and has
+neither end at `n`; generations only grow. -/
+theorem bump_facts {a' : LeaseState Node} {n : Node} (hg : a'.gen = bumpGen a.gen n) (hnet : a'.net = a.net) :
+    (∀ msg ∈ a'.net, msg ∈ a.net ∧ (msg.Current a' → msg.Current a)) ∧
+    (∀ msg ∈ a.net, msg.Current a' → msg.Current a ∧ msg.src ≠ n ∧ msg.dst ≠ n) ∧
+    (∀ msg ∈ a.net, msg.gs ≤ a'.gen msg.src ∧ msg.gd ≤ a'.gen msg.dst) := by
+  have hcb : ∀ msg ∈ a.net, msg.Current a' → msg.Current a ∧ msg.src ≠ n ∧ msg.dst ≠ n :=
+    fun msg hm hc => current_of_bump hg (h.genLe msg hm) hc
+  have hle : ∀ x, a.gen x ≤ a'.gen x := by
+    intro x; rw [hg]; unfold bumpGen update; split_ifs with e
+    · subst e; omega
+    · exact Nat.le_refl _
+  refine ⟨fun msg hm => ?_, hcb, fun msg hm => ?_⟩
+  · rw [hnet] at hm; exact ⟨hm, fun hc => (hcb msg hm hc).1⟩
+  · exact ⟨Nat.le_trans (h.genLe msg hm).1 (hle _), Nat.le_trans (h.genLe msg hm).2 (hle _)⟩
 
 /-- Takeover. The deposed primary gets its witness: the taker, eligible in its
-configuration, whose lease it can never again hold; every existing read lease started
-before the takeover. The taker's own lease rows are cleared (`update_row_some`). -/
+configuration, whose lease it can never again hold; every existing read lease, held or in
+flight, started before the takeover. The taker's own lease rows are cleared and its
+connections closed. -/
 theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a.core.cfg.eligible n = true)
     (hnp : n ≠ a.core.cfg.primary) (hin : a.core.cfg.incarnation n = a.core.incarnation n)
     (hwait : a.primaryTraffic n + P.primDur ≤ a.now + P.drift) :
@@ -842,11 +1200,33 @@ theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a
   have hK := takeover_localCfg (s := a.core) (n := n)
   have htp := takeover_thinksPrimary (s := a.core) hin
   obtain ⟨hAR, hPS, hAE, hPA⟩ := cleared_rows h (a' := leaseTakeover a n) n rfl rfl rfl rfl (fun _ e => update_of_ne _ _ e)
+  obtain ⟨hmono, hcb, hgle⟩ := bump_facts h (a' := leaseTakeover a n) (n := n) rfl rfl
+  have hLS : ∀ r x, LeaseStart (leaseTakeover a n) r x → r ≠ n ∧ LeaseStart a r x := by
+    intro r x hx
+    rcases hx with hx | ⟨msg, hm, hc, hd, he⟩
+    · obtain ⟨hrn, hx⟩ := update_none_some _ _ _ hx; exact ⟨hrn, Or.inl hx⟩
+    · obtain ⟨hc', _, hdn⟩ := hcb msg hm hc
+      exact ⟨hd ▸ hdn, Or.inr ⟨msg, hm, hc', hd, he⟩⟩
+  have hPLS : ∀ p r x, PrimStart (leaseTakeover a n) p r x → PrimStart a p r x ∧ (p = n → False) := by
+    intro p r x hx
+    rcases hx with hx | ⟨msg, hm, hc, hd, hs, he⟩
+    · obtain ⟨hpn, hx⟩ := update_row_some _ _ _ _ hx; exact ⟨Or.inl hx, hpn⟩
+    · obtain ⟨hc', _, hdn⟩ := hcb msg hm hc
+      exact ⟨Or.inr ⟨msg, hm, hc', hd, hs, he⟩, fun e => hdn (hd.trans e)⟩
+  have hPLSsrc : ∀ p x, PrimStart (leaseTakeover a n) p n x → a.primaryLease p n = some x := by
+    intro p x hx
+    rcases hx with hx | ⟨msg, hm, hc, hd, hs, he⟩
+    · exact (update_row_some _ _ _ _ hx).2
+    · exact absurd hs (hcb msg hm hc).2.1
+  obtain ⟨hS1, hS2, hS3, hS4⟩ := msgs_frame h (a' := leaseTakeover a n) (Nat.le_refl _) (fun _ hm => hm)
+    (fun msg hm hc => (hcb msg hm hc).1) hgle
+    (fun msg hm hc => (takeover_commit_other (s := a.core) (hcb msg hm hc).2.1).ge)
+    (fun msg hm hc => congrArg Cfg.primary (takeover_localCfg_other (s := a.core) (hcb msg hm hc).2.2))
   exact {
   core := invariant_takeover h.core n hkl hel hnp hin
   primaryTrafficLe := h.primaryTrafficLe, dataSentLe := h.dataSentLe
   ackReceivedLe := hAR, primarySinceLe := hPS, echoLe := hAE, primarySinceAck := hPA
-  primaryLeaseLe := fun q x v hv => h.primaryLeaseLe q x v (update_row_some _ _ _ _ hv).2
+  primaryLeaseLe := fun q x v hv => h.primaryLeaseLe q x v (hPLS q x v hv).1
   deposed := by
     intro q hq hv
     rcases (htp q).1 hq with rfl | ⟨hqn, hq'⟩
@@ -858,7 +1238,7 @@ theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a
       rcases Nat.lt_succ_iff_lt_or_eq.1 hv0 with hl | heq
       · -- deposed before: the old witness still serves.
         obtain ⟨t, h1, h2, h3, h4⟩ := h.deposed q hq' hl
-        refine ⟨t, h1, ?_, ?_, fun x hx => h4 x (update_row_some _ _ _ _ hx).2⟩
+        refine ⟨t, h1, ?_, ?_, fun x hx => h4 x (hPLS q t x hx).1⟩
         · show ((takeover a.core n).localCfg q).eligible t = true; rw [hK, if_neg hqn]; exact h2
         · show ((takeover a.core n).localCfg t).primary ≠ q
           rw [hK]; split_ifs with e
@@ -872,17 +1252,17 @@ theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a
         · show ((takeover a.core n).localCfg n).primary ≠ q
           rw [hK, if_pos rfl]; show n ≠ q; exact fun e => hnp (e ▸ hqp)
         · -- `q`'s lease from `n` started no later than `n`'s last traffic, which `n`
-          -- waited out (`hwait`).
+          -- waited out (`hwait`); `n`'s acknowledgements in flight were discarded.
           intro x hx; show x + P.primDur ≤ a.now + P.drift
-          have := h.primaryLeaseLe q n x (update_row_some _ _ _ _ hx).2; omega
+          have := h.primaryLeaseLe q n x (Or.inl (hPLSsrc q x hx)); omega
   leaseBound := by
     intro x v hx
-    obtain ⟨hxn, hx⟩ := update_none_some _ _ _ hx
+    obtain ⟨hxn, hx⟩ := hLS x v hx
     show (∃ b, update a.ackReceived n (fun _ => none) (takeoverCfg a.core n).primary x = some b ∧ v ≤ b) ∨
       (∃ T, update a.primarySince n (some a.now) (takeoverCfg a.core n).primary = some T ∧ v ≤ T ∧
         (update a.oldEligible n a.core.cfg.eligible (takeoverCfg a.core n).primary x = true ∨
           ¬ HolderValid P a.now (some v) P.readDur))
-    right; refine ⟨a.now, update_self _ _ _, h.readLeaseLe x v hx, ?_⟩
+    right; refine ⟨a.now, update_self _ _ _, h.leaseStartLe x v hx, ?_⟩
     show (update a.oldEligible n a.core.cfg.eligible n x = true) ∨ _
     rw [update_self]
     by_cases hel : a.core.cfg.eligible x = true
@@ -890,69 +1270,84 @@ theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a
     · -- `x` was not eligible in the configuration being replaced: a valid lease would
       -- make it authoritative, so its lease is not valid.
       right; intro hv
-      have hvv : ReadLeaseValid P a x := by unfold ReadLeaseValid; rw [hx]; exact hv
-      have hxp : ¬ ThinksPrimary a.core x := fun hp => not_readLeaseValid_of_selfPrim h hp.1 hvv
-      rcases (h.leaseAuth x hxp hvv).1 with h1 | h1
+      have hxp : ¬ ThinksPrimary a.core x := fun hp => h.selfPrimNoLease x hp.1 v hx
+      rcases (h.leaseAuth x v hx hxp hv).1 with h1 | h1
       · exact hel h1
-      · exact not_readLeaseValid_of_selfPrim h (by rw [h1, h.core.primKnows]) hvv
+      · exact h.selfPrimNoLease x (by rw [h1, h.core.primKnows]) v hx
   leaseAuth := by
-    intro x hnp' hv
-    change HolderValid P a.now (update a.readLease n none x) P.readDur at hv
-    by_cases ex : x = n
-    · subst ex; rw [update_self] at hv; exact hv.elim
-    · rw [update_of_ne _ _ ex] at hv
-      have hx : ¬ ThinksPrimary a.core x := fun hp => hnp' ((htp x).2 (Or.inr ⟨ex, hp⟩))
-      obtain ⟨h1, h2⟩ := h.leaseAuth x hx hv
-      have hxq : x ≠ a.core.cfg.primary := fun e =>
-        not_readLeaseValid_of_selfPrim h (by rw [e, h.core.primKnows]) hv
-      refine ⟨Or.inl ?_, h2⟩
-      show eligibleAfterTakeover a.core n x = true
-      unfold eligibleAfterTakeover
-      rcases h1 with h1 | h1
-      · simp [h1, hxq, ex]
-      · exact absurd h1 hxq
+    intro x v hx' hnp' hv
+    obtain ⟨ex, hx⟩ := hLS x v hx'
+    have hxt : ¬ ThinksPrimary a.core x := fun hp => hnp' ((htp x).2 (Or.inr ⟨ex, hp⟩))
+    obtain ⟨h1, h2⟩ := h.leaseAuth x v hx hxt hv
+    have hxq : x ≠ a.core.cfg.primary := fun e =>
+      h.selfPrimNoLease x (by rw [e, h.core.primKnows]) v hx
+    refine ⟨Or.inl ?_, h2⟩
+    show eligibleAfterTakeover a.core n x = true
+    unfold eligibleAfterTakeover
+    rcases h1 with h1 | h1
+    · simp [h1, hxq, ex]
+    · exact absurd h1 hxq
   selfPrimNoLease := by
-    intro q hq
-    show update a.readLease n none q = none
-    unfold update; split_ifs with e
-    · rfl
-    · change ((takeover a.core n).localCfg q).primary = q at hq
-      rw [hK, if_neg e] at hq; exact h.selfPrimNoLease q hq
+    intro q hq v hx
+    obtain ⟨e, hx⟩ := hLS q v hx
+    change ((takeover a.core n).localCfg q).primary = q at hq
+    rw [hK, if_neg e] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := h.committedViewLen
-  committedViewHist := h.committedViewHist }
+  committedViewHist := h.committedViewHist
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
 
-/-- A full resync: the replica's committed view starts over. -/
+/-- A full resync: the replica's committed view starts over and its connections close. -/
 theorem leaseInvariant_resync {r : Node} (hne : primaryOf a.core r ≠ r)
     (hnpre : ¬ (a.core.log r <+: a.core.log (primaryOf a.core r)))
     (hsy : a.core.sync (primaryOf a.core r) r = false)
     (hke : (a.core.localCfg (primaryOf a.core r)).eligible r = false) :
     LeaseInvariant P (leaseResync a r) := by
   obtain ⟨hCV, hCH⟩ := committedView_reset h (c := resync a.core r) r (fun _ e => resync_log_other e) rfl
+  obtain ⟨_, hcb, hgle⟩ := bump_facts h (a' := leaseResync a r) (n := r) rfl rfl
   exact leaseInvariant_frame h (invariant_resync h.core r hne hsy hke)
     (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl) (hnow := rfl) (hPL := rfl)
     (hAR := rfl) (hAE := rfl) (hRL := rfl) (hPS := rfl) (hOE := rfl)
+    (fun _ hm => hm) (fun msg hm hc => (hcb msg hm hc).1) hgle
+    (fun msg hm hc => (resync_commit_other (s := a.core) (hcb msg hm hc).2.1).ge)
     (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe hCV hCH
 
 /-! ### Restarts -/
 
 /-- A restart of `n`, with replication state `c` afterwards. `c` keeps the configuration
-and every other node's incarnation and log, and the history. `n`'s lease rows are
-cleared (`update_row_some`), its committed view starts over, and both its timers restart. -/
+and every other node's incarnation, log and committed offset, and the history. `n`'s
+lease rows are cleared, its committed view starts over, its timers restart, and its
+connections close. -/
 theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c)
     (hkl : KnowsLatest a.core n)
     (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
     (hinc : ∀ x, x ≠ n → c.incarnation x = a.core.incarnation x)
-    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hhist : c.hist = a.core.hist) :
+    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hhist : c.hist = a.core.hist)
+    (hcommit : ∀ x, x ≠ n → c.commit x = a.core.commit x) :
     LeaseInvariant P (leaseRestart a n c) := by
   have hPT := primaryTraffic_bump h n
   obtain ⟨hAR, hPS, hAE, hPA⟩ := cleared_rows h (a' := leaseRestart a n c) n rfl rfl rfl rfl (fun _ e => update_of_ne _ _ e)
   obtain ⟨hCV, hCH⟩ := committedView_reset h n hlog hhist
+  obtain ⟨_, hcb, hgle⟩ := bump_facts h (a' := leaseRestart a n c) (n := n) rfl rfl
+  have hLS : ∀ r x, LeaseStart (leaseRestart a n c) r x → r ≠ n ∧ LeaseStart a r x := by
+    intro r x hx
+    rcases hx with hx | ⟨msg, hm, hc, hd, he⟩
+    · obtain ⟨hrn, hx⟩ := update_none_some _ _ _ hx; exact ⟨hrn, Or.inl hx⟩
+    · obtain ⟨hc', _, hdn⟩ := hcb msg hm hc
+      exact ⟨hd ▸ hdn, Or.inr ⟨msg, hm, hc', hd, he⟩⟩
+  have hPLS : ∀ p r x, PrimStart (leaseRestart a n c) p r x → PrimStart a p r x := by
+    intro p r x hx
+    rcases hx with hx | ⟨msg, hm, hc, hd, hs, he⟩
+    · exact Or.inl (update_row_some _ _ _ _ hx).2
+    · exact Or.inr ⟨msg, hm, (hcb msg hm hc).1, hd, hs, he⟩
+  obtain ⟨hS1, hS2, hS3, hS4⟩ := msgs_frame h (a' := leaseRestart a n c) (Nat.le_refl _) (fun _ hm => hm)
+    (fun msg hm hc => (hcb msg hm hc).1) hgle
+    (fun msg hm hc => (hcommit _ (hcb msg hm hc).2.1).ge)
+    (fun msg _ _ => congrArg (fun f => (f msg.dst).primary) hlocalCfg)
   exact {
   core := hc
   primaryTrafficLe := fun x => (hPT x).2
   ackReceivedLe := hAR, primarySinceLe := hPS, echoLe := hAE, primarySinceAck := hPA
-  primaryLeaseLe := fun q x v hv =>
-    Nat.le_trans (h.primaryLeaseLe q x v (update_row_some _ _ _ _ hv).2) (hPT x).1
+  primaryLeaseLe := fun q x v hv => Nat.le_trans (h.primaryLeaseLe q x v (hPLS q x v hv)) (hPT x).1
   dataSentLe := by
     intro x; show update a.dataSent n a.now x ≤ update a.primaryTraffic n a.now x
     unfold update; split_ifs
@@ -966,10 +1361,10 @@ theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c)
       rw [hlocalCfg, hcfg] at hv; unfold KnowsLatest at hkl; omega
     obtain ⟨t, h1, h2, h3, h4⟩ :=
       deposed_frame h (hcfg := hcfg) (hlocalCfg := hlocalCfg) ((thinksPrimary_congr hlocalCfg (hinc q hqn)).1 hq) hv
-    exact ⟨t, h1, h2, h3, fun x hx => h4 x (update_row_some _ _ _ _ hx).2⟩
+    exact ⟨t, h1, h2, h3, fun x hx => h4 x (hPLS q t x hx)⟩
   leaseBound := by
     intro x v hx
-    obtain ⟨hxn, hx⟩ := update_none_some _ _ _ hx
+    obtain ⟨hxn, hx⟩ := hLS x v hx
     show (∃ b, update a.ackReceived n (fun _ => none) c.cfg.primary x = some b ∧ v ≤ b) ∨
       (∃ T, update a.primarySince n (some a.now) c.cfg.primary = some T ∧ v ≤ T ∧
         (update a.oldEligible n (fun _ => true) c.cfg.primary x = true ∨
@@ -978,41 +1373,39 @@ theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c)
     by_cases hpn : a.core.cfg.primary = n
     · -- the primary restarted: every remaining lease is bounded by its new primaryship.
       rw [hpn, update_self, update_self, update_self]
-      right; exact ⟨a.now, rfl, h.readLeaseLe x v hx, Or.inl rfl⟩
+      right; exact ⟨a.now, rfl, h.leaseStartLe x v hx, Or.inl rfl⟩
     · rw [update_of_ne _ _ hpn, update_of_ne _ _ hpn, update_of_ne _ _ hpn]; exact h.leaseBound x v hx
   leaseAuth := by
-    intro x hnp hv
-    change HolderValid P a.now (update a.readLease n none x) P.readDur at hv
-    by_cases ex : x = n
-    · subst ex; rw [update_self] at hv; exact hv.elim
-    · rw [update_of_ne _ _ ex] at hv
-      exact (isAuthoritative_congr hcfg (hinc x ex)).2
-        (h.leaseAuth x (fun hp => hnp ((thinksPrimary_congr hlocalCfg (hinc x ex)).2 hp)) hv)
+    intro x v hx hnp hv
+    obtain ⟨ex, hx⟩ := hLS x v hx
+    exact (isAuthoritative_congr hcfg (hinc x ex)).2
+      (h.leaseAuth x v hx (fun hp => hnp ((thinksPrimary_congr hlocalCfg (hinc x ex)).2 hp)) hv)
   selfPrimNoLease := by
-    intro q hq
-    show update a.readLease n none q = none
-    unfold update; split_ifs with e
-    · rfl
-    · change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq
+    intro q hq v hx
+    obtain ⟨_, hx⟩ := hLS q v hx
+    change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := hCV
-  committedViewHist := hCH }
+  committedViewHist := hCH
+  sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4 }
 
 theorem leaseInvariant_restartEmpty {n : Node} (hkl : KnowsLatest a.core n)
     (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) :
     LeaseInvariant P (leaseRestart a n (restartEmpty a.core n)) :=
   leaseInvariant_restart h (invariant_restartEmpty h.core n hkl hsurv) hkl rfl rfl
     (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e) rfl
+    (fun _ e => restartEmpty_commit_other e)
 
 theorem leaseInvariant_restartKeep {n : Node} (hkl : KnowsLatest a.core n) :
     LeaseInvariant P (leaseRestart a n (restartKeep a.core n)) :=
   leaseInvariant_restart h (invariant_restartKeep h.core n hkl) hkl rfl rfl
-    (fun _ _ => rfl) (fun _ _ => rfl) rfl
+    (fun _ _ => rfl) (fun _ _ => rfl) rfl (fun _ e => restartKeep_commit_other e)
 
 theorem leaseInvariant_restartPartialKeep {n : Node} {k : Nat} (hkl : KnowsLatest a.core n)
     (hk : k < (a.core.log n).length) (hkeep : a.core.ackHigh n ≤ k) :
     LeaseInvariant P (leaseRestart a n (restartPartialKeep a.core n k)) :=
   leaseInvariant_restart h (invariant_restartPartialKeep h.core n k hkl hk hkeep) hkl rfl rfl
     (fun _ _ => rfl) (fun _ e => restartPartialKeep_log_other e) rfl
+    (fun _ e => restartKeep_commit_other e)
 
 theorem leaseInvariant_restartPartialFresh {n : Node} {k : Nat} (hkl : KnowsLatest a.core n)
     (hk : k < (a.core.log n).length) (hfresh : k < a.core.ackHigh n)
@@ -1020,6 +1413,7 @@ theorem leaseInvariant_restartPartialFresh {n : Node} {k : Nat} (hkl : KnowsLate
     LeaseInvariant P (leaseRestart a n (restartPartialFresh a.core n k)) :=
   leaseInvariant_restart h (invariant_restartPartialFresh h.core n k hkl hsurv hk hfresh) hkl rfl rfl
     (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e) rfl
+    (fun _ e => restartEmpty_commit_other e)
 
 end preserve
 
@@ -1032,11 +1426,12 @@ theorem leaseInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m
   cases hs with
   | tick => exact leaseInvariant_tick h
   | core μ c hc hpl => exact leaseInvariant_core h hc hpl
-  | replicate r _ hpre hlt => exact leaseInvariant_replicate h hpre hlt
-  | heartbeat r _ hpre => exact leaseInvariant_heartbeat h hpre
-  | heartbeatGrant r hne hp hpre hg => exact leaseInvariant_heartbeatGrant hM h hne hp hpre hg
-  | ack r hne hpre hlt => exact leaseInvariant_ack h hne hpre hlt
-  | ackRenew r _ _ => exact leaseInvariant_ackRenew h
+  | sendData p r hne hf => exact leaseInvariant_sendData h hne hf
+  | sendGrant p r hne hf hp hg => exact leaseInvariant_sendGrant hM h hne hf hp hg
+  | sendAck r hne => exact leaseInvariant_sendAck h hne
+  | deliverData p r gs gd t c e hm hc hf hpre => exact leaseInvariant_deliverData h hm hc hf hpre
+  | deliverAck r p gs gd t d hm hc => exact leaseInvariant_deliverAck h hm hc
+  | drop msg _ => exact leaseInvariant_drop h
   | learn n hnkl => exact leaseInvariant_learn h hnkl
   | demote p r hp hkl hel hgo hwo => exact leaseInvariant_demote hM h hp hkl hel hgo hwo
   | takeover n hkl hel hnp hin hwait => exact leaseInvariant_takeover h hkl hel hnp hin hwait

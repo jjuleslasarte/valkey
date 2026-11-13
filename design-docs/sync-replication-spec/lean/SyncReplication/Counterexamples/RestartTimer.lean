@@ -10,7 +10,7 @@ attempts a takeover"; the model implements that by restarting the timer at the r
 time. A restarted node that has forgotten the timer and treats the primary as never
 heard from breaks the rule, and this file shows that loses property 6.
 
-`LeaseStepRestartForgetsTimer` is `LeaseStep` plus RestartKeep that sets the restarted
+`LeaseStepRestartForgetsTimer` is `InstantLeaseStep` plus RestartKeep that sets the restarted
 node's timer to 0, the oldest possible time. The run, at `P0` and
 `min-sync-replicas = 0`: n0 promotes n1; at time 4 a heartbeat reaches n1 and n1
 acknowledges, so n0 holds its lease from n1 from time 4; n1 restarts with its data and
@@ -28,11 +28,11 @@ behaves as if it had never heard from its primary. -/
 def leaseRestartForgettingTimer (a : LeaseState N) (n : N) (c : State N) : LeaseState N :=
   { leaseRestart a n c with primaryTraffic := update a.primaryTraffic n 0 }
 
-/-- `LeaseStep`, plus RestartKeep that forgets the takeover timer. -/
+/-- `InstantLeaseStep`, plus RestartKeep that forgets the takeover timer. -/
 inductive LeaseStepRestartForgetsTimer (m : Nat) (P : LeaseParams) :
     LeaseState N → LeaseAction N → LeaseState N → Prop
   /-- Every step of the lease layer. -/
-  | step {a μ a'} : LeaseStep m P a μ a' → LeaseStepRestartForgetsTimer m P a μ a'
+  | step {a μ a'} : InstantLeaseStep m P a μ a' → LeaseStepRestartForgetsTimer m P a μ a'
   /-- RestartKeep, with its guard, setting the takeover timer to 0. -/
   | restartKeep (a : LeaseState N) (n : N) : KnowsLatest a.core n →
       LeaseStepRestartForgetsTimer m P a (.restartKeep n)
@@ -75,21 +75,21 @@ theorem restartForgetsTimer_run : (leaseTransitionSystemRestartForgetsTimer 0 P0
     [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .tick, .tick, .tick, .tick,
      .heartbeat 1, .ack 1, .restartKeep 1, .takeover 1, .core (.append 1), .core (.commit 1)]
     forgetTimer13 :=
-  .stepL (.step (LeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.core forgetTimer1 _ _ (Step.makeEligible forgetTimer1.core 0 1 (by decide)
+  .stepL (.step (InstantLeaseStep.core forgetTimer1 _ _ (Step.makeEligible forgetTimer1.core 0 1 (by decide)
     (by decide) (by decide) (by decide)) rfl)) <|
-  .stepL (.step (LeaseStep.learn forgetTimer2 1 (by decide))) <|
-  .stepL (.step (LeaseStep.tick forgetTimer3)) <| .stepL (.step (LeaseStep.tick forgetTimer4)) <|
-  .stepL (.step (LeaseStep.tick forgetTimer5)) <| .stepL (.step (LeaseStep.tick forgetTimer6)) <|
-  .stepL (.step (LeaseStep.heartbeat forgetTimer7 1 (by decide) (by decide))) <|
-  .stepL (.step (LeaseStep.ackRenew forgetTimer8 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.learn forgetTimer2 1 (by decide))) <|
+  .stepL (.step (InstantLeaseStep.tick forgetTimer3)) <| .stepL (.step (InstantLeaseStep.tick forgetTimer4)) <|
+  .stepL (.step (InstantLeaseStep.tick forgetTimer5)) <| .stepL (.step (InstantLeaseStep.tick forgetTimer6)) <|
+  .stepL (.step (InstantLeaseStep.heartbeat forgetTimer7 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew forgetTimer8 1 (by decide) (by decide))) <|
   .stepL (LeaseStepRestartForgetsTimer.restartKeep forgetTimer9 1 (by decide)) <|
-  .stepL (.step (LeaseStep.takeover forgetTimer10 1 (by decide) (by decide) (by decide) (by decide)
+  .stepL (.step (InstantLeaseStep.takeover forgetTimer10 1 (by decide) (by decide) (by decide) (by decide)
     (by decide))) <|
-  .stepL (.step (LeaseStep.core forgetTimer11 _ _ (Step.append forgetTimer11.core 1 (by decide)
+  .stepL (.step (InstantLeaseStep.core forgetTimer11 _ _ (Step.append forgetTimer11.core 1 (by decide)
     (writable_zero _ _)) rfl)) <|
-  .stepL (.step (LeaseStep.core forgetTimer12 _ _ (Step.commit forgetTimer12.core 1 (by decide)
+  .stepL (.step (InstantLeaseStep.core forgetTimer12 _ _ (Step.commit forgetTimer12.core 1 (by decide)
     (writable_zero _ _) (by decide) (by decide)) rfl)) <|
   .refl
 

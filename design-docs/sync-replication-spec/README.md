@@ -166,14 +166,23 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   not distinguish memory from disk: a restart keeps the log, empties it, or keeps a
   prefix of it.
 
-Messages are not modelled as separate objects. A replica reads its primary's log
-directly, and an acknowledgement updates the primary's view directly, with the
-replica's offset at that moment. A delayed message corresponds to the same step
-taken later, and a lost connection corresponds to the step never being taken. This
-assumes that a message is never delivered after the connection that carried it has
-been closed by a full resync or a restart: an acknowledgement sent before a resync
+In the replication model, messages are not separate objects. A replica reads its
+primary's log directly, and an acknowledgement updates the primary's view directly,
+with the replica's offset at that moment. A delayed message corresponds to the same
+step taken later, and a lost connection corresponds to the step never being taken.
+This assumes that a message is never delivered after the connection that carried it
+has been closed by a full resync or a restart: an acknowledgement sent before a resync
 cannot arrive after it. Steps interleave arbitrarily, so any order of events across
 nodes is covered.
+
+The lease layer models its messages. `REPLCONF COMMIT` (the primary's committed offset,
+with or without the echo of an acknowledgement) and the acknowledgement that renews
+the primary lease are sent into a set of messages in flight and delivered later, in
+any order, after any delay, or never. Each records the connection it was sent on;
+connections close when either end restarts, takes over, is resynced, or learns a
+configuration with a different primary, and a message from a closed connection is
+never delivered, as Valkey drops the link. The entries and acknowledged offsets
+themselves still move in one step.
 
 Each log entry records the **replication ID** of the primaryship that wrote it (the
 field `replId`). IDs are compared only for equality, never ordered, and a takeover picks
@@ -311,14 +320,21 @@ clauses of the fence) hold
 only while it is authoritative: a primary that came back empty holds nothing, and
 nothing new is committed until an authoritative eligible replica takes over.
 
-Property 6 extends `Invariant` with thirteen more parts (`LeaseInvariant`,
-`LeaseInvariant.lean`). Seven are bookkeeping: every recorded traffic, acknowledgement
+Property 6 extends `Invariant` with seventeen more parts (`LeaseInvariant`,
+`LeaseInvariant.lean`). A lease is counted whether it is held or still in flight: a read
+lease includes the echo of any `REPLCONF COMMIT` on its way to the replica, and a
+primary lease any acknowledgement on its way to the primary. Seven parts are
+bookkeeping: every recorded traffic, acknowledgement
 and primaryship time is in the past (so is every read lease's start, which follows); a
 lease, and the data an acknowledgement confirms, is dated no later than the traffic it
 is measured from; an acknowledgement a primary echoes was sent no later than it
 arrived; every acknowledgement a primary holds arrived during its current primaryship
 (this last one is what lets a read lease dated by a takeover be renewed into one dated
-by an acknowledgement). Two carry the argument:
+by an acknowledgement). Four are about messages in flight: each was sent in the past,
+on a connection no newer than the current one; a `REPLCONF COMMIT` on an open
+connection carries no more than its sender's committed offset (an offset only goes down
+at a takeover, resync or restart, which closes the connections); and it goes from a
+replica's primary to that replica. Two carry the argument:
 - **A deposed primary's lease is over for good** (`deposed`). A primary `p` was deposed
   by a takeover of some `t`. `p` was current then, so it knew the latest configuration,
   and `t`'s takeover checked `t`'s eligibility in that configuration: `t` is eligible in
@@ -383,19 +399,23 @@ changes touch (`localCfgEq`, `primKnows`, `eligibleInOldConfig`) are corrected b
 | `stale` | Failover | Commit |
 | `authEx` | Failover | Commit |
 | `eligibleHoldsCommitted` | goal | the `Safety` statement; every action |
-| `primaryTrafficLe` | Lease | Replicate, Heartbeat, Learn, the restarts |
-| `ackReceivedLe` | Lease | HeartbeatGrant |
-| `primarySinceLe` | Lease | Ack |
-| `dataSentLe` | Lease | Ack |
+| `primaryTrafficLe` | Lease | DeliverData, Learn, the restarts |
+| `ackReceivedLe` | Lease | SendGrant |
+| `primarySinceLe` | Lease | DeliverAck |
+| `dataSentLe` | Lease | SendAck |
 | `primaryLeaseLe` | Lease | Takeover |
-| `echoLe` | Lease | HeartbeatGrant |
-| `primarySinceAck` | Lease | HeartbeatGrant |
-| `deposed` | Lease | NoStaleRead, HeartbeatGrant |
-| `leaseBound` | Lease | HeartbeatGrant, Demote |
+| `echoLe` | Lease | SendGrant |
+| `primarySinceAck` | Lease | DeliverData |
+| `deposed` | Lease | NoStaleRead, SendGrant |
+| `leaseBound` | Lease | DeliverData, Demote |
 | `leaseAuth` | Lease | NoStaleRead, Takeover |
 | `selfPrimNoLease` | Lease | Learn, Takeover |
 | `committedViewLen` | Lease | the steps that extend logs, data messages |
 | `committedViewHist` | Lease | NoStaleRead |
+| `sentLe` | Lease (messages) | DeliverData, DeliverAck (by use; added with message delay, not swept) |
+| `genLe` | Lease (messages) | Takeover, Resync, Learn, the restarts (by use; not swept) |
+| `commitLe` | Lease (messages) | DeliverData (by use; not swept) |
+| `follows` | Lease (messages) | DeliverData (by use; not swept) |
 
 "Needed by" is about the current proof. No counterexample state was built for any
 conjunct (one that meets all the others, breaks this one, and reaches a violation in one
@@ -497,11 +517,12 @@ What these say about the design's own wording is in Appendix B.
 | Property 6 is not vacuous: a replica holding a read lease may serve a read | `SyncReplication.replCanRead_reachable` |
 | A new primary may demote a replica it promoted itself without the post-takeover wait | `SyncReplication.demoteNew_reachable` |
 | Resync's guard that the replica is not counted excludes a reachable state (no counterexample without it) | `SyncReplication.countedDiverged_reachable` |
+| Property 6 with lease messages delayed, reordered or lost: every instant-delivery run is a run of the delayed model, so the counterexamples and reachability witnesses carry over | `SyncReplication.instant_simulates`, `instantReachable_leaseReachable` |
 | A restart need not clear the node's grantor rows (primary leases, acknowledgement times, echoes) for property 6 | `SyncReplication.noStaleRead_keepGrantorRows` |
 
-Size: the model is 935 lines (481 for the protocol, 140 for the held-reply layer,
-314 for the lease layer), the invariants and their lemmas 1,545 (475 for replication,
-1,070 for leases, which includes their preservation), the per-action contracts 616,
+Size: the model is 1,112 lines (481 for the protocol, 140 for the held-reply layer,
+491 for the lease layer), the invariants and their lemmas 1,940 (475 for replication,
+1,465 for leases, which includes their preservation), the per-action contracts 616,
 and the replication preservation proofs 2,551. Lean checks the whole of
 `SyncReplication` in about 20 seconds on a laptop-class machine.
 
@@ -543,14 +564,17 @@ statement is in the file section 6 names for it.
   COMMIT`) is separate, and is what a replica read is served from.
 - **The Cluster V2 bus is assumed correct** and modelled as a compare-and-set register
   (section 1).
-- **Messages are abstracted** (section 1). An acknowledgement carries the replica's
-  offset at delivery, so the model assumes no message is delivered after a full
-  resync or restart has closed its connection. In the lease layer a lease therefore
-  starts at the real time of the event it is measured from; this is the tightest case
-  for a lease argument, since delivery delay only widens the gap between a holder's
-  expiry and the grantor's promise. The echo of an acknowledgement rides on a
-  separate heartbeat rather than on every data message, which reaches the same
-  states.
+- **Replication messages are abstracted** (section 1). An acknowledgement carries the
+  replica's offset at delivery, so the model assumes no message is delivered after a
+  full resync or restart has closed its connection. The lease layer's messages are
+  delayed, reordered or lost, with unbounded delay, but log entries and acknowledged
+  offsets are not: delaying those is a change to the replication model not made here.
+  A connection closes on a restart, takeover or resync of either end and when a node
+  learns a configuration with a different primary; a message sent on a closed
+  connection is never delivered. The echo of an acknowledgement rides on a separate
+  `REPLCONF COMMIT` rather than on every data message, which reaches the same states.
+  The model with instant lease messages (`InstantLeaseStep`) is a special case:
+  `instant_simulates` turns each of its steps into a run of the delayed model.
 - **Clocks** follow the additive drift model: over one lease, a local clock's elapsed
   time is within `drift` of real elapsed time. `Lease/Additive.lean` shows the two
   worst cases the layer uses (holder slow, grantor fast) are exact for this model;
@@ -657,7 +681,8 @@ small sizes, and earlier versions of the Lean encoding were checked against that
 model's complete state graph; that catches slips in how the Lean was written, not
 differences between both models and the design. The lease layer mirrors
 `spec/Leases.tla` but was not checked against its state graph, and differs from it in:
-instant messages instead of one-slot lossy channels; the echo on a separate heartbeat;
+unordered lossy message sets with connection generations instead of one-slot lossy
+channels; the echo on a separate heartbeat;
 restarts and incarnations, absent from `Leases.tla`; `MayGrant` requiring eligibility
 and a matching incarnation where `EchoOnlySync` requires sync membership; traffic and
 acknowledgements not gated on the sender thinking it is primary (which only adds
@@ -681,18 +706,19 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 |---|---|---|
 | `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 481 |
 | `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 140 |
-| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 314 |
+| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 491 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 475 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
 | `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,551 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies`, `committed_inherited_first` | 109 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 278 |
-| `lean/SyncReplication/RestartGrantorRows.lean` | Restarts that keep the node's grantor rows: property 6 still holds (`noStaleRead_keepGrantorRows`) | 161 |
-| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,070 |
+| `lean/SyncReplication/InstantLeases.lean` | The lease layer with instant messages is a special case (`instant_simulates`) | 148 |
+| `lean/SyncReplication/RestartGrantorRows.lean` | Restarts that keep the node's grantor rows: property 6 still holds (`noStaleRead_keepGrantorRows`) | 178 |
+| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,465 |
 | `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,718 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
-| `lean/Check.lean` | Prints the axioms of the 34 `SyncReplication` theorems | |
+| `lean/Check.lean` | Prints the axioms of the 36 `SyncReplication` theorems | |
 | `lean/LeaseCheck.lean` | Prints the axioms of the 12 `Lease` theorems | |
 
 Lean 4.35 with Mathlib `v4.35.0`, used for list-prefix lemmas and for `Set.encard`
@@ -729,7 +755,7 @@ property that does not hold gets a counterexample instead.
 cd lean
 lake exe cache get                # once: Mathlib's prebuilt files (about 7 GB)
 lake build                        # builds every proof
-lake env lean Check.lean          # axioms of the 34 SyncReplication theorems
+lake env lean Check.lean          # axioms of the 36 SyncReplication theorems
 lake env lean LeaseCheck.lean     # axioms of the 12 Lease theorems
 ```
 
@@ -1272,6 +1298,11 @@ relation instead.
 | Lease rules | `Leases_noWaitPrim`, `_noWaitRead`, `_noEchoSync`, `_smallMargin` (each violates `NoStaleLinRead`); the safe runs never finished | `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale` (the `EchoOnlySync` rule), `grantSync_stale` (eligibility, which `Leases.tla` has no switch for), `smallMargin_stale`; `noStaleRead` is the first proof that the rules suffice |
 
 ## Appendix D: Counterexample runs
+
+The lease runs are in the lease layer with instant messages (`InstantLeaseStep`, plus
+the one weakened action). Every instant run is a run with delayed messages
+(`instant_simulates`), so the reachability witnesses hold in the model itself; a lease
+counterexample shows its rule is needed even when every message arrives at once.
 
 Every counterexample is a concrete run on three nodes (`N := Fin 3`, node 0 the initial
 primary) in a weakened protocol: the model's `Step` plus one action with a rule
