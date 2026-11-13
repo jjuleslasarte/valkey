@@ -15,10 +15,10 @@ require cslib from git
   "https://github.com/leanprover/cslib" @ "0b1e3680b43ad9cd482a66f183764f33fc8a4e8f"
 
 -- The synchronous replication design: model, invariant, safety and durability
--- theorems, counterexamples (see LEAN.md).
+-- theorems, counterexamples (see the README, section 6).
 @[default_target]
 lean_lib SyncReplication
 
--- Lease timing (see LEAN.md, "Lease timing").
+-- Lease timing (see the README, section 3.2).
 @[default_target]
 lean_lib Lease

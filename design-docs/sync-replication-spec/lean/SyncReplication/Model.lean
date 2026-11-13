@@ -373,7 +373,8 @@ inductive Action (Node : Type)
 actions: a node's held replies die with its client connections when it restarts. -/
 def Action.isRestart : Action Node → Bool
   | .restartEmpty _ | .restartKeep _ | .restartPartial _ _ => true
-  | _ => false
+  | .append _ | .replicate _ | .ack _ | .commit _ | .addToSyncSet _ _ | .removeFromSyncSet _ _
+  | .makeEligible _ _ | .makeIneligible _ _ | .learn _ | .takeover _ | .resync _ => false
 
 /-- The step relation. `m` is `min-sync-replicas`. Each constructor is one
 action: its arguments after the state are the guard, and its result is the action's

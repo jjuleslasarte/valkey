@@ -32,3 +32,4 @@ import SyncReplication
 #print axioms SyncReplication.restartForgetsTimer_stale
 #print axioms SyncReplication.takeoverNoDemotionWait_stale
 #print axioms SyncReplication.grantWithoutPrimaryLease_stale
+#print axioms SyncReplication.noStaleRead_keepGrantorRows

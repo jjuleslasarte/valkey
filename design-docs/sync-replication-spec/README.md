@@ -430,6 +430,55 @@ elapsed time) and rate-bounded (drift rate at most `ρ`). The main results:
   primary lease. This is an availability property, not a safety one: if it fails the
   primary stops serving reads.
 
+The theorems, in `Lease/Additive.lean`, `Lease/Rate.lean` and `Lease/Durations.lean`
+(Lean core only, no Mathlib). `Valid cH s W t` says the holder H, which sent at `s`,
+believes its lease valid at `t`; `Over cG r G t` says the grantor G's promise, from its
+receipt at `r`, is over at `t`. The holder-subtracts rule is `W = Dur - M`, `G = Dur`;
+the literal reading is `W = G = Dur - M`. The rate model is scaled to integers: clocks
+read in units of `1/b` real tick, with drift rate `ρ = a/b`.
+
+| Theorem | Statement |
+|---|---|
+| `asym_safe` | `M ≥ 2D` ⇒ no real time where H is valid and G is over. Holds for all `s ≤ r`, all additive clocks (monotone or not), and all `Dur, D, M`. |
+| `asym_tight` | `0 ≤ D`, `M < 2D`, `M < Dur` ⇒ overlap with zero delay. H's clock is `D` slow and G's clock is `D` fast, both monotone, at real time `max D (Dur - D)`. |
+| `asym_safe_iff` | For `D ≥ 0`: every instance is safe ⇔ `2D ≤ M ∨ Dur ≤ M`. The second disjunct says H's lease is never valid. |
+| `literal_unsafe` | `D > 0`, `M < Dur` ⇒ overlap, **for every margin M**. |
+| `literal_safe_iff` | For `D ≥ 0`: the literal reading is safe ⇔ `D = 0 ∨ Dur ≤ M`. The margin size never matters. |
+| `rate_asym_safe` | `2a·Dur ≤ (b+a)·M`, that is `M ≥ 2ρ·Dur/(1+ρ)`, ⇒ no overlap, for all `s ≤ r` and all rate clocks. |
+| `rate_asym_tight` | `(b+a)M < 2a·Dur` ⇒ overlap. H runs at `1-ρ` and G at `1+ρ`, with zero delay. |
+| `rate_literal_unsafe` / `rate_literal_safe_nodrift` | The literal reading is unsafe for every `a > 0` when `M < Dur`, and safe when `a = 0`. |
+| `demotion_in_time` | A sufficient condition for the "Lease durations" rule, with bus commit delay `≤ B` and round trip `≤ Δ`. See below. |
+| `doc_condition_insufficient_drift` / `_rtt` | Concrete runs where the design's own condition holds and P's lease has already expired at commit. |
+
+**The rate tightness theorems are tight up to a tick refinement.** With integer real
+time, the overlap window `bW/(b-a) - bG/(b+a)` can be shorter than one tick. The
+witness therefore scales every duration by `k = (b-a)(b+a)`. This is the same physical
+scenario measured with a finer tick.
+
+The rate-form condition depends on `Dur`. The additive `D` is the worst drift over one
+lease, and `D ≈ ρ·Dur` recovers `M ≥ 2D` to first order.
+
+`demotion_in_time` (additive model) uses this timeline:
+
+1. P sends offset X at `sp`. This starts P's primary lease from R.
+2. R ACKs at `sa`. This starts R's read lease.
+3. P receives the ACK at `ra ≤ sp + Δ`.
+4. P's wait ends at `w`, the earliest time with local elapsed since `ra` `≥ ReadDur`.
+5. The demotion commits at `d ≤ w + B`.
+
+If `ReadDur + B + Δ + M + 2D < PrimDur` and `M ≥ 2D`, then at `d` P's primary lease
+from R is still valid and R's read lease is invalid. The design's condition, read
+lease + commit + margin < primary lease, omits the round trip `Δ` (with no drift,
+`ReadDur=2, B=1, PrimDur=4, Δ=2` already fails) and a second drift term (P's clock can
+run `D` slow while P waits and then `D` fast; with `D=1, M=2, ReadDur=2, B=1,
+PrimDur=6` the lease expires at commit). This is an availability property only: P
+then stops serving reads, which is safe.
+
+`#print axioms`: every theorem depends only on `[propext, Quot.sound]`, plus
+`Classical.choice` for the `_iff` theorems, `rate_asym_tight`, `rate_literal_*`, and
+`doc_condition_*` (from `by_cases` and `decide`/`simp` on `Int` propositions). There is
+no `sorryAx`.
+
 What these say about the design's own wording is in Appendix B.
 
 ## 4. Results
@@ -448,15 +497,16 @@ What these say about the design's own wording is in Appendix B.
 | Property 6 is not vacuous: a replica holding a read lease may serve a read | `SyncReplication.replCanRead_reachable` |
 | A new primary may demote a replica it promoted itself without the post-takeover wait | `SyncReplication.demoteNew_reachable` |
 | Resync's guard that the replica is not counted excludes a reachable state (no counterexample without it) | `SyncReplication.countedDiverged_reachable` |
+| A restart need not clear the node's grantor rows (primary leases, acknowledgement times, echoes) for property 6 | `SyncReplication.noStaleRead_keepGrantorRows` |
 
-Size: the model is 934 lines (480 for the protocol, 140 for the held-reply layer,
-314 for the lease layer), the invariants and their lemmas 1,531 (475 for replication,
-1,056 for leases, which includes their preservation), the per-action contracts 616,
+Size: the model is 935 lines (481 for the protocol, 140 for the held-reply layer,
+314 for the lease layer), the invariants and their lemmas 1,545 (475 for replication,
+1,070 for leases, which includes their preservation), the per-action contracts 616,
 and the replication preservation proofs 2,551. Lean checks the whole of
 `SyncReplication` in about 20 seconds on a laptop-class machine.
 
-[lean/LEAN.md](lean/LEAN.md) has every theorem statement and the details of the
-encoding.
+`lean/Check.lean` and `lean/LeaseCheck.lean` list every checked theorem; each
+statement is in the file section 6 names for it.
 
 ## 5. Scope and limitations
 
@@ -585,7 +635,10 @@ encoding.
   design says "sync replica". Appendix B shows that all three parts are needed, the
   incarnation match within the design's duration rule. (c) In the other direction, the design's restart rule delays reads for
   one lease after a restart; the model only clears the restarted node's leases, so it
-  may read as soon as it holds a new one. The proof shows that suffices, so the read
+  may read as soon as it holds a new one. Of those, only the node's own read lease must
+  go: a restart that keeps its rows as a grantor (primary leases, acknowledgement
+  times, echoes) still satisfies property 6 (`noStaleRead_keepGrantorRows`), because the
+  restart demotion wait covers every replica. The proof shows that suffices, so the read
   half of the restart rule is not needed for safety. The takeover half (a restarted
   node waits one lease before it attempts a takeover; the model restarts the takeover
   timer at the restart) is needed: a node that forgets the timer and treats its
@@ -626,7 +679,7 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 
 | Path | Contents | Lines |
 |---|---|---|
-| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 480 |
+| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 481 |
 | `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 140 |
 | `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 314 |
 | `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 475 |
@@ -634,11 +687,12 @@ CSLib's `DistributedConsistency` definitions are the natural target.
 | `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,551 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies`, `committed_inherited_first` | 109 |
 | `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 278 |
-| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,056 |
+| `lean/SyncReplication/RestartGrantorRows.lean` | Restarts that keep the node's grantor rows: property 6 still holds (`noStaleRead_keepGrantorRows`) | 161 |
+| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,070 |
 | `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,718 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
-| `lean/Check.lean` | Prints the axioms of the 33 `SyncReplication` theorems | |
+| `lean/Check.lean` | Prints the axioms of the 34 `SyncReplication` theorems | |
 | `lean/LeaseCheck.lean` | Prints the axioms of the 12 `Lease` theorems | |
 
 Lean 4.35 with Mathlib `v4.35.0`, used for list-prefix lemmas and for `Set.encard`
@@ -662,20 +716,29 @@ Names follow the design where it has one (`ThinksPrimary`, `KnowsLatest`,
 removed), stated as a CSLib multi-step transition (`MTr`) whose label list is the
 trace, with every guard evaluated by `decide`.
 
+**Proof style** (following *TPIL* ch. 5, Appendix A.7). Every sub-goal is a bullet
+closed in place. Hypotheses from a case split are named at the split, never recovered
+with `rename_i`. `simp` with the default simp set only closes goals; when a tactic
+follows, the call is `simp only [...]`, so a change in the simp set cannot change the
+goal the next tactic sees. No statement is weakened to make a proof go through: a
+property that does not hold gets a counterexample instead.
+
 ## 7. Reproducing
 
 ```
 cd lean
-../tools/lean.sh lake build                 # builds every proof
-../tools/lean.sh lake env lean Check.lean        # axioms of the 33 SyncReplication theorems
-../tools/lean.sh lake env lean LeaseCheck.lean   # axioms of the 12 Lease theorems
+lake exe cache get                # once: Mathlib's prebuilt files (about 7 GB)
+lake build                        # builds every proof
+lake env lean Check.lean          # axioms of the 34 SyncReplication theorems
+lake env lean LeaseCheck.lean     # axioms of the 12 Lease theorems
 ```
 
-`tools/lean.sh` runs the Lean toolchain in a container. Unpack the toolchain into
-`tools/elan/`, build the image once
-(`docker build -t valkey-lean:24.04 -f tools/Dockerfile.lean tools`), and fetch
-Mathlib's prebuilt files once with `../tools/lean.sh lake exe cache get` (about
-7 GB). A clean build then takes about 30 seconds.
+The toolchain (Lean 4.35.0) is named in `lean/lean-toolchain`, so `elan` installs it.
+Mathlib `v4.35.0` and CSLib `0b1e3680` (its last commit on Lean 4.35.0) are pinned in
+`lakefile.lean` and `lake-manifest.json`. A clean build takes about 30 seconds. Every
+theorem must print only `[propext, Classical.choice, Quot.sound]` (some `Lease/`
+theorems print a subset); a `sorry` would show as `sorryAx`.
+`.github/workflows/lean.yml` runs the same steps on every push that touches `lean/`.
 
 ## References
 
@@ -1207,3 +1270,43 @@ relation instead.
 | F13 | `CoreRestart_staleKeepMin0` (5 states), `_staleKeepMin1` (9), `_staleKeepMin1Loss` (11); weaker rules `_staleCommitMin1`, `_staleAckOnlyMin0`/`Min1` | `staleRestoreKeepsInc_unsafe` |
 | Safe runs | `CoreRestart_safeMin0`/`_safeMin1` (120.6 M and 78.8 M states), `CoreRestart_twoCopiesMin1` | subsumed by `safety`, `ackSafety`, `commit_two_copies` |
 | Lease rules | `Leases_noWaitPrim`, `_noWaitRead`, `_noEchoSync`, `_smallMargin` (each violates `NoStaleLinRead`); the safe runs never finished | `noWaitPrim_stale`, `noWaitRead_stale`, `grantAny_stale` (the `EchoOnlySync` rule), `grantSync_stale` (eligibility, which `Leases.tla` has no switch for), `smallMargin_stale`; `noStaleRead` is the first proof that the rules suffice |
+
+## Appendix D: Counterexample runs
+
+Every counterexample is a concrete run on three nodes (`N := Fin 3`, node 0 the initial
+primary) in a weakened protocol: the model's `Step` plus one action with a rule
+removed, as its own inductive relation with a `step` constructor that admits every
+model step. Each run is a CSLib `MTr` whose label list is the trace, so the sequence of
+actions is in the theorem statement; every guard is discharged by `decide`, so each run
+is a genuine execution. `Counterexamples/Basic.lean` has the decidability instances,
+`writable_one` (a `Writable 1` witness from one counted replica), `mtr_of_step` (a run
+of the model is a run of any weakening), and the prefix three runs share: n0 promotes
+n1, writes, n1 replicates and acknowledges, n0 commits (`committed_run`, 6 steps; the
+history is `[1]`, on n0 and n1).
+
+| File | Weakened relation | Rule removed | Trace | Violates |
+|---|---|---|---|---|
+| `Reconcile.lean` | `StepNoReconcile` | AddToSyncSet measures catch-up against the primary's own commit point | addToSyncSet 0 1, makeEligible 0 1, append 0, learn 1, replicate 1, ack 1, commit 0, takeover 1, learn 2, **addToSyncSet 1 2**, makeEligible 1 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `CatchUp.lean` | `StepNoCatchUp` | AddToSyncSet with no catch-up guard; `StepNoReconcile` is a special case (`stepNoCatchUp_of_stepNoReconcile`), so F1's run is a second one | *prefix*, **addToSyncSet 0 2**, makeEligible 0 2 | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `ResyncEligible.lean` | `StepResyncEligible` | Resync of a replica its primary lists as eligible | *prefix*, restartPartial 0 0 (new incarnation), **resync 1** | EligibleHoldsCommitted: n1 authoritative with an empty log |
+| `ReplyFence.lean` | `ReplyStepNoFence` | Release on the committed offset alone, no primaryship check (`min-sync-replicas = 0`) | addToSyncSet 0 1, makeEligible 0 1, write 0, learn 1, takeover 1, learn 0, resync 0, addToSyncSet 1 0, makeEligible 1 0, learn 0, takeover 0, write 0, commit 0, **release (0, 1, 1)** | AckedDurable: `(1, 1)` acknowledged, history `[3]` |
+| `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | addToSyncSet 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, addToSyncSet 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
+| `Incarnation.lean` | `StepNoInc` | AddToSyncSet and MakeEligible check `localCfg[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **addToSyncSet 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
+| `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
+| `Leases.lean` | `LeaseStepNoWaitPrim`, `LeaseStepNoWaitRead`, `LeaseStepGrantAny`, `LeaseStepGrantSync`, `LeaseStepGrantNoInc` (with `P3`: primary lease 6, read lease 3, within the duration rule), and `leaseTransitionSystem` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the sync set; echo to a counted but ineligible member, then early removal; echo to a restarted-empty eligible member, then a restart of the primary whose rebuilt sync replica set leaves it out; margin 1 with drift 1 | shared prefix addToSyncSet 0 1, makeEligible 0 1, learn 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `leaseInit`) heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
+| `RestartReadLease.lean` | `LeaseStepRestartKeepsReadLease` | RestartEmpty keeps the restarted node's read lease | shared lease prefix, append 0, replicate 1, ack 1, commit 0, heartbeat 1 (grant), **restartEmpty 1** | `ReplCanRead` holds for n1 with an empty log, history `[1]` |
+| `RestartDemotionWait.lean` | `LeaseStepRestartNoDemotionWait` | RestartKeep arms no demotion wait (`oldEligible n := fun _ => false`) | shared lease prefix, heartbeat 1 (grant), **restartKeep 0**, demote 0 1, append 0, commit 0 | `ReplCanRead` holds for n1 without the write |
+| `RestartTimer.lean` | `LeaseStepRestartForgetsTimer` | RestartKeep sets the restarted node's takeover timer to 0 (`primaryTraffic n := 0`) | addToSyncSet 0 1, makeEligible 0 1, learn 1, tick ×4, heartbeat 1, ack 1, **restartKeep 1**, takeover 1, append 1, commit 1 | `PrimCanRead` holds for the deposed n0 without the write |
+| `TakeoverDemotionWait.lean` | `LeaseStepTakeoverNoDemotionWait` (with `P3`) | Takeover arms no demotion wait (`oldEligible n := fun _ => false`) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, learn 2, heartbeat 1, ack 1, heartbeat 2, ack 2, tick ×4, heartbeat 2, ack 2, heartbeat 2 (grant), tick, **takeover 1**, demote 1 2, append 1, commit 1 | `ReplCanRead` holds for n2 without the write |
+| `GrantPrimaryLease.lean` | `LeaseStepGrantWithoutPrimaryLease` | Echo without `PrimLeaseValid` (the rest of `MayGrant` kept) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, tick ×4, takeover 1, tick ×3, demote 1 2, append 1, commit 1, ack 2, **heartbeat 2 (grant)** by the deposed n0 | `ReplCanRead` holds for n2 without the write |
+| `RemoveFromSyncSet.lean` | `StepRemoveFromSyncSetElig` | RemoveFromSyncSet of an eligible counted replica | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **removeFromSyncSet 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
+| `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, addToSyncSet 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
+| `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |
+
+The weakened action in each trace is in bold; *prefix* is `committed_run`. In
+`Survival.lean` no node is authoritative in the final state, so EligibleHoldsCommitted
+holds vacuously there and the theorem states the loss itself.
+
+`ResyncCounted.lean` has no weakened relation: no run shows Resync's guard that the
+replica is not counted is needed. It holds `countedDiverged_reachable`, a run of the
+model itself reaching the state the guard excludes (Appendix B).
