@@ -523,9 +523,13 @@ rule (`grantNoIncRestart_stale`, primary lease 6, read lease 3, drift 1, margin
 primary then restarts with its data, rebuilds its sync replica set without it
 (stale recorded incarnation), and commits with n2 only. A new primary, by contrast, may
 count every eligible replica: leaving out stale-incarnation ones at takeover is
-an availability choice, not needed for safety. Not
-modelled: planned demotion (the
-replica drops its lease on request). One observation: the model does not delay
+an availability choice, not needed for safety. Planned
+demotion (the replica drops its lease on request) is modelled with delayed lease
+messages, and the doc's one-line description needs three rules it does not state:
+the request closes the connection, a later acknowledgement cancels a confirmed
+drop, and a confirmation counts only if no acknowledgement arrived since the
+request (Lean `noCloseOnRequest_stale`, `noResetOnAck_stale`,
+`noConfirmGuard_stale`; with them `noStaleRead` holds). One observation: the model does not delay
 reads after a restart, only clears the restarted node's leases, and the proof
 still goes through, so the read half of the doc's restart rule is not needed
 for safety. **Proposed doc change:** state the demotion wait after restart (shown needed
