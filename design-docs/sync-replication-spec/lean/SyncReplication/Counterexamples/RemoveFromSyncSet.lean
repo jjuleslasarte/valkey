@@ -1,0 +1,73 @@
+import SyncReplication.Counterexamples.Basic
+
+/-!
+# A counted replica may be dropped only before it becomes eligible
+
+Design §4 lets a primary that is waiting on a slow replica drop it from the commit
+calculation "before step 4", that is, before the replica is committed as eligible.
+The qualifier is what makes it safe: once the replica is eligible, the second
+ordering rule ("ineligible before any write commits without its acknowledgement")
+forbids dropping it from the sync replica set without demoting it first.
+
+`StepRemoveFromSyncSetElig` is `Step` plus RemoveFromSyncSet without the "not yet eligible" condition.
+The run, at `min-sync-replicas = 1`: n0 promotes n1 and n2, writes, and gets n2's
+acknowledgement. It drops n1 and commits with n2's acknowledgement only. n1 is
+eligible and authoritative and lacks the committed write.
+-/
+
+open Cslib
+
+namespace SyncReplication
+
+/-- `Step`, plus RemoveFromSyncSet of any counted replica, eligible or not. -/
+inductive StepRemoveFromSyncSetElig (m : Nat) : State N → Action N → State N → Prop
+  | step {s μ s'} : Step m s μ s' → StepRemoveFromSyncSetElig m s μ s'
+  | removeFromSyncSet (s : State N) (p r : N) : ThinksPrimary s p → s.sync p r = true →
+      StepRemoveFromSyncSetElig m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
+
+/-- The weakened protocol as a transition system. -/
+def transitionSystemRemoveFromSyncSetElig (m : Nat) : LTS (State N) (Action N) where
+  Tr := StepRemoveFromSyncSetElig m
+
+def u0 : State N := init 0
+def u1 := addToSyncSet u0 0 1             -- n0 counts n1
+def u2 := makeEligible u1 0 1          -- n1 eligible
+def u3 := addToSyncSet u2 0 2             -- n0 counts n2
+def u4 := makeEligible u3 0 2          -- n2 eligible
+def u5 := appendWrite u4 0         -- n0 writes at offset 1
+def u6 := applyData (streamNext (reconnect u5 2) 0 2 0) (.data 0 2 1 1 1) 2 1 1   -- n2 copies it
+def u7 := recordAck (sendAckMsg u6 2) (.ack 2 0 1 1) 0 2 1                        -- n2 acknowledges
+def u8 := removeFromSyncSet u7 0 1           -- n0 drops the eligible n1 from its sync set
+def u9 := commitNext u8 0          -- n0 commits with n2's acknowledgement only
+
+/-- The run; the label list is its trace. Only `removeFromSyncSet 0 1` is the weakened action:
+n1 is already eligible. -/
+theorem removeFromSyncSetElig_run : (transitionSystemRemoveFromSyncSetElig 1).MTr u0
+    [.addToSyncSet 0 1, .makeEligible 0 1, .addToSyncSet 0 2, .makeEligible 0 2, .append 0, .psync 2, .sendData 0 2,
+     .deliver (.data 0 2 1 1 1), .sendAck 2, .deliver (.ack 2 0 1 1),
+     .removeFromSyncSet 0 1, .commit 0] u9 :=
+  .stepL (.step (Step.addToSyncSet u0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.makeEligible u1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.addToSyncSet u2 0 2 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.makeEligible u3 0 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.append u4 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
+    (by decide)))) <|
+  .stepL (.step (Step.psync u5 2 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.sendData _ 0 2 0 (by decide) (by decide))) <|
+  .stepL (.step (Step.deliverData _ 0 2 1 1 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.sendAck _ 2 (by decide))) <|
+  .stepL (.step (Step.deliverAck _ 2 0 1 1 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (StepRemoveFromSyncSetElig.removeFromSyncSet u7 0 1 (by decide) (by decide)) <|
+  .stepL (.step (Step.commit u8 0 (by decide) (writable_one (r := 2) (by decide) (by decide)
+    (by decide)) (by decide) (by decide))) <|
+  .refl
+
+/-- "Before step 4" is needed: dropping an eligible replica from the sync replica set
+reaches a state where an authoritative eligible replica (n1) lacks the committed
+history. -/
+theorem removeFromSyncSetElig_unsafe : ∃ s, (transitionSystemRemoveFromSyncSetElig 1).CanReach (init 0) s ∧ ¬ Safety s := by
+  refine ⟨u9, ⟨_, removeFromSyncSetElig_run⟩, ?_⟩
+  intro ⟨hholds, _⟩
+  exact absurd (hholds 1 (by decide)) (by decide)
+
+end SyncReplication

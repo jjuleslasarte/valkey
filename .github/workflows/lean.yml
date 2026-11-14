@@ -1,0 +1,28 @@
+name: Lean proofs
+
+on:
+  push:
+    paths: ['design-docs/sync-replication-spec/lean/**', '.github/workflows/lean.yml']
+  pull_request:
+    paths: ['design-docs/sync-replication-spec/lean/**', '.github/workflows/lean.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the toolchain named in lean/lean-toolchain, fetches Mathlib's
+      # prebuilt files and runs `lake build` in lean/.
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: design-docs/sync-replication-spec/lean
+      # Every theorem must rest on the standard axioms only; a `sorry` shows up as sorryAx.
+      - name: Axioms
+        working-directory: design-docs/sync-replication-spec/lean
+        run: |
+          lake env lean Check.lean | tee check.txt
+          lake env lean LeaseCheck.lean | tee leasecheck.txt
+          ! grep -q sorryAx check.txt leasecheck.txt
