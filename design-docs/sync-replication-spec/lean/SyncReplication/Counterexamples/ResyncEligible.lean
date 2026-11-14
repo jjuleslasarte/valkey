@@ -33,7 +33,7 @@ inductive StepResyncEligible (m : Nat) : State N → Action N → State N → Pr
   /-- Every step of the model. -/
   | step {s μ s'} : Step m s μ s' → StepResyncEligible m s μ s'
   /-- Resync without `(s.localCfg (primaryOf s r)).eligible r = false`. -/
-  | resync (s : State N) (r : N) : primaryOf s r ≠ r → ¬ (s.log r <+: s.log (primaryOf s r)) →
+  | resync (s : State N) (r : N) : primaryOf s r ≠ r →
       s.sync (primaryOf s r) r = false → StepResyncEligible m s (.resync r) (resync s r)
 
 /-- The weakened protocol as a transition system. -/
@@ -45,12 +45,13 @@ def re8 := resync re7 1                  -- n1, eligible, resyncs to n0's empty 
 
 /-- The run; the label list is its trace. Only `resync 1` is the weakened action. -/
 theorem resyncEligible_run : (transitionSystemResyncEligible 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+     .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
      .restartPartial 0 0, .resync 1] re8 :=
   LTS.MTr.comp (transitionSystemResyncEligible 1) (mtr_of_step StepResyncEligible.step committed_run) <|
   .stepL (.step (Step.restartPartialFresh c6 0 0 (by decide) (by decide) (by decide)
     ⟨1, by decide, by decide⟩)) <|
-  .stepL (StepResyncEligible.resync re7 1 (by decide) (by decide) (by decide)) <|
+  .stepL (StepResyncEligible.resync re7 1 (by decide) (by decide)) <|
   .refl
 
 /-- Resync must exclude eligible replicas: without the guard a reachable state has an

@@ -34,7 +34,8 @@ def g8 := restartPartialKeep g7 1 0   -- n1 restarts from a file without the wri
 
 /-- The run; the label list is its trace. Only the last action is the weakened one. -/
 theorem staleRestoreKeepsInc_run : (transitionSystemStaleKeep 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+     .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
      .learn 1, .restartPartial 1 0] g8 :=
   LTS.MTr.comp (transitionSystemStaleKeep 1) (mtr_of_step StepStaleKeep.step committed_run) <|
   .stepL (.step (Step.learn c6 1 (by decide))) <|
@@ -55,7 +56,8 @@ def g9 := restartEmpty g8 0   -- n0 restarts empty; allowed, since n1 is still a
 /-- One more step: n0 restarts empty. The survival guard is satisfied by n1, which is
 authoritative but holds nothing. -/
 theorem staleRestoreKeepsInc_loss_run : (transitionSystemStaleKeep 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+     .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
      .learn 1, .restartPartial 1 0, .restartEmpty 0] g9 :=
   LTS.MTr.comp (transitionSystemStaleKeep 1) staleRestoreKeepsInc_run <|
   .stepL (.step (Step.restartEmpty g8 0 (by decide) ⟨1, by decide, by decide⟩)) <|

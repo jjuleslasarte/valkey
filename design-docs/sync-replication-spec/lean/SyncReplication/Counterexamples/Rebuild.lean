@@ -36,23 +36,27 @@ def d1 := addToSyncSet d0 0 1             -- n0 counts n1
 def d2 := makeEligible d1 0 1          -- n1 eligible
 def d3 := appendWrite d2 0         -- n0 writes at offset 1
 def d4 := restartKeepNoRebuild d3 0   -- n0 restarts with its data; sync set empty
-def d5 := replicate d4 2           -- n2 copies the write
-def d6 := ack d5 2                 -- n2 acknowledges it
+def d5 := applyData (streamNext (reconnect d4 2) 0 2 0) (.data 0 2 2 1 2) 2 1 2   -- n2 copies the write
+def d6 := recordAck (sendAckMsg d5 2) (.ack 2 0 2 1) 0 2 1                        -- n2 acknowledges it
 def d7 := addToSyncSet d6 0 2             -- n0 counts n2
 def d8 := makeEligible d7 0 2          -- n2 eligible
 def d9 := commitNext d8 0          -- n0 commits with n2's ack only; n1 lacks the write
 
 /-- The run; the label list is its trace. Only the restart is the weakened action. -/
 theorem noRebuild_run : (transitionSystemNoRebuild 1).MTr d0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .restartKeep 0, .replicate 2, .ack 2,
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .restartKeep 0, .psync 2, .sendData 0 2, .deliver (.data 0 2 2 1 2),
+     .sendAck 2, .deliver (.ack 2 0 2 1),
      .addToSyncSet 0 2, .makeEligible 0 2, .commit 0] d9 :=
   .stepL (.step (Step.addToSyncSet d0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible d1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append d2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)))) <|
   .stepL (StepNoRebuild.restartKeep d3 0 (by decide)) <|
-  .stepL (.step (Step.replicate d4 2 (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.ack d5 2 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.psync d4 2 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.sendData _ 0 2 0 (by decide) (by decide))) <|
+  .stepL (.step (Step.deliverData _ 0 2 2 1 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.sendAck _ 2 (by decide))) <|
+  .stepL (.step (Step.deliverAck _ 2 0 2 1 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.addToSyncSet d6 0 2 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible d7 0 2 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.commit d8 0 (by decide) (writable_one (r := 2) (by decide) (by decide)

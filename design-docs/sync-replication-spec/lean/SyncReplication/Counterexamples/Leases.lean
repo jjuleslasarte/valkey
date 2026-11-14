@@ -53,27 +53,29 @@ theorem leaseMtr_of_step {L : LTS (LeaseState N) (LeaseAction N)} {m : Nat} {P :
 
 /-! ## Shared prefix: both leases established
 
-n0 counts n1 and makes it eligible; n1 learns the configuration; a heartbeat from n0
-reaches n1 and n1 acknowledges it. n0 now holds a primary lease from n1 (from time 0),
+n0 counts n1 and makes it eligible; n1 learns the configuration and reconnects with
+PSYNC; a heartbeat from n0 reaches n1 on that connection and n1 acknowledges it. n0 now holds a primary lease from n1 (from time 0),
 and n0 has n1's acknowledgement to echo. -/
 
 def l0 : LeaseState N := leaseInit 0
 def l1 := withCore l0 (addToSyncSet l0.core 0 1)
 def l2 := withCore l1 (makeEligible l1.core 0 1)
 def l3 := leaseLearn l2 1
-def l4 := recvData l3 1 l3.core none
+def l3a := withCore l3 (reconnect l3.core 1)
+def l4 := recvData l3a 1 l3a.core none
 def l5 := recvAck l4 1 l4.core
 
 /-- The prefix, for any lease parameters: none of its steps consults them. -/
 theorem leases_prefix (P : LeaseParams) : (instantTransitionSystem 0 P).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1] l5 :=
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .core (.psync 1), .heartbeat 1, .ack 1] l5 :=
   .stepL (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide) (by decide)
     (by decide)) rfl) <|
   .stepL (InstantLeaseStep.core l1 _ _ (Step.makeEligible l1.core 0 1 (by decide) (by decide) (by decide)
     (by decide)) rfl) <|
   .stepL (InstantLeaseStep.learn l2 1 (by decide)) <|
-  .stepL (InstantLeaseStep.heartbeat l3 1 (by decide) (by decide)) <|
-  .stepL (InstantLeaseStep.ackRenew l4 1 (by decide) (by decide)) <|
+  .stepL (InstantLeaseStep.core l3 _ _ (Step.psync l3.core 1 (by decide) (by decide) (by decide)) rfl) <|
+  .stepL (InstantLeaseStep.heartbeat l3a 1 (by decide) (by decide)) <|
+  .stepL (InstantLeaseStep.ackRenew l4 1 (by decide)) <|
   .refl
 
 /-! ## The read rule is not vacuous
@@ -114,7 +116,7 @@ def ln14 := withCore ln13 (makeEligible ln13.core 1 2)  -- n1 makes n2 eligible:
 def ln15 := withCore ln14 (makeIneligible ln14.core 1 2) -- n1 demotes n2 at once: n2 never held a lease
 
 theorem demoteNew_run : (instantTransitionSystem 0 P0).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .core (.psync 1), .heartbeat 1, .ack 1,
      .learn 2, .tick, .tick, .tick, .tick, .takeover 1, .learn 2, .core (.addToSyncSet 1 2),
      .core (.makeEligible 1 2), .demote 1 2] ln15 :=
   LTS.MTr.comp (instantTransitionSystem 0 P0) (leases_prefix P0) <|
@@ -146,7 +148,7 @@ commit without it while the lease is still valid. -/
 inductive LeaseStepGrantSync (m : Nat) (P : LeaseParams) : LeaseState N → LeaseAction N → LeaseState N → Prop
   | step {a μ a'} : InstantLeaseStep m P a μ a' → LeaseStepGrantSync m P a μ a'
   | heartbeatGrant (a : LeaseState N) (r : N) : primaryOf a.core r ≠ r →
-      ThinksPrimary a.core (primaryOf a.core r) → a.core.log r <+: a.core.log (primaryOf a.core r) →
+      ThinksPrimary a.core (primaryOf a.core r) → StreamOpen a.core (primaryOf a.core r) r →
       PrimLeaseValid P a (primaryOf a.core r) → a.core.sync (primaryOf a.core r) r = true →
       LeaseStepGrantSync m P a (.heartbeat r) (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
 
@@ -154,7 +156,8 @@ def leaseTransitionSystemGrantSync (m : Nat) (P : LeaseParams) : LTS (LeaseState
   Tr := LeaseStepGrantSync m P
 
 def lu1 := withCore l0 (addToSyncSet l0.core 0 2)          -- n0 counts n2, which stays ineligible
-def lu2 := recvData lu1 2 lu1.core none              -- a heartbeat reaches n2
+def lu1a := withCore lu1 (reconnect lu1.core 2)      -- n2 reconnects with PSYNC
+def lu2 := recvData lu1a 2 lu1a.core none            -- a heartbeat reaches n2
 def lu3 := recvAck lu2 2 lu2.core                    -- n2 acknowledges
 def lu4 := recvData lu3 2 lu3.core (lu3.ackEcho 0 2) -- n0 echoes it: n2 gets a read lease
 def lu5 := withCore lu4 (removeFromSyncSet lu4.core 0 2)       -- n0 drops n2 at once (early removal)
@@ -162,12 +165,13 @@ def lu6 := withCore lu5 (appendWrite lu5.core 0)     -- n0 writes
 def lu7 := withCore lu6 (commitNext lu6.core 0)      -- n0 commits alone: the history is [1]
 
 theorem grantSync_run : (leaseTransitionSystemGrantSync 0 P0).MTr l0
-    [.core (.addToSyncSet 0 2), .heartbeat 2, .ack 2, .heartbeat 2, .core (.removeFromSyncSet 0 2),
+    [.core (.addToSyncSet 0 2), .core (.psync 2), .heartbeat 2, .ack 2, .heartbeat 2, .core (.removeFromSyncSet 0 2),
      .core (.append 0), .core (.commit 0)] lu7 :=
   .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 2 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
-  .stepL (.step (InstantLeaseStep.heartbeat lu1 2 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ackRenew lu2 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.core lu1 _ _ (Step.psync lu1.core 2 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.heartbeat lu1a 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lu2 2 (by decide))) <|
   .stepL (LeaseStepGrantSync.heartbeatGrant lu3 2 (by decide) (by decide) (by decide) (by decide)
     (by decide)) <|
   .stepL (.step (InstantLeaseStep.core lu4 _ _ (Step.removeFromSyncSet lu4.core 0 2 (by decide) (by decide) (by decide)) rfl)) <|
@@ -185,12 +189,13 @@ theorem grantSync_stale : ∃ a, (leaseTransitionSystemGrantSync 0 P0).CanReach 
 
 /-! ## Granting a read lease to an eligible sync member with a stale incarnation
 
-A replica that restarted empty stays listed as eligible until demoted, and may be
-counted again once it catches up. It is not authoritative: a primary that restarts with
-its data rebuilds its sync replica set from the eligible replicas with a matching
-incarnation (`rebuiltSync`), so it drops that replica and never waits for it. If it
-could be granted a read lease, the restarted primary could commit without it while the
-lease is still valid.
+A replica that restarts from a file missing a write it acknowledged takes a new
+incarnation, and stays listed as eligible until demoted; it keeps its replication ID, so
+it reconnects with PSYNC and may be counted again. It is not authoritative: a primary
+that restarts with its data rebuilds its sync replica set from the eligible replicas
+with a matching incarnation (`rebuiltSync`), so it drops that replica and never waits
+for it. If it could be granted a read lease, the restarted primary could commit without
+it while the lease is still valid.
 
 The run uses `P3`: primary lease 6, read lease 3, drift 1, margin 2, which satisfies
 the design's "Lease durations" rule (`readDur + margin < primDur`) and the margin bound.
@@ -204,7 +209,7 @@ def P3 : LeaseParams := ⟨6, 3, 1, 2⟩
 inductive LeaseStepGrantNoInc (m : Nat) (P : LeaseParams) : LeaseState N → LeaseAction N → LeaseState N → Prop
   | step {a μ a'} : InstantLeaseStep m P a μ a' → LeaseStepGrantNoInc m P a μ a'
   | heartbeatGrant (a : LeaseState N) (r : N) : primaryOf a.core r ≠ r →
-      ThinksPrimary a.core (primaryOf a.core r) → a.core.log r <+: a.core.log (primaryOf a.core r) →
+      ThinksPrimary a.core (primaryOf a.core r) → StreamOpen a.core (primaryOf a.core r) r →
       PrimLeaseValid P a (primaryOf a.core r) → a.core.sync (primaryOf a.core r) r = true →
       (a.core.localCfg (primaryOf a.core r)).eligible r = true →
       LeaseStepGrantNoInc m P a (.heartbeat r) (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
@@ -218,37 +223,56 @@ def li3 := withCore li2 (addToSyncSet li2.core 0 2)        -- n0 counts n2
 def li4 := withCore li3 (makeEligible li3.core 0 2) -- n2 eligible (epoch 3)
 def li5 := leaseLearn li4 1                             -- n1 learns epoch 3
 def li6 := leaseLearn li5 2                             -- n2 learns epoch 3; its takeover timer starts at 0
-def li7 := recvData li6 2 li6.core none             -- a heartbeat reaches n2 at time 0
+def li6a := withCore li6 (reconnect li6.core 2)         -- n2 reconnects with PSYNC
+def li7 := recvData li6a 2 li6a.core none           -- a heartbeat reaches n2 at time 0
 def li8 := recvAck li7 2 li7.core                   -- n2 acknowledges: n0's lease from n2 starts at 0
-def li9 := leaseRestart li8 1 (restartEmpty li8.core 1) -- n1 restarts empty: new incarnation, still listed eligible
+def li8a := withCore li8 (appendWrite li8.core 0)   -- n0 writes at offset 1
+def li8b := withCore li8a (reconnect li8a.core 1)   -- n1 reconnects with PSYNC
+def li8c := withCore li8b (streamNext li8b.core 0 1 0) -- n0 streams the write to n1
+def li8d := withCore li8c (applyData li8c.core (.data 0 1 1 1 1) 1 1 1) -- n1 copies it
+def li8e := withCore li8d (sendAckMsg li8d.core 1)  -- n1 acknowledges it: its high-water mark is 1
+/-- n1 restarts from a file holding none of its log: it misses a write it acknowledged,
+so it takes a new incarnation, keeps its ID and stays listed eligible. -/
+def li9 := leaseRestart li8e 1 (restartPartialFresh li8e.core 1 0)
 def li10 := withCore li9 (addToSyncSet li9.core 0 1)       -- n0 counts n1 again
 def li11 := tick li10
 def li12 := tick li11
 def li13 := tick li12
 def li14 := tick li13                               -- now = 4: the last tick at which n0 holds its lease from n2
-def li15 := recvData li14 1 li14.core none          -- a heartbeat reaches n1
+def li14a := withCore li14 (reconnect li14.core 1)  -- n1 reconnects with PSYNC: its ID is n0's
+def li15 := recvData li14a 1 li14a.core none        -- a heartbeat reaches n1
 def li16 := recvAck li15 1 li15.core                -- n1 acknowledges
 def li17 := recvData li16 1 li16.core (li16.ackEcho 0 1)  -- n0 echoes it: n1's read lease starts at 4
 /-- n0 restarts with its data: its sync replica set is rebuilt as `{n2}`, since n1's
 recorded incarnation is stale. -/
 def li18 := leaseRestart li17 0 (restartKeep li17.core 0)
-/-- n0 writes. -/
-def li19 := withCore li18 (appendWrite li18.core 0)
-/-- n2 copies the write. -/
-def li20 := recvData li19 2 (replicate li19.core 2) none
+/-- n2 reconnects to the restarted n0: n0's secondary ID is n2's ID, up to offset 1. -/
+def li20a := withCore li18 (reconnect li18.core 2)
+/-- n0 streams its write to n2. -/
+def li20b := withCore li20a (streamNext li20a.core 0 2 0)
+/-- The entry: n0's write, under n0's new ID 2, on connection 3 from n0 to n2. -/
+def liD : RMsg N := .data 0 2 3 1 2
+/-- n2 applies it. -/
+def li20 := withCore li20b (applyData li20b.core liD 2 1 2)
 /-- n2 acknowledges it. -/
-def li21 := recvAck li20 2 (ack li20.core 2)
+def li21a := withCore li20 (sendAckMsg li20.core 2)
+def liA : RMsg N := .ack 2 0 3 1
+/-- n0 records the acknowledgement. -/
+def li21 := withCore li21a (recordAck li21a.core liA 0 2 1)
 /-- n0 commits with n2 alone, at time 4: the history is `[1]`, and n1's read lease is
-still valid. -/
+still valid while its log is empty. -/
 def li22 := withCore li21 (commitNext li21.core 0)
 
 /-- The run; the label list is its trace. Only `heartbeat 1` (the grant to n1) is the
 weakened action. -/
 theorem grantNoIncRestart_run : (leaseTransitionSystemGrantNoInc 0 P3).MTr l0
     [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .core (.addToSyncSet 0 2), .core (.makeEligible 0 2),
-     .learn 1, .learn 2, .heartbeat 2, .ack 2, .restartEmpty 1, .core (.addToSyncSet 0 1),
-     .tick, .tick, .tick, .tick, .heartbeat 1, .ack 1, .heartbeat 1,
-     .restartKeep 0, .core (.append 0), .replicate 2, .ack 2, .core (.commit 0)] li22 :=
+     .learn 1, .learn 2, .core (.psync 2), .heartbeat 2, .ack 2,
+     .core (.append 0), .core (.psync 1), .core (.sendData 0 1), .core (.deliver (.data 0 1 1 1 1)),
+     .core (.sendAck 1), .restartPartial 1 0, .core (.addToSyncSet 0 1),
+     .tick, .tick, .tick, .tick, .core (.psync 1), .heartbeat 1, .ack 1, .heartbeat 1,
+     .restartKeep 0, .core (.psync 2), .core (.sendData 0 2), .core (.deliver liD),
+     .core (.sendAck 2), .core (.deliver liA), .core (.commit 0)] li22 :=
   .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
@@ -259,29 +283,42 @@ theorem grantNoIncRestart_run : (leaseTransitionSystemGrantNoInc 0 P3).MTr l0
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.learn li4 1 (by decide))) <|
   .stepL (.step (InstantLeaseStep.learn li5 2 (by decide))) <|
-  .stepL (.step (InstantLeaseStep.heartbeat li6 2 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ackRenew li7 2 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.restartEmpty li8 1 (by decide) ⟨0, by decide, by decide⟩)) <|
+  .stepL (.step (InstantLeaseStep.core li6 _ _ (Step.psync li6.core 2 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.heartbeat li6a 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew li7 2 (by decide))) <|
+  .stepL (.step (InstantLeaseStep.core li8 _ _ (Step.append li8.core 0 (by decide) (writable_zero _ _)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core li8a _ _ (Step.psync li8a.core 1 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core li8b _ _ (Step.sendData li8b.core 0 1 0 (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core li8c _ _
+    (Step.deliverData li8c.core 0 1 1 1 1 (by decide) (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core li8d _ _ (Step.sendAck li8d.core 1 (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.restartPartialFresh li8e 1 0 (by decide) (by decide) (by decide)
+    ⟨0, by decide, by decide⟩)) <|
   .stepL (.step (InstantLeaseStep.core li9 _ _ (Step.addToSyncSet li9.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.tick li10)) <| .stepL (.step (InstantLeaseStep.tick li11)) <|
   .stepL (.step (InstantLeaseStep.tick li12)) <| .stepL (.step (InstantLeaseStep.tick li13)) <|
-  .stepL (.step (InstantLeaseStep.heartbeat li14 1 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ackRenew li15 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.core li14 _ _ (Step.psync li14.core 1 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.heartbeat li14a 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew li15 1 (by decide))) <|
   .stepL (LeaseStepGrantNoInc.heartbeatGrant li16 1 (by decide) (by decide) (by decide) (by decide)
     (by decide) (by decide)) <|
   .stepL (.step (InstantLeaseStep.restartKeep li17 0 (by decide))) <|
-  .stepL (.step (InstantLeaseStep.core li18 _ _ (Step.append li18.core 0 (by decide) (writable_zero _ _)) rfl)) <|
-  .stepL (.step (InstantLeaseStep.replicate li19 2 (by decide) (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ack li20 2 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.core li18 _ _ (Step.psync li18.core 2 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core li20a _ _ (Step.sendData li20a.core 0 2 0 (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core li20b _ _
+    (Step.deliverData li20b.core 0 2 _ _ _ (by decide) (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core li20 _ _ (Step.sendAck li20.core 2 (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core li21a _ _
+    (Step.deliverAck li21a.core 2 0 _ 1 1 (by decide) (by decide) (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.core li21 _ _ (Step.commit li21.core 0 (by decide) (writable_zero _ _)
     (by decide) (by decide)) rfl)) <|
   .refl
 
 /-- The incarnation match in `MayGrant` is needed, within the design's duration rule: a
-restarted-empty replica that is granted a read lease is dropped from the sync replica
-set by a primary that restarts with its data, and serves a stale read once that primary
-commits without it. -/
+replica restarted with a new incarnation that is granted a read lease is dropped from
+the sync replica set by a primary that restarts with its data, and serves a stale read
+once that primary commits without it. -/
 theorem grantNoIncRestart_stale : ∃ a, (leaseTransitionSystemGrantNoInc 0 P3).CanReach (leaseInit (0 : N)) a ∧
     ReplCanRead P3 a 1 ∧ a.core.log 1 ≠ a.core.hist :=
   ⟨li22, ⟨_, grantNoIncRestart_run⟩, by decide, by decide⟩
@@ -303,7 +340,7 @@ def lw7 := withCore lw6 (appendWrite lw6.core 1)      -- n1 writes
 def lw8 := withCore lw7 (commitNext lw7.core 1)       -- n1 commits alone: the history is [3]
 
 theorem noWaitPrim_run : (leaseTransitionSystemNoWaitPrim 0 P0).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .core (.psync 1), .heartbeat 1, .ack 1,
      .takeover 1, .core (.append 1), .core (.commit 1)] lw8 :=
   LTS.MTr.comp (leaseTransitionSystemNoWaitPrim 0 P0) (leaseMtr_of_step LeaseStepNoWaitPrim.step (leases_prefix P0)) <|
   .stepL (LeaseStepNoWaitPrim.takeover l5 1 (by decide) (by decide) (by decide) (by decide)) <|
@@ -336,7 +373,7 @@ def ld8 := withCore ld7 (appendWrite ld7.core 0)        -- n0 writes
 def ld9 := withCore ld8 (commitNext ld8.core 0)         -- n0 commits alone: the history is [1]
 
 theorem noWaitRead_run : (leaseTransitionSystemNoWaitRead 0 P0).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .core (.psync 1), .heartbeat 1, .ack 1,
      .heartbeat 1, .demote 0 1, .core (.append 0), .core (.commit 0)] ld9 :=
   LTS.MTr.comp (leaseTransitionSystemNoWaitRead 0 P0) (leaseMtr_of_step LeaseStepNoWaitRead.step (leases_prefix P0)) <|
   .stepL (.step (InstantLeaseStep.heartbeatGrant l5 1 (by decide) (by decide) (by decide) (by decide))) <|
@@ -367,7 +404,7 @@ def ls11 := withCore ls10 (appendWrite ls10.core 1)
 def ls12 := withCore ls11 (commitNext ls11.core 1)
 
 theorem smallMargin_run : (instantTransitionSystem 0 P1).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .core (.psync 1), .heartbeat 1, .ack 1,
      .tick, .tick, .tick, .tick, .takeover 1, .core (.append 1), .core (.commit 1)] ls12 :=
   LTS.MTr.comp (instantTransitionSystem 0 P1) (leases_prefix P1) <|
   .stepL (InstantLeaseStep.tick l5) <| .stepL (InstantLeaseStep.tick ls6) <| .stepL (InstantLeaseStep.tick ls7) <| .stepL (InstantLeaseStep.tick ls8) <|
@@ -389,23 +426,25 @@ theorem smallMargin_stale : ∃ a, LeaseReachable 0 P1 (0 : N) a ∧
 inductive LeaseStepGrantAny (m : Nat) (P : LeaseParams) : LeaseState N → LeaseAction N → LeaseState N → Prop
   | step {a μ a'} : InstantLeaseStep m P a μ a' → LeaseStepGrantAny m P a μ a'
   | heartbeatGrant (a : LeaseState N) (r : N) : primaryOf a.core r ≠ r →
-      ThinksPrimary a.core (primaryOf a.core r) → a.core.log r <+: a.core.log (primaryOf a.core r) →
+      ThinksPrimary a.core (primaryOf a.core r) → StreamOpen a.core (primaryOf a.core r) r →
       PrimLeaseValid P a (primaryOf a.core r) →
       LeaseStepGrantAny m P a (.heartbeat r) (recvData a r a.core (a.ackEcho (primaryOf a.core r) r))
 
 def leaseTransitionSystemGrantAny (m : Nat) (P : LeaseParams) : LTS (LeaseState N) (LeaseAction N) where
   Tr := LeaseStepGrantAny m P
 
-def lg1 := recvData l0 2 l0.core none                 -- a heartbeat reaches n2, which follows n0
+def lg0 := withCore l0 (reconnect l0.core 2)          -- n2 reconnects with PSYNC
+def lg1 := recvData lg0 2 lg0.core none               -- a heartbeat reaches n2, which follows n0
 def lg2 := recvAck lg1 2 lg1.core                       -- n2 acknowledges
 def lg3 := recvData lg2 2 lg2.core (lg2.ackEcho 0 2)     -- n0 echoes it: n2 gets a read lease
 def lg4 := withCore lg3 (appendWrite lg3.core 0)        -- n0 writes
 def lg5 := withCore lg4 (commitNext lg4.core 0)         -- n0 commits alone: the history is [1]
 
 theorem grantAny_run : (leaseTransitionSystemGrantAny 0 P0).MTr l0
-    [.heartbeat 2, .ack 2, .heartbeat 2, .core (.append 0), .core (.commit 0)] lg5 :=
-  .stepL (.step (InstantLeaseStep.heartbeat l0 2 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ackRenew lg1 2 (by decide) (by decide))) <|
+    [.core (.psync 2), .heartbeat 2, .ack 2, .heartbeat 2, .core (.append 0), .core (.commit 0)] lg5 :=
+  .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.psync l0.core 2 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.heartbeat lg0 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lg1 2 (by decide))) <|
   .stepL (LeaseStepGrantAny.heartbeatGrant lg2 2 (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (.step (InstantLeaseStep.core lg3 _ _ (Step.append lg3.core 0 (by decide) (writable_zero _ _)) rfl)) <|
   .stepL (.step (InstantLeaseStep.core lg4 _ _ (Step.commit lg4.core 0 (by decide) (writable_zero _ _) (by decide)

@@ -58,9 +58,9 @@ theorem commit_step_le {m : Nat} {s s' : State Node} {μ : Action Node} (hs : St
     s'.commit p ≤ s'.inheritedEnd p ∨
       (s'.inheritedEnd p = s.inheritedEnd p ∧ s'.commit p ≤ s.commit p + 1) := by
   cases hs <;>
-    simp only [appendWrite, replicate, ack, commitNext, addToSyncSet, removeFromSyncSet, makeEligible,
+    simp only [appendWrite, commitNext, addToSyncSet, removeFromSyncSet, makeEligible,
       makeIneligible, learn, takeover, resync, restartEmpty, restartKeep, restartPartialKeep,
-      restartPartialFresh, update] <;>
+      restartPartialFresh, reconnect, streamNext, applyData, sendAckMsg, recordAck, loseMsg, update] <;>
     (try split_ifs) <;> (try subst_vars) <;> (try simp only [true_and]) <;> omega
 
 /-- Along any run that ends with `p` committed past its inherited log, either `p` was

@@ -35,7 +35,7 @@ theorem invariant_grow {s : State Node} (h : Invariant s) (L : Node → List Nat
   ackedLe := fun p r hp => Nat.le_trans (h.ackedLe p r hp) (hL p).length_le
   ackHolds := by
     intro p n hp hn hf
-    show (L p).take (s.acked p n) <+: L n
+    show (L p).take (s.ackedMax p n) <+: L n
     rw [← prefix_take_eq (hL p) (h.ackedLe p n hp)]
     exact (h.ackHolds p n hp hn hf).trans (hL n)
   ackedHigh := h.ackedHigh
@@ -65,7 +65,7 @@ theorem invariant_replicate {s : State Node} (h : Invariant s) (r : Node) : Inva
 
 section ack
 
-variable {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ r) (hpre : s.log r <+: s.log (primaryOf s r)) (hlt : s.acked (primaryOf s r) r < (s.log r).length)
+variable {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ r) (hpre : s.log r <+: s.log (primaryOf s r)) (hlt : s.ackedMax (primaryOf s r) r < (s.log r).length)
 
 include h hne hpre hlt
 
@@ -82,32 +82,32 @@ theorem repl_ack : ReplInvariant (ack s r) := by
   noSelfSync := h.noSelfSync
   ackedPrim := by
     intro x hx
-    show (ack s r).acked s.cfg.primary x = 0
+    show (ack s r).ackedMax s.cfg.primary x = 0
     rw [hA]; split_ifs with hc
     · obtain ⟨h1, rfl⟩ := hc; exact absurd (h1 ▸ hfol) hx
     · exact h.ackedPrim x hx
   ackedLe := by
     intro q x hq
-    show (ack s r).acked q x ≤ _
+    show (ack s r).ackedMax q x ≤ _
     rw [hA]; split_ifs with hc
     · obtain ⟨rfl, rfl⟩ := hc; exact hpre.length_le
     · exact h.ackedLe q x hq
   ackHolds := by
     intro q n hq hn hf
-    show (s.log q).take ((ack s r).acked q n) <+: s.log n
+    show (s.log q).take ((ack s r).ackedMax q n) <+: s.log n
     rw [hA]; split_ifs with hc
     · obtain ⟨rfl, rfl⟩ := hc
       rw [← prefix_take_eq hpre (Nat.le_refl _), List.take_length]
     · exact h.ackHolds q n hq hn hf
   ackedHigh := by
     intro q n hq hn hf
-    show (ack s r).acked q n ≤ (ack s r).ackHigh n
+    show (ack s r).ackedMax q n ≤ (ack s r).ackHigh n
     rw [hA]; split_ifs with hc
     · obtain ⟨rfl, rfl⟩ := hc; exact ack_ackHigh_self _
     · exact Nat.le_trans (h.ackedHigh q n hq hn hf) (ack_ackHigh_le _ n)
   syncCommit := by
     intro q x hq hs
-    show _ ≤ (ack s r).acked q x
+    show _ ≤ (ack s r).ackedMax q x
     rw [hA]; split_ifs with hc
     · obtain ⟨rfl, rfl⟩ := hc; exact Nat.le_trans (h.syncCommit _ _ hq hs) (Nat.le_of_lt hlt)
     · exact h.syncCommit q x hq hs }
@@ -121,7 +121,7 @@ theorem membership_ack : MembershipInvariant (ack s r) := by
     intro x hs he
     obtain ⟨a, b⟩ := h.syncNew x hs he
     refine ⟨a, ?_⟩
-    show _ ≤ (ack s r).acked s.cfg.primary x
+    show _ ≤ (ack s r).ackedMax s.cfg.primary x
     rw [hA]; split_ifs with hc
     · obtain ⟨h1, rfl⟩ := hc
       show s.inheritedEnd s.cfg.primary ≤ _; have := hlt; rw [← h1] at this; omega
@@ -149,7 +149,7 @@ theorem failover_ack : FailoverInvariant (ack s r) := by
       (fun _ => List.prefix_refl _) (ack_ackHigh_le r)
       (fun x => h.ackedLe p x hp) (fun _ x => x) ?_
     intro x hx
-    show (ack s r).acked p x = s.acked p x
+    show (ack s r).ackedMax p x = s.ackedMax p x
     rw [hA]; split_ifs with hc
     · obtain ⟨rfl, rfl⟩ := hc; exact absurd hfol hx
     · rfl
@@ -208,18 +208,18 @@ theorem repl_resync : ReplInvariant (resync s r) := by
   have hCo : ∀ x, x ≠ r → (resync s r).commit x = s.commit x := fun _ => resync_commit_other
   have hA := resync_acked (s := s) (r := r)
   have hAle := resync_acked_le (s := s) (r := r)
-  have hAs : ∀ q x, s.sync q x = true → (resync s r).acked q x = s.acked q x :=
+  have hAs : ∀ q x, s.sync q x = true → (resync s r).ackedMax q x = s.ackedMax q x :=
     fun _ _ => resync_acked_sync hsy
   exact {
   noSelfSync := h.noSelfSync
-  ackedPrim := by intro x hx; show (resync s r).acked s.cfg.primary x = 0; have := hAle s.cfg.primary x; rw [h.ackedPrim x hx] at this; omega
+  ackedPrim := by intro x hx; show (resync s r).ackedMax s.cfg.primary x = 0; have := hAle s.cfg.primary x; rw [h.ackedPrim x hx] at this; omega
   ackedLe := by
     intro p x hp
-    show (resync s r).acked p x ≤ ((resync s r).log p).length
+    show (resync s r).ackedMax p x ≤ ((resync s r).log p).length
     rw [hLo p (htpne p hp)]; exact Nat.le_trans (hAle p x) (h.ackedLe p x hp)
   ackHolds := by
     intro p m hp hm hf
-    show ((resync s r).log p).take ((resync s r).acked p m) <+: (resync s r).log m
+    show ((resync s r).log p).take ((resync s r).ackedMax p m) <+: (resync s r).log m
     rw [hLo p (htpne p hp), hA]
     split_ifs with c
     · simp
@@ -228,7 +228,7 @@ theorem repl_resync : ReplInvariant (resync s r) := by
       · rw [hLo m em]; exact h.ackHolds p m hp hm hf
   ackedHigh := by
     intro p m hp hm hf
-    show (resync s r).acked p m ≤ s.ackHigh m
+    show (resync s r).ackedMax p m ≤ s.ackHigh m
     rw [hA]; split_ifs with c
     · exact Nat.zero_le _
     · exact h.ackedHigh p m hp hm hf
@@ -241,7 +241,7 @@ omit hne hke in
 counted replica stays caught up. -/
 theorem membership_resync : MembershipInvariant (resync s r) := by
   have hcl := commit_le_catchUpPoint h (primaryOf s r)
-  have hAs : ∀ q x, s.sync q x = true → (resync s r).acked q x = s.acked q x :=
+  have hAs : ∀ q x, s.sync q x = true → (resync s r).ackedMax q x = s.ackedMax q x :=
     fun _ _ => resync_acked_sync hsy
   exact {
   eligibleCounted := h.eligibleCounted
@@ -249,7 +249,7 @@ theorem membership_resync : MembershipInvariant (resync s r) := by
     intro x hs he
     obtain ⟨a, b⟩ := h.syncNew x hs he
     refine ⟨a, ?_⟩
-    show s.inheritedEnd s.cfg.primary ≤ (resync s r).acked s.cfg.primary x
+    show s.inheritedEnd s.cfg.primary ≤ (resync s r).ackedMax s.cfg.primary x
     rw [hAs _ _ (show s.sync s.cfg.primary x = true from hs)]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -297,7 +297,7 @@ theorem failover_resync : FailoverInvariant (resync s r) := by
   obtain ⟨hrprim, hrel, htpne⟩ := resync_facts h r hne hsy hke
   have hcl := commit_le_catchUpPoint h (primaryOf s r)
   have hLo : ∀ x, x ≠ r → (resync s r).log x = s.log x := fun _ => resync_log_other
-  have hAs : ∀ q x, s.sync q x = true → (resync s r).acked q x = s.acked q x :=
+  have hAs : ∀ q x, s.sync q x = true → (resync s r).ackedMax q x = s.ackedMax q x :=
     fun _ _ => resync_acked_sync hsy
   have hnotr : ∀ x, (s.cfg.eligible x = true ∨ x = s.cfg.primary) → x ≠ r := by
     intro x hx e; subst e

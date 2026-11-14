@@ -59,8 +59,7 @@ theorem noReplyFence_run : (replyTransitionSystemNoFence 0).MTr b0
   .stepL (.step (ReplyStep.core b4 _ _ (Step.takeover b4.core 1 (by decide) (by decide) (by decide)
     (by decide)) rfl)) <|
   .stepL (.step (ReplyStep.core b5 _ _ (Step.learn b5.core 0 (by decide)) rfl)) <|
-  .stepL (.step (ReplyStep.core b6 _ _ (Step.resync b6.core 0 (by decide) (by decide) (by decide)
-    (by decide)) rfl)) <|
+  .stepL (.step (ReplyStep.core b6 _ _ (Step.resync b6.core 0 (by decide) (by decide) (by decide)) rfl)) <|
   .stepL (.step (ReplyStep.core b7 _ _ (Step.addToSyncSet b7.core 1 0 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (ReplyStep.core b8 _ _ (Step.makeEligible b8.core 1 0 (by decide) (by decide) (by decide)

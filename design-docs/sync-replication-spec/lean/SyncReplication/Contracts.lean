@@ -45,9 +45,9 @@ theorem takeover_sync_self : (takeover s n).sync n = syncAfterTakeover s n := by
 theorem takeover_sync_other {x : Node} (hx : x ≠ n) : (takeover s n).sync x = s.sync x := by
   simp [takeover, update, hx]
 
-theorem takeover_acked_self : (takeover s n).acked n = fun _ => 0 := by simp [takeover]
+theorem takeover_acked_self : (takeover s n).ackedMax n = fun _ => 0 := by simp [takeover]
 
-theorem takeover_acked_other {x : Node} (hx : x ≠ n) : (takeover s n).acked x = s.acked x := by
+theorem takeover_acked_other {x : Node} (hx : x ≠ n) : (takeover s n).ackedMax x = s.ackedMax x := by
   simp [takeover, update, hx]
 
 theorem takeover_commit_self : (takeover s n).commit n = 0 := by simp [takeover]
@@ -231,8 +231,8 @@ section repl
 
 /-- Ack(r): only `r`'s primary's record of `r`'s acknowledgement moves, to the end of
 `r`'s log. -/
-theorem ack_acked (r q x : Node) : (ack s r).acked q x =
-    if q = primaryOf s r ∧ x = r then (s.log r).length else s.acked q x := by
+theorem ack_acked (r q x : Node) : (ack s r).ackedMax q x =
+    if q = primaryOf s r ∧ x = r then (s.log r).length else s.ackedMax q x := by
   by_cases hq : q = primaryOf s r
   · subst hq; by_cases hx : x = r
     · subst hx; simp [ack, update]
@@ -321,21 +321,21 @@ theorem resync_commit_other {x : Node} (hx : x ≠ r) : (resync s r).commit x = 
   simp [resync, update, hx]
 
 theorem resync_acked (q x : Node) :
-    (resync s r).acked q x = if q = primaryOf s r ∧ x = r then 0 else s.acked q x := by
+    (resync s r).ackedMax q x = if q = primaryOf s r ∧ x = r then 0 else s.ackedMax q x := by
   by_cases hq : q = primaryOf s r
   · subst hq; by_cases hx : x = r
     · subst hx; simp [resync, update]
     · simp [resync, update, hx]
   · simp [resync, update, hq]
 
-theorem resync_acked_le (q x : Node) : (resync s r).acked q x ≤ s.acked q x := by
+theorem resync_acked_le (q x : Node) : (resync s r).ackedMax q x ≤ s.ackedMax q x := by
   rw [resync_acked]; split
   · exact Nat.zero_le _
   · exact Nat.le_refl _
 
 /-- Acknowledgements the primary counts are untouched, because `r` is not counted. -/
 theorem resync_acked_sync (hsy : s.sync (primaryOf s r) r = false) {q x : Node}
-    (hs : s.sync q x = true) : (resync s r).acked q x = s.acked q x := by
+    (hs : s.sync q x = true) : (resync s r).ackedMax q x = s.ackedMax q x := by
   rw [resync_acked]; split_ifs with c
   · obtain ⟨rfl, rfl⟩ := c; rw [hsy] at hs; exact absurd hs (by decide)
   · rfl
@@ -396,8 +396,8 @@ theorem restartEmpty_sync (p r : Node) : (restartEmpty s n).sync p r =
       · simp [restartEmpty, e, er, update]
     · simp [restartEmpty, e, ep]
 
-theorem restartEmpty_acked (p r : Node) : (restartEmpty s n).acked p r =
-    if p = n then 0 else if p = s.cfg.primary ∧ r = n then 0 else s.acked p r := by
+theorem restartEmpty_acked (p r : Node) : (restartEmpty s n).ackedMax p r =
+    if p = n then 0 else if p = s.cfg.primary ∧ r = n then 0 else s.ackedMax p r := by
   by_cases e : p = n
   · simp [restartEmpty, e]
   · by_cases ep : p = s.cfg.primary
@@ -407,7 +407,7 @@ theorem restartEmpty_acked (p r : Node) : (restartEmpty s n).acked p r =
       · simp [restartEmpty, e, er, update]
     · simp [restartEmpty, e, ep]
 
-theorem restartEmpty_acked_le (p r : Node) : (restartEmpty s n).acked p r ≤ s.acked p r := by
+theorem restartEmpty_acked_le (p r : Node) : (restartEmpty s n).ackedMax p r ≤ s.ackedMax p r := by
   rw [restartEmpty_acked]; split
   · exact Nat.zero_le _
   · split
@@ -477,9 +477,9 @@ theorem restartKeep_inheritedEnd_self : (restartKeep s n).inheritedEnd n = (s.lo
   simp [restartKeep]
 
 theorem restartKeep_acked_other {x : Node} (e : x ≠ n) :
-    (restartKeep s n).acked x = s.acked x := by simp [restartKeep, update, e]
+    (restartKeep s n).ackedMax x = s.ackedMax x := by simp [restartKeep, update, e]
 
-theorem restartKeep_acked_self : (restartKeep s n).acked n = fun _ => 0 := by
+theorem restartKeep_acked_self : (restartKeep s n).ackedMax n = fun _ => 0 := by
   simp [restartKeep]
 
 theorem restartKeep_sync_other {x : Node} (e : x ≠ n) :
@@ -531,9 +531,9 @@ theorem restartPartialKeep_inheritedEnd_self : (restartPartialKeep s n k).inheri
   show update s.inheritedEnd n k n = _; rw [update_self]
 
 theorem restartPartialKeep_acked_other {x : Node} (e : x ≠ n) :
-    (restartPartialKeep s n k).acked x = s.acked x := restartKeep_acked_other e
+    (restartPartialKeep s n k).ackedMax x = s.ackedMax x := restartKeep_acked_other e
 
-theorem restartPartialKeep_acked_self : (restartPartialKeep s n k).acked n = fun _ => 0 :=
+theorem restartPartialKeep_acked_self : (restartPartialKeep s n k).ackedMax n = fun _ => 0 :=
   restartKeep_acked_self
 
 theorem restartPartialKeep_sync_other {x : Node} (e : x ≠ n) :
@@ -583,12 +583,12 @@ theorem restartPartialFresh_sync (p r : Node) : (restartPartialFresh s n k).sync
     if p = n then false else if p = s.cfg.primary ∧ r = n then false else s.sync p r :=
   restartEmpty_sync p r
 
-theorem restartPartialFresh_acked (p r : Node) : (restartPartialFresh s n k).acked p r =
-    if p = n then 0 else if p = s.cfg.primary ∧ r = n then 0 else s.acked p r :=
+theorem restartPartialFresh_acked (p r : Node) : (restartPartialFresh s n k).ackedMax p r =
+    if p = n then 0 else if p = s.cfg.primary ∧ r = n then 0 else s.ackedMax p r :=
   restartEmpty_acked p r
 
 theorem restartPartialFresh_acked_le (p r : Node) :
-    (restartPartialFresh s n k).acked p r ≤ s.acked p r := restartEmpty_acked_le p r
+    (restartPartialFresh s n k).ackedMax p r ≤ s.ackedMax p r := restartEmpty_acked_le p r
 
 theorem restartPartialFresh_sync_le {p r : Node} (hs : (restartPartialFresh s n k).sync p r = true) :
     s.sync p r = true := restartEmpty_sync_le hs

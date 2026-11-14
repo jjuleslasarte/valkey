@@ -60,7 +60,7 @@ conjunct that reads them across the restart is `primarySinceAck`: `n`'s kept
 acknowledgements predate its new primaryship, and the restart marks every replica old,
 which is the second disjunct. -/
 theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState Node}
-    (h : LeaseInvariant P a) {n : Node} {c : State Node} (hc : Invariant c)
+    (h : LeaseInvariant P a) {n : Node} {c : State Node} (hc : Invariant c) (hrc : RInvariant c)
     (hkl : KnowsLatest a.core n)
     (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
     (hinc : ∀ x, x ≠ n → c.incarnation x = a.core.incarnation x)
@@ -93,9 +93,10 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
   obtain ⟨hS1, hS2, hS3, hS4⟩ := msgs_frame h (a' := leaseRestartKeepGrantorRows a n c) (Nat.le_refl _) (fun _ hm => hm)
     (fun msg hm hc => (hcb msg hm hc).1) hgle
     (fun msg hm hc => (hcommit _ (hcb msg hm hc).2.1).ge)
-    (fun msg _ _ => congrArg (fun f => (f msg.dst).primary) hlocalCfg)
+    (fun msg _ _ _ => congrArg (fun f => (f msg.dst).primary) hlocalCfg)
   exact {
   core := hc
+  rcore := hrc
   primaryTrafficLe := fun x => (hPT x).2
   ackReceivedLe := h.ackReceivedLe, primarySinceLe := hPS, echoLe := h.echoLe, primarySinceAck := hPA
   primaryLeaseLe := fun q x v hv => Nat.le_trans (h.primaryLeaseLe q x v (hPLS q x v hv)) (hPT x).1
@@ -150,19 +151,19 @@ theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift �
   cases hs with
   | step _ _ hs1 => exact leaseInvariant_step hM h hs1
   | restartEmpty n hkl hsurv =>
-    exact leaseInvariant_restartKeepGrantorRows h (invariant_restartEmpty h.core n hkl hsurv) hkl rfl rfl
+    exact leaseInvariant_restartKeepGrantorRows h (invariant_restartEmpty h.core n hkl hsurv) (h.rcore.restartEmpty n) hkl rfl rfl
       (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e) rfl
       (fun _ e => restartEmpty_commit_other e)
   | restartKeep n hkl =>
-    exact leaseInvariant_restartKeepGrantorRows h (invariant_restartKeep h.core n hkl) hkl rfl rfl
+    exact leaseInvariant_restartKeepGrantorRows h (invariant_restartKeep h.core n hkl) (h.rcore.restartKeep n) hkl rfl rfl
       (fun _ _ => rfl) (fun _ _ => rfl) rfl (fun _ e => restartKeep_commit_other e)
   | restartPartialKeep n k hkl hk hkeep =>
     exact leaseInvariant_restartKeepGrantorRows h (invariant_restartPartialKeep h.core n k hkl hk hkeep)
-      hkl rfl rfl (fun _ _ => rfl) (fun _ e => restartPartialKeep_log_other e) rfl
+      (h.rcore.restartPartialKeep n hk) hkl rfl rfl (fun _ _ => rfl) (fun _ e => restartPartialKeep_log_other e) rfl
       (fun _ e => restartKeep_commit_other e)
   | restartPartialFresh n k hkl hk hfresh hsurv =>
     exact leaseInvariant_restartKeepGrantorRows h
-      (invariant_restartPartialFresh h.core n k hkl hsurv hk hfresh) hkl rfl rfl
+      (invariant_restartPartialFresh h.core n k hkl hsurv hk hfresh) (h.rcore.restartPartialFresh n hk) hkl rfl rfl
       (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e) rfl
       (fun _ e => restartEmpty_commit_other e)
 

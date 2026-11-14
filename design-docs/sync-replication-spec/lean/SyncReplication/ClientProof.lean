@@ -237,9 +237,6 @@ structure ClientInvariant (P : LeaseParams) (a : ClientState Node) : Prop where
   that node's log; so its next append has a new offset-and-ID pair. -/
   owned : ∀ x ∈ a.written, ∀ p, ThinksPrimary a.lease.core p → a.lease.core.replId p = x.replId →
     x.offset ≤ (a.lease.core.log p).length
-  /-- No two nodes that think they are primary share an ID. -/
-  uniqPrim : ∀ p q, ThinksPrimary a.lease.core p → ThinksPrimary a.lease.core q →
-    a.lease.core.replId p = a.lease.core.replId q → p = q
   /-- Every entry of every log, and of the committed history, was appended. -/
   logKeyed : ∀ n, Keyed a.written (a.lease.core.log n)
   histKeyed : Keyed a.written a.lease.core.hist
@@ -278,6 +275,12 @@ structure ClientInvariant (P : LeaseParams) (a : ClientState Node) : Prop where
   /-- The linearization is legal for the log. -/
   linLegal : LogLegal ((a.lin.map Prod.fst).map Operation.call)
 
+/-- No two nodes that think they are primary share an ID: `RInvariant.uniqPrim`. -/
+theorem ClientInvariant.uniqPrim {P : LeaseParams} {a : ClientState Node} (h : ClientInvariant P a) :
+    ∀ p q, ThinksPrimary a.lease.core p → ThinksPrimary a.lease.core q →
+      a.lease.core.replId p = a.lease.core.replId q → p = q :=
+  h.lease.rcore.uniqPrim
+
 /-- The invariant's conclusion: the history is linearizable. -/
 theorem ClientInvariant.linearizable {P : LeaseParams} {a : ClientState Node}
     (h : ClientInvariant P a) : Linearizable LogLegal a.history :=
@@ -297,7 +300,6 @@ theorem clientInvariant_init (P : LeaseParams) (i : Node) : ClientInvariant P (c
   writtenInv := by simp [clientInit]
   writtenIds := by simp [clientInit]
   owned := by simp [clientInit]
-  uniqPrim := fun p q hp hq _ => (uniqPrim_init i hp).trans (uniqPrim_init i hq).symm
   logKeyed := by intro n j v h; simp [clientInit, leaseInit, init] at h
   histKeyed := by intro j v h; simp [clientInit, leaseInit, init] at h
   respondedCommitted := by simp [clientInit]
@@ -395,10 +397,10 @@ theorem entry_update {L : Node → List Nat} {r : Node} {X : List Nat} {n : Node
   · left; rw [update_of_ne _ _ hn]
 
 /-- A replication step other than an append or a restart. -/
-theorem coreMove_step {s s' : State Node} (h : Invariant s) (ht : ReplIdsIssued s) {m : Nat}
+theorem coreMove_step {s s' : State Node} (h : Invariant s) (hr : RInvariant s) (ht : ReplIdsIssued s) {m : Nat}
     {μ : Action Node} (hs : Step m s μ s') (hμ : μ.isRestart = false) (hna : ∀ p, μ ≠ .append p) :
     CoreMove s s' := by
-  obtain ⟨hh, hv, ht', hx⟩ := step_facts h ht hs hμ
+  obtain ⟨hh, hv, ht', hx⟩ := step_facts h hr ht hs hμ
   have hids : ∀ x, s'.replId x ∈ s.usedIds ∨ (∀ y, s'.replId y = s'.replId x → y = x) := by
     cases hs with
     | takeover n _ _ _ _ =>
@@ -410,32 +412,36 @@ theorem coreMove_step {s s' : State Node} (h : Invariant s) (ht : ReplIdsIssued 
           simpa [takeover, update, hyx] using hy
         exact freshId_not_mem s (this ▸ ht y)
       · left; simpa [takeover, update, hxn] using ht x
-    | replicate r _ _ _ =>
+    | deliverData p r g v rid hin hcur hf _ =>
+      intro x; left
+      show update s.replId r rid x ∈ _
+      by_cases hxr : x = r
+      · subst hxr; rw [update_self]; exact (hr.deliver_prefix hin hcur hf).2.2
+      · rw [update_of_ne _ _ hxr]; exact ht x
+    | resync r _ _ _ =>
       intro x; left
       show update s.replId r (s.replId (primaryOf s r)) x ∈ _
       by_cases hxr : x = r
       · subst hxr; rw [update_self]; exact ht _
       · rw [update_of_ne _ _ hxr]; exact ht x
+    | restartEmpty => exact absurd hμ (by simp [Action.isRestart])
+    | restartKeep => exact absurd hμ (by simp [Action.isRestart])
+    | restartPartialKeep => exact absurd hμ (by simp [Action.isRestart])
+    | restartPartialFresh => exact absurd hμ (by simp [Action.isRestart])
     | _ => intro x; left; exact ht x
   have hentries : ∀ (n : Node) (j v : Nat), (s'.log n)[j]? = some v → ∃ n', (s.log n')[j]? = some v := by
     cases hs with
     | append p _ _ => exact absurd rfl (hna p)
-    | replicate r hne hpre hlt =>
+    | deliverData p r g v' rid hin hcur hf _ =>
+      -- the entry is the next one of the streaming primary's log
+      obtain ⟨-, hpre, -⟩ := hr.deliver_prefix hin hcur hf
       intro n j v hj
-      change (update s.log r _ n)[j]? = some v at hj
+      change (update s.log r (s.log r ++ [v']) n)[j]? = some v at hj
       by_cases hn : n = r
       · subst hn; rw [update_self] at hj
-        rcases Nat.lt_or_ge j (s.log n).length with hl | hl
-        · exact ⟨n, by rw [List.getElem?_append_left hl] at hj; exact hj⟩
-        · refine ⟨primaryOf s n, ?_⟩
-          rw [List.getElem?_append_right hl] at hj
-          have hj0 : j - (s.log n).length = 0 := by
-            have := (List.getElem?_eq_some_iff.1 hj).1; simp at this; omega
-          rw [hj0] at hj; simp only [List.getElem?_cons_zero, Option.some.injEq] at hj
-          have hjn : j = (s.log n).length := by omega
-          rw [hjn, ← hj, List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hlt]; rfl
+        exact ⟨p, by rw [prefix_getElem? hpre (List.getElem?_eq_some_iff.1 hj).1]; exact hj⟩
       · rw [update_of_ne _ _ hn] at hj; exact ⟨n, hj⟩
-    | resync r _ _ _ _ =>
+    | resync r _ _ _ =>
       intro n j v hj
       change (update s.log r _ n)[j]? = some v at hj
       by_cases hn : n = r
@@ -664,13 +670,6 @@ theorem ClientInvariant.move {P : LeaseParams} {a : ClientState Node} (h : Clien
     intro x hx p hp he
     obtain ⟨hp0, e0, lp⟩ := hm.prim p hp (by rw [he]; exact h.writtenIds x hx)
     exact (h.owned x hx p hp0 (e0.trans he)).trans lp.length_le
-  uniqPrim := by
-    intro p q hp hq he
-    by_cases hu : l.core.replId p ∈ a.lease.core.usedIds
-    · obtain ⟨hp0, ep, -⟩ := hm.prim p hp hu
-      obtain ⟨hq0, eq, -⟩ := hm.prim q hq (he ▸ hu)
-      exact h.uniqPrim p q hp0 hq0 (ep.trans (he.trans eq.symm))
-    · exact hm.newId p q hp hq he hu
   logKeyed := hlogKeyed
   histKeyed := hhistKeyed
   respondedCommitted := fun x hx hresp => by
@@ -767,7 +766,7 @@ variable {Node : Type} [DecidableEq Node]
 /-- A fresh replication ID does not touch anything the lease invariant reads. -/
 theorem leaseInvariant_freshen {P : LeaseParams} {l : LeaseState Node} (h : LeaseInvariant P l)
     (n : Node) : LeaseInvariant P (freshen l n) :=
-  { h with core := h.core.replId_frame _ _,
+  { h with core := h.core.replId_frame _ _, rcore := h.rcore.newId n,
            drop := ⟨h.drop.1, h.drop.2, h.drop.3, h.drop.4⟩ }
 
 /-- A lease step of the client layer either leaves the replication state alone or is a
@@ -783,7 +782,7 @@ theorem leaseStep_core {m : Nat} {P : LeaseParams} {a l : LeaseState Node} {μ :
   | learn n hn => right; exact ⟨_, Step.learn _ n hn, rfl, by simp⟩
   | demote p r hp hkl hel _ => right; exact ⟨_, Step.makeIneligible _ p r hp hkl hel, rfl, by simp⟩
   | takeover n hkl hel hnp hin _ => right; exact ⟨_, Step.takeover _ n hkl hel hnp hin, rfl, by simp⟩
-  | resync r h1 h2 h3 h4 => right; exact ⟨_, Step.resync _ r h1 h2 h3 h4, rfl, by simp⟩
+  | resync r h1 h2 h3 => right; exact ⟨_, Step.resync _ r h1 h2 h3, rfl, by simp⟩
   | restartEmpty => simp [LeaseAction.isClientLease] at hμ
   | restartKeep => simp [LeaseAction.isClientLease] at hμ
   | restartPartialKeep => simp [LeaseAction.isClientLease] at hμ
@@ -797,18 +796,19 @@ theorem freshen_core (l : LeaseState Node) (n : Node) :
 
 /-- A restart of `n` (or nothing), then a fresh ID for `n`. -/
 theorem coreMove_fresh {c : State Node} (ht : ReplIdsIssued c) {n : Node} (l : LeaseState Node)
-    (hids : l.core.usedIds = c.usedIds) (hrep : l.core.replId = c.replId) (hhist : l.core.hist = c.hist)
+    (hids : c.usedIds ⊆ l.core.usedIds) (hrep : ∀ x, x ≠ n → l.core.replId x = c.replId x)
+    (hhist : l.core.hist = c.hist)
     (hlog : ∀ x, x ≠ n → l.core.log x = c.log x)
     (hlogn : ∀ (j v : Nat), (l.core.log n)[j]? = some v → (c.log n)[j]? = some v)
     (htp : ∀ x, x ≠ n → ThinksPrimary l.core x → ThinksPrimary c x) :
     CoreMove c (freshen l n).core := by
-  have hfresh : freshId l.core ∉ c.usedIds := hids ▸ freshId_not_mem l.core
+  have hfresh : freshId l.core ∉ c.usedIds := fun h => freshId_not_mem l.core (hids h)
   have hrid : ∀ x, x ≠ n → (freshen l n).core.replId x = c.replId x := fun x hx => by
-    rw [freshen_core]; show update l.core.replId n _ x = _; rw [update_of_ne _ _ hx, hrep]
+    rw [freshen_core]; show update l.core.replId n _ x = _; rw [update_of_ne _ _ hx, hrep x hx]
   have hridn : (freshen l n).core.replId n = freshId l.core := by
     rw [freshen_core]; show update l.core.replId n _ n = _; rw [update_self]
   exact {
-  ids := by rw [freshen_core, ← hids]; exact Finset.subset_insert _ _
+  ids := by rw [freshen_core]; exact hids.trans (Finset.subset_insert _ _)
   prim := by
     intro p hp hu
     by_cases hpn : p = n
@@ -1014,7 +1014,7 @@ theorem ClientInvariant.invokeWrite (c : Nat) : ClientInvariant P
   lease := h.lease, reply := h.reply, wf := hwf, idsLt := hids
   keysNodup := h.keysNodup, opsNodup := h.opsNodup
   writtenInv := fun x hx => List.mem_append_left _ (h.writtenInv x hx)
-  writtenIds := h.writtenIds, owned := h.owned, uniqPrim := h.uniqPrim
+  writtenIds := h.writtenIds, owned := h.owned
   logKeyed := h.logKeyed, histKeyed := h.histKeyed
   respondedCommitted := fun x hx hr => h.respondedCommitted x hx ((hresp _).1 hr)
   heldKeyed := h.heldKeyed, heldKeysNodup := h.heldKeysNodup
@@ -1053,7 +1053,7 @@ theorem ClientInvariant.invokeRead (c : Nat) (n : Node) : ClientInvariant P
   lease := h.lease, reply := h.reply, wf := hwf, idsLt := hids
   keysNodup := h.keysNodup, opsNodup := h.opsNodup
   writtenInv := fun x hx => List.mem_append_left _ (h.writtenInv x hx)
-  writtenIds := h.writtenIds, owned := h.owned, uniqPrim := h.uniqPrim
+  writtenIds := h.writtenIds, owned := h.owned
   logKeyed := h.logKeyed, histKeyed := h.histKeyed
   respondedCommitted := fun x hx hr => h.respondedCommitted x hx ((hresp _).1 hr)
   heldKeyed := h.heldKeyed, heldKeysNodup := h.heldKeysNodup
@@ -1138,7 +1138,6 @@ theorem ClientInvariant.append (hM : 2 * P.drift ≤ P.margin) {m : Nat} {p : No
       subst this; show y.offset ≤ ((appendWrite a.lease.core q).log q).length
       rw [hlogp, hy]; simp
     · exact (h.owned x hx q hq he).trans (hlog q).length_le
-  uniqPrim := h.uniqPrim
   logKeyed := by
     intro n j v hj
     change ((appendWrite a.lease.core p).log n)[j]? = some v at hj
@@ -1251,7 +1250,7 @@ theorem ClientInvariant.release {m : Nat} {g : Held Node} {x : Written} (hm : g 
     · rw [List.mem_singleton] at he; subst he; have := h.idsLt _ hinv; exact this
   keysNodup := h.keysNodup, opsNodup := h.opsNodup
   writtenInv := fun y hy => List.mem_append_left _ (h.writtenInv y hy)
-  writtenIds := h.writtenIds, owned := h.owned, uniqPrim := h.uniqPrim
+  writtenIds := h.writtenIds, owned := h.owned
   logKeyed := h.logKeyed, histKeyed := h.histKeyed
   respondedCommitted := by
     intro y hy hry
@@ -1354,7 +1353,7 @@ theorem ClientInvariant.respondRead (hM : 2 * P.drift ≤ P.margin) {op c : Nat}
     · rw [List.mem_singleton] at he; subst he; have := h.idsLt _ hri; exact this
   keysNodup := h.keysNodup, opsNodup := h.opsNodup
   writtenInv := fun y hy => List.mem_append_left _ (h.writtenInv y hy)
-  writtenIds := h.writtenIds, owned := h.owned, uniqPrim := h.uniqPrim
+  writtenIds := h.writtenIds, owned := h.owned
   logKeyed := h.logKeyed, histKeyed := h.histKeyed
   respondedCommitted := by
     intro y hy hry
@@ -1484,7 +1483,7 @@ theorem clientInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {
       have hm : CoreMove a.lease.core l.core := by rw [he]; exact CoreMove.refl h.reply.replIdsIssued
       exact h.move l a.held hl hr' (List.Sublist.refl _) hm
     · exact h.move l a.held hl (replyInvariant_core h.reply hst hr) (List.Sublist.refl _)
-        (coreMove_step h.reply.core h.reply.replIdsIssued hst hr hna)
+        (coreMove_step h.reply.core h.reply.rcore h.reply.replIdsIssued hst hr hna)
   | restart μ l n hs hμ =>
     have hl := leaseInvariant_freshen (leaseInvariant_step hM h.lease hs) n
     cases hs with
@@ -1493,7 +1492,7 @@ theorem clientInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {
       have hr := replyInvariant_step (replyInvariant_step h.reply
         (ReplyStep.restartEmpty (m := m) a.reply n' hkl hsurv)) (ReplyStep.newId (m := m) _ n')
       exact h.moveSameHist _ _ hl hr List.filter_sublist
-        (coreMove_fresh h.reply.replIdsIssued _ rfl rfl rfl (fun x hx => restartEmpty_log_other hx)
+        (coreMove_fresh h.reply.replIdsIssued _ (Finset.subset_insert _ _) (fun _ e => update_of_ne _ _ e) rfl (fun x hx => restartEmpty_log_other hx)
           (fun j v hj => by simp [leaseRestart, restartEmpty] at hj)
           (fun x _ hx => (restartEmpty_thinksPrimary (h.lease.core.localCfgEq n' hkl)
             (h.lease.core.incLe n') hx).2)) rfl
@@ -1502,14 +1501,14 @@ theorem clientInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {
       have hr := replyInvariant_step (replyInvariant_step h.reply
         (ReplyStep.restartKeep (m := m) a.reply n' hkl)) (ReplyStep.newId (m := m) _ n')
       exact h.moveSameHist _ _ hl hr List.filter_sublist
-        (coreMove_fresh h.reply.replIdsIssued _ rfl rfl rfl (fun _ _ => rfl) (fun _ _ hj => hj)
+        (coreMove_fresh h.reply.replIdsIssued _ (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) rfl (fun _ _ => rfl) (fun _ _ hj => hj)
           (fun _ _ hx => hx)) rfl
     | restartPartialKeep n' k hkl hk hkeep =>
       simp only [LeaseAction.restarted, Option.some.injEq] at hμ; subst hμ
       have hr := replyInvariant_step (replyInvariant_step h.reply
         (ReplyStep.restartPartialKeep (m := m) a.reply n' k hkl hk hkeep)) (ReplyStep.newId (m := m) _ n')
       exact h.moveSameHist _ _ hl hr List.filter_sublist
-        (coreMove_fresh h.reply.replIdsIssued _ rfl rfl rfl (fun x hx => restartPartialKeep_log_other hx)
+        (coreMove_fresh h.reply.replIdsIssued _ (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) rfl (fun x hx => restartPartialKeep_log_other hx)
           (fun j v hj => by
             change ((restartPartialKeep a.lease.core n' k).log n')[j]? = some v at hj
             rw [restartPartialKeep_log_self] at hj; exact take_entries hj)
@@ -1520,7 +1519,7 @@ theorem clientInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {
         (ReplyStep.restartPartialFresh (m := m) a.reply n' k hkl hk hfresh hsurv))
         (ReplyStep.newId (m := m) _ n')
       exact h.moveSameHist _ _ hl hr List.filter_sublist
-        (coreMove_fresh h.reply.replIdsIssued _ rfl rfl rfl (fun x hx => restartPartialFresh_log_other hx)
+        (coreMove_fresh h.reply.replIdsIssued _ (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) rfl (fun x hx => restartPartialFresh_log_other hx)
           (fun j v hj => by
             change ((restartPartialFresh a.lease.core n' k).log n')[j]? = some v at hj
             rw [restartPartialFresh_log, if_pos rfl] at hj; exact take_entries hj)
@@ -1530,7 +1529,7 @@ theorem clientInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {
   | newId p =>
     have hr := replyInvariant_step (m := m) h.reply (ReplyStep.newId _ p)
     exact h.moveSameHist _ _ (leaseInvariant_freshen h.lease p) hr (List.Sublist.refl _)
-      (coreMove_fresh h.reply.replIdsIssued a.lease rfl rfl rfl (fun _ _ => rfl) (fun _ _ hj => hj)
+      (coreMove_fresh h.reply.replIdsIssued a.lease (Finset.Subset.refl _) (fun _ _ => rfl) rfl (fun _ _ => rfl) (fun _ _ hj => hj)
         (fun _ _ hx => hx)) rfl
   | invokeWrite c => exact h.invokeWrite c
   | append p op c hw hp hW => exact h.append hM hw hp hW

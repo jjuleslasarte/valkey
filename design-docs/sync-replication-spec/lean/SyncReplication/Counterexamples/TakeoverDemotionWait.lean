@@ -45,7 +45,9 @@ def leaseTransitionSystemTakeoverNoDemotionWait (m : Nat) (P : LeaseParams) : LT
 
 def lt5 := leaseLearn li4 1                           -- n1 learns epoch 3
 def lt6 := leaseLearn lt5 2                           -- n2 learns epoch 3
-def lt7 := recvData lt6 1 lt6.core none               -- a heartbeat reaches n1 at time 0
+def lt6a := withCore lt6 (reconnect lt6.core 1)       -- n1 reconnects with PSYNC
+def lt6b := withCore lt6a (reconnect lt6a.core 2)     -- n2 reconnects with PSYNC
+def lt7 := recvData lt6b 1 lt6b.core none             -- a heartbeat reaches n1 at time 0
 def lt8 := recvAck lt7 1 lt7.core                     -- n1 acknowledges: n0's lease from n1 starts at 0
 def lt9 := recvData lt8 2 lt8.core none               -- a heartbeat reaches n2 at time 0
 def lt10 := recvAck lt9 2 lt9.core                    -- n2 acknowledges
@@ -66,7 +68,7 @@ def lt22 := withCore lt21 (commitNext lt21.core 1)    -- n1 commits alone: the h
 the demotion that follows is a step of the lease layer. -/
 theorem takeoverNoDemotionWait_run : (leaseTransitionSystemTakeoverNoDemotionWait 0 P3).MTr l0
     [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .core (.addToSyncSet 0 2), .core (.makeEligible 0 2),
-     .learn 1, .learn 2, .heartbeat 1, .ack 1, .heartbeat 2, .ack 2,
+     .learn 1, .learn 2, .core (.psync 1), .core (.psync 2), .heartbeat 1, .ack 1, .heartbeat 2, .ack 2,
      .tick, .tick, .tick, .tick, .heartbeat 2, .ack 2, .heartbeat 2, .tick,
      .takeover 1, .demote 1 2, .core (.append 1), .core (.commit 1)] lt22 :=
   .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
@@ -79,14 +81,16 @@ theorem takeoverNoDemotionWait_run : (leaseTransitionSystemTakeoverNoDemotionWai
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.learn li4 1 (by decide))) <|
   .stepL (.step (InstantLeaseStep.learn lt5 2 (by decide))) <|
-  .stepL (.step (InstantLeaseStep.heartbeat lt6 1 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ackRenew lt7 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.core lt6 _ _ (Step.psync lt6.core 1 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.core lt6a _ _ (Step.psync lt6a.core 2 (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.heartbeat lt6b 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lt7 1 (by decide))) <|
   .stepL (.step (InstantLeaseStep.heartbeat lt8 2 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ackRenew lt9 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lt9 2 (by decide))) <|
   .stepL (.step (InstantLeaseStep.tick lt10)) <| .stepL (.step (InstantLeaseStep.tick lt11)) <|
   .stepL (.step (InstantLeaseStep.tick lt12)) <| .stepL (.step (InstantLeaseStep.tick lt13)) <|
   .stepL (.step (InstantLeaseStep.heartbeat lt14 2 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ackRenew lt15 2 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew lt15 2 (by decide))) <|
   .stepL (.step (InstantLeaseStep.heartbeatGrant lt16 2 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (InstantLeaseStep.tick lt17)) <|
   .stepL (LeaseStepTakeoverNoDemotionWait.takeover lt18 1 (by decide) (by decide) (by decide)

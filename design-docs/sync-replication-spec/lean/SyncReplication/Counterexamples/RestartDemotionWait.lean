@@ -47,7 +47,7 @@ def lp10 := withCore lp9 (commitNext lp9.core 0)        -- n0 commits alone: the
 /-- The run; the label list is its trace. Only `restartKeep 0` is the weakened action;
 the demotion that follows is a step of the lease layer. -/
 theorem restartNoDemotionWait_run : (leaseTransitionSystemRestartNoDemotionWait 0 P0).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .heartbeat 1, .ack 1,
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .core (.psync 1), .heartbeat 1, .ack 1,
      .heartbeat 1, .restartKeep 0, .demote 0 1, .core (.append 0), .core (.commit 0)] lp10 :=
   LTS.MTr.comp (leaseTransitionSystemRestartNoDemotionWait 0 P0)
     (leaseMtr_of_step LeaseStepRestartNoDemotionWait.step (leases_prefix P0)) <|

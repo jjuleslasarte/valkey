@@ -56,8 +56,10 @@ def forgetTimer5 := tick forgetTimer4
 def forgetTimer6 := tick forgetTimer5
 /-- Time 4. -/
 def forgetTimer7 := tick forgetTimer6
+/-- n1 reconnects with PSYNC. -/
+def forgetTimer7a := withCore forgetTimer7 (reconnect forgetTimer7.core 1)
 /-- A heartbeat from n0 reaches n1 at time 4. -/
-def forgetTimer8 := recvData forgetTimer7 1 forgetTimer7.core none
+def forgetTimer8 := recvData forgetTimer7a 1 forgetTimer7a.core none
 /-- n1 acknowledges: n0's lease from n1 starts at 4. -/
 def forgetTimer9 := recvAck forgetTimer8 1 forgetTimer8.core
 /-- n1 restarts with its data and forgets its takeover timer. -/
@@ -73,7 +75,7 @@ def forgetTimer13 := withCore forgetTimer12 (commitNext forgetTimer12.core 1)
 the takeover that follows is a step of the lease layer. -/
 theorem restartForgetsTimer_run : (leaseTransitionSystemRestartForgetsTimer 0 P0).MTr l0
     [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .tick, .tick, .tick, .tick,
-     .heartbeat 1, .ack 1, .restartKeep 1, .takeover 1, .core (.append 1), .core (.commit 1)]
+     .core (.psync 1), .heartbeat 1, .ack 1, .restartKeep 1, .takeover 1, .core (.append 1), .core (.commit 1)]
     forgetTimer13 :=
   .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
@@ -82,8 +84,10 @@ theorem restartForgetsTimer_run : (leaseTransitionSystemRestartForgetsTimer 0 P0
   .stepL (.step (InstantLeaseStep.learn forgetTimer2 1 (by decide))) <|
   .stepL (.step (InstantLeaseStep.tick forgetTimer3)) <| .stepL (.step (InstantLeaseStep.tick forgetTimer4)) <|
   .stepL (.step (InstantLeaseStep.tick forgetTimer5)) <| .stepL (.step (InstantLeaseStep.tick forgetTimer6)) <|
-  .stepL (.step (InstantLeaseStep.heartbeat forgetTimer7 1 (by decide) (by decide))) <|
-  .stepL (.step (InstantLeaseStep.ackRenew forgetTimer8 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.core forgetTimer7 _ _ (Step.psync forgetTimer7.core 1 (by decide) (by decide) (by decide))
+    rfl)) <|
+  .stepL (.step (InstantLeaseStep.heartbeat forgetTimer7a 1 (by decide) (by decide))) <|
+  .stepL (.step (InstantLeaseStep.ackRenew forgetTimer8 1 (by decide))) <|
   .stepL (LeaseStepRestartForgetsTimer.restartKeep forgetTimer9 1 (by decide)) <|
   .stepL (.step (InstantLeaseStep.takeover forgetTimer10 1 (by decide) (by decide) (by decide) (by decide)
     (by decide))) <|

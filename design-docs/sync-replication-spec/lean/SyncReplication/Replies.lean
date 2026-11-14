@@ -2,7 +2,7 @@ import SyncReplication.Safety
 
 /-! # Held client replies
 
-The replication model (`SyncReplication.Step`) plus the replies a primary holds for
+The replication model (`SyncReplication.Step`, replication delayed) plus the replies a primary holds for
 its clients (design §5, "Write behavior during faults"). A write's reply is held until
 the write commits; it is then released as OK, or answered UNCOMMITTED. A restart drops
 the held replies of the restarted node: they are lost with the client connections, so

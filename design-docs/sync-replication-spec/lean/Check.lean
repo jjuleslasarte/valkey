@@ -46,3 +46,9 @@ import SyncReplication
 #print axioms SyncReplication.Lin.uncommitted_notBefore
 #print axioms SyncReplication.client_writeRead_reachable
 #print axioms SyncReplication.linearizable
+#print axioms SyncReplication.restartKeepsReplId_entryNamesAmbiguous
+#print axioms SyncReplication.restartKeepsReplId_sameLog
+#print axioms SyncReplication.psyncKeepsId_unsafe
+#print axioms SyncReplication.psyncFreshId_refused
+#print axioms SyncReplication.noSecondaryId_safety
+#print axioms SyncReplication.noSecondaryId_refuses

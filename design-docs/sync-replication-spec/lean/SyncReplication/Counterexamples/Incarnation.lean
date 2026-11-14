@@ -39,7 +39,8 @@ def e9 := makeEligible e8 0 2          -- n2 eligible with an empty log
 /-- The run; the label list is its trace. After the shared prefix, the last two actions
 are the weakened ones. -/
 theorem noIncCheck_run : (transitionSystemNoInc 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0,
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+     .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
      .restartEmpty 0, .addToSyncSet 0 2, .makeEligible 0 2] e9 :=
   LTS.MTr.comp (transitionSystemNoInc 1) (mtr_of_step StepNoInc.step committed_run) <|
   .stepL (.step (Step.restartEmpty c6 0 (by decide) ⟨1, by decide, by decide⟩)) <|

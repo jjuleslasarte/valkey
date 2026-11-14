@@ -36,8 +36,8 @@ def r1 := addToSyncSet r0 0 1             -- n0 counts n1
 def r2 := makeEligible r1 0 1          -- n1 eligible (epoch 2)
 def r3 := appendWrite r2 0         -- n0 writes at offset 1
 def r4 := learn r3 1               -- n1 learns epoch 2
-def r5 := replicate r4 1           -- n1 copies the write
-def r6 := ack r5 1                 -- n1 acknowledges it
+def r5 := applyData (streamNext (reconnect r4 1) 0 1 0) (.data 0 1 1 1 1) 1 1 1   -- n1 copies the write
+def r6 := recordAck (sendAckMsg r5 1) (.ack 1 0 1 1) 0 1 1                        -- n1 acknowledges it
 def r7 := commitNext r6 0          -- n0 commits: the history is [1]
 def r8 := takeover r7 1            -- n1 takes over (epoch 3) with commit point 0
 def r9 := learn r8 2               -- n2 learns epoch 3 and follows n1
@@ -46,15 +46,19 @@ def r11 := makeEligible r10 1 2        -- n2 eligible with an empty log
 
 /-- The run; the label list is its trace. Only `addToSyncSet 1 2` is the weakened action. -/
 theorem noReconcile_run : (transitionSystemNoReconcile 1).MTr r0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .learn 1, .replicate 1, .ack 1, .commit 0,
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .learn 1, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+     .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
      .takeover 1, .learn 2, .addToSyncSet 1 2, .makeEligible 1 2] r11 :=
   .stepL (.step (Step.addToSyncSet r0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible r1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.append r2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)))) <|
   .stepL (.step (Step.learn r3 1 (by decide))) <|
-  .stepL (.step (Step.replicate r4 1 (by decide) (by decide) (by decide))) <|
-  .stepL (.step (Step.ack r5 1 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.psync r4 1 (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.sendData _ 0 1 0 (by decide) (by decide))) <|
+  .stepL (.step (Step.deliverData _ 0 1 1 1 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.sendAck _ 1 (by decide))) <|
+  .stepL (.step (Step.deliverAck _ 1 0 1 1 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.commit r6 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide) (by decide))) <|
   .stepL (.step (Step.takeover r7 1 (by decide) (by decide) (by decide) (by decide))) <|

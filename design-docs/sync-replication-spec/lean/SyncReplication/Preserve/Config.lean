@@ -59,7 +59,7 @@ theorem repl_learn : ReplInvariant (learn s n) := by
     · rw [hS p e]; exact h.noSelfSync p
   ackedPrim := by
     intro r hr; change (if r = n then s.cfg else s.localCfg r).primary ≠ s.cfg.primary at hr
-    show s.acked s.cfg.primary r = 0
+    show s.ackedMax s.cfg.primary r = 0
     split at hr
     · exact absurd rfl hr
     · exact h.ackedPrim r hr
@@ -68,7 +68,7 @@ theorem repl_learn : ReplInvariant (learn s n) := by
     intro p m hp hm hf
     obtain ⟨hpn, hp'⟩ := htp p hp
     change (if m = n then s.cfg else s.localCfg m).primary = p at hf
-    show (s.log p).take (s.acked p m) <+: s.log m
+    show (s.log p).take (s.ackedMax p m) <+: s.log m
     split_ifs at hf with e
     · subst e
       by_cases hf0 : (s.localCfg m).primary = p
@@ -79,7 +79,7 @@ theorem repl_learn : ReplInvariant (learn s n) := by
     intro p m hp hm hf
     obtain ⟨hpn, hp'⟩ := htp p hp
     change (if m = n then s.cfg else s.localCfg m).primary = p at hf
-    show s.acked p m ≤ s.ackHigh m
+    show s.ackedMax p m ≤ s.ackHigh m
     split_ifs at hf with e
     · subst e
       by_cases hf0 : (s.localCfg m).primary = p
@@ -109,7 +109,7 @@ theorem membership_learn : MembershipInvariant (learn s n) := by
     have hs0 : (learn s n).sync s.cfg.primary r = true := hs
     rw [hS _ (Ne.symm hnp)] at hs0
     have hs := hs0
-    show _ ∧ s.inheritedEnd s.cfg.primary ≤ s.acked s.cfg.primary r
+    show _ ∧ s.inheritedEnd s.cfg.primary ≤ s.ackedMax s.cfg.primary r
     obtain ⟨a, b⟩ := h.syncNew r hs he
     refine ⟨?_, b⟩
     show (if r = n then s.cfg else s.localCfg r).primary = s.cfg.primary
@@ -158,16 +158,16 @@ theorem failover_learn : FailoverInvariant (learn s n) := by
       · subst e; simp; exact fun x => hprim x.symm
       · simp [e]
     have hSp : (learn s n).sync p = s.sync p := hS p hpn
-    by_cases hsw : s.sync p n = true ∧ (s.localCfg n).primary = p ∧ s.acked p n < fence s p ∧
+    by_cases hsw : s.sync p n = true ∧ (s.localCfg n).primary = p ∧ s.ackedMax p n < fence s p ∧
         (s.localCfg p).eligible n = true
     · -- n followed p with an acknowledgement below the fence. Having learned the new
       -- configuration it has left p, and its acknowledgement is the new fence.
       obtain ⟨hs1, hs2, hs3, hs4⟩ := hsw
       have hnp' : n ≠ p := fun e => hpn e.symm
       refine DeposedFenced.of_left (w := n) ⟨by rw [hSp]; exact hs1, (hfz n).2 (Or.inl rfl), by rw [hK, if_neg hpn]; exact hs4⟩ ?_ ?_ ?_ ?_
-      · intro hpa; show s.acked p n ≤ s.inheritedEnd s.cfg.primary; have := hF.fenceLeInheritedEnd hpa; omega
+      · intro hpa; show s.ackedMax p n ≤ s.inheritedEnd s.cfg.primary; have := hF.fenceLeInheritedEnd hpa; omega
       · intro hpa; exact take_mono_prefix (Nat.le_of_lt hs3) (hF.primHolds hpa)
-      · intro hpa; show s.acked p n ≤ s.ackHigh s.cfg.primary; have := hF.primAck hpa; omega
+      · intro hpa; show s.ackedMax p n ≤ s.ackHigh s.cfg.primary; have := hF.primAck hpa; omega
       · intro m hm hi
         rcases hF.eligHolds m hm hi with ⟨d, da⟩ | ⟨d1, d2⟩
         · exact Or.inl ⟨take_mono_prefix (Nat.le_of_lt hs3) d, (Nat.le_of_lt hs3).trans da⟩
@@ -177,12 +177,12 @@ theorem failover_learn : FailoverInvariant (learn s n) := by
             show (if m = n then s.cfg else s.localCfg m).primary = p; rw [if_neg e]; exact d2
     · -- Otherwise the old fence still holds.
       refine DeposedFenced.of_left (w := w) ⟨by rw [hSp]; exact hw1, (hfz w).2 (Or.inr hw2.1), by rw [hK, if_neg hpn]; exact hw2.2⟩ ?_ ?_ ?_ ?_
-      · intro hpa; show s.acked p w ≤ s.inheritedEnd s.cfg.primary; rw [hwF]; exact hF.fenceLeInheritedEnd hpa
+      · intro hpa; show s.ackedMax p w ≤ s.inheritedEnd s.cfg.primary; rw [hwF]; exact hF.fenceLeInheritedEnd hpa
       · intro hpa
-        show (s.log p).take (s.acked p w) <+: s.log s.cfg.primary; rw [hwF]; exact hF.primHolds hpa
-      · intro hpa; show s.acked p w ≤ s.ackHigh s.cfg.primary; rw [hwF]; exact hF.primAck hpa
+        show (s.log p).take (s.ackedMax p w) <+: s.log s.cfg.primary; rw [hwF]; exact hF.primHolds hpa
+      · intro hpa; show s.ackedMax p w ≤ s.ackHigh s.cfg.primary; rw [hwF]; exact hF.primAck hpa
       · intro m hm hi
-        show ((s.log p).take (s.acked p w) <+: s.log m ∧ s.acked p w ≤ s.ackHigh m) ∨ _
+        show ((s.log p).take (s.ackedMax p w) <+: s.log m ∧ s.ackedMax p w ≤ s.ackHigh m) ∨ _
         rw [hwF]
         rcases hF.eligHolds m hm hi with d | ⟨d1, d2⟩
         · exact Or.inl d
@@ -192,7 +192,7 @@ theorem failover_learn : FailoverInvariant (learn s n) := by
             have hel : (s.localCfg p).eligible m = true := by
               have := h.eligibleInOldConfig m hm (by rw [d2]; exact hprim)
               rwa [d2] at this
-            have hle : fence s p ≤ s.acked p m := Nat.le_of_not_lt (fun hl => hsw ⟨d1, d2, hl, hel⟩)
+            have hle : fence s p ≤ s.ackedMax p m := Nat.le_of_not_lt (fun hl => hsw ⟨d1, d2, hl, hel⟩)
             exact Or.inl ⟨take_mono_prefix hle (h.ackHolds p m hp' hnp' d2),
               hle.trans (h.ackedHigh p m hp' hnp' d2)⟩
           · right; rw [hSp]; refine ⟨d1, ?_⟩
@@ -341,7 +341,7 @@ theorem commit_makeEligible (hs : s.sync p r = true) (hel : s.cfg.eligible r = f
     -- cover the history (`historyWithinCommitOrInherited`).
     intro n hn
     rcases makeEligible_isAuthoritative hn with rfl | hn'
-    · have hhl : s.hist.length ≤ s.acked s.cfg.primary n := by
+    · have hhl : s.hist.length ≤ s.ackedMax s.cfg.primary n := by
         rcases h.historyWithinCommitOrInherited hpa with a | a <;> omega
       exact hhl.trans (h.ackedHigh _ n (thinksPrimary_prim h hpa) hrp hrf)
     · exact h.histAck n hn' }
@@ -359,7 +359,7 @@ theorem failover_makeEligible (hs : s.sync p r = true) (hel : s.cfg.eligible r =
     intro e; rw [e, h.noSelfSync] at hs; exact Bool.false_ne_true hs
   have hKi := makeEligible_localCfg_inc (s := s) hkp hrp
   obtain ⟨hrf, hrec⟩ := h.syncNew r hs hel
-  have hra : (s.log s.cfg.primary).take (s.acked s.cfg.primary r) <+: s.log r :=
+  have hra : (s.log s.cfg.primary).take (s.ackedMax s.cfg.primary r) <+: s.log r :=
     h.ackHolds _ _ (thinksPrimary_prim h hpa) hrp hrf
   have hsc := h.syncCommit _ _ (thinksPrimary_prim h hpa) hs
   have htp := makeEligible_thinksPrimary (s := s) hkp hrp
@@ -407,10 +407,10 @@ theorem eligibleHoldsCommitted_makeEligible (hs : s.sync p r = true) (hel : s.cf
     intro e; rw [e, h.noSelfSync] at hs; exact Bool.false_ne_true hs
   have hKi := makeEligible_localCfg_inc (s := s) hkp hrp
   obtain ⟨hrf, hrec⟩ := h.syncNew r hs hel
-  have hra : (s.log s.cfg.primary).take (s.acked s.cfg.primary r) <+: s.log r :=
+  have hra : (s.log s.cfg.primary).take (s.ackedMax s.cfg.primary r) <+: s.log r :=
     h.ackHolds _ _ (thinksPrimary_prim h hpa) hrp hrf
   have hsc := h.syncCommit _ _ (thinksPrimary_prim h hpa) hs
-  have hhl : s.hist.length ≤ s.acked s.cfg.primary r := by
+  have hhl : s.hist.length ≤ s.ackedMax s.cfg.primary r := by
     rcases h.historyWithinCommitOrInherited hpa with a | a <;> omega
   have hhist : s.hist <+: s.log r := by
     have hp0 := h.eligibleHoldsCommitted s.cfg.primary ⟨Or.inr rfl, hpa⟩

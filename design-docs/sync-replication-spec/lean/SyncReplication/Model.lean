@@ -98,6 +98,35 @@ structure Cfg (Node : Type) where
   /-- The incarnation the configuration records for each node. -/
   incarnation  : Node → Nat
 
+/-- A replication message. Each records the generation of its connection at send; it
+is delivered only while that is unchanged. -/
+inductive RMsg (Node : Type)
+  /-- `p` streams the log entry `v` to `r` on connection `g`, under its replication ID
+  `rid`. The stream carries no offsets. -/
+  | data (p r : Node) (g v rid : Nat)
+  /-- `r` acknowledges offset `off` to `p` on connection `g`. -/
+  | ack (r p : Node) (g off : Nat)
+  deriving DecidableEq, Repr
+
+/-- A message's replication link: the primary end, the replica end, the connection's
+generation at send, and the direction (`true` for primary to replica). -/
+def RMsg.link {Node : Type} : RMsg Node → Node × Node × Nat × Bool
+  | .data p r g _ _ => (p, r, g, true)
+  | .ack r p g _ => (p, r, g, false)
+
+/-- The primary end of a message's link. -/
+def RMsg.primary {Node : Type} (m : RMsg Node) : Node := m.link.1
+/-- The replica end of a message's link. -/
+def RMsg.replica {Node : Type} (m : RMsg Node) : Node := m.link.2.1
+/-- The entry a data message carries. -/
+def RMsg.val {Node : Type} : RMsg Node → Nat
+  | .data _ _ _ v _ => v
+  | _ => 0
+/-- The replication ID a data message carries. -/
+def RMsg.rid {Node : Type} : RMsg Node → Nat
+  | .data _ _ _ _ t => t
+  | _ => 0
+
 /-- The state of the whole shard. -/
 structure State (Node : Type) [DecidableEq Node] where
   /-- Each node's replication log; an entry is the replication ID it was written with. -/
@@ -110,8 +139,15 @@ structure State (Node : Type) [DecidableEq Node] where
   localCfg  : Node → Cfg Node
   /-- `sync p r`: `r` is in `p`'s sync set, so `p` waits for `r`'s ack to commit. -/
   sync   : Node → Node → Bool
-  /-- `acked p r`: how far `p` believes `r` has acknowledged. -/
+  /-- `acked p r`: how far `p` believes `r` has acknowledged, on their current
+  connection: a PSYNC that `p` accepts starts it again from 0, as Valkey's
+  `repl_ack_off` lives in the per-connection replica client (`replication.c:1719`). -/
   acked  : Node → Node → Nat
+  /-- Ghost variable: the highest acknowledgement `p` has recorded from `r` since `p`'s
+  record of `r` was last reset by a restart, takeover or resync; a reconnect does not
+  reset it. No step reads it; the invariant states its facts about it, and the
+  per-connection record never exceeds it. -/
+  ackedMax : Node → Node → Nat
   /-- Each node's committed offset: how many entries at the start of its log it has
   committed. -/
   commit : Node → Nat
@@ -136,6 +172,20 @@ structure State (Node : Type) [DecidableEq Node] where
   compare against: `Safety` and `AckedDurable` compare each node's log, and each
   acknowledged write, with it. -/
   hist   : List Nat
+  /-- `rgen p r`: the generation of the replication connection from `p` to `r`. It goes
+  up when that connection closes: when a message on it is lost, when `r` reconnects to
+  `p`, when `r` learns a configuration with a different primary, and, for every
+  connection of a node, at its takeover, resync or restart. -/
+  rgen   : Node → Node → Nat
+  /-- `replId2 n`: `n`'s secondary replication ID and the offset up to which it is valid
+  (Valkey's `replid2` and `second_replid_offset`), set when a takeover or a restart
+  gives `n` a new ID. -/
+  replId2 : Node → Option (Nat × Nat)
+  /-- The replication messages in flight, oldest first. -/
+  rnet   : List (RMsg Node)
+  /-- `stream p r`: the offset of the next entry `p` streams to `r`, and the generation
+  of the connection on which `p` accepted `r`'s PSYNC. -/
+  stream : Node → Node → Option (Nat × Nat)
 
 variable {Node : Type} [DecidableEq Node]
 
@@ -143,8 +193,9 @@ variable {Node : Type} [DecidableEq Node]
 every incarnation is 1. -/
 def initCfg (i : Node) : Cfg Node := ⟨1, i, fun _ => false, fun _ => 1⟩
 
-/-- The initial state: empty logs and history, every node knows `initCfg i`, and `i`
-writes with replication ID 1; IDs 0 and 1 are in use. -/
+/-- The initial state: empty logs and history, every node knows `initCfg i`, and every
+node has replication ID 1, `i`'s: a replica's first full sync of the empty history
+adopts the primary's ID. IDs 0 and 1 are in use. No secondary IDs, no messages. -/
 def init (i : Node) : State Node where
   log    := fun _ => []
   incarnation    := fun _ => 1
@@ -152,12 +203,17 @@ def init (i : Node) : State Node where
   localCfg  := fun _ => initCfg i
   sync   := fun _ _ => false
   acked  := fun _ _ => 0
+  ackedMax := fun _ _ => 0
   commit := fun _ => 0
   inheritedEnd  := fun _ => 0
-  replId   := fun n => if n = i then 1 else 0
+  replId   := fun _ => 1
   usedIds := {0, 1}
   ackHigh := fun _ => 0
   hist   := []
+  rgen   := fun _ _ => 0
+  replId2 := fun _ => none
+  rnet   := []
+  stream := fun _ _ => none
 
 /-- `p` thinks it is primary: the configuration `p` knows (which may be stale) names
 `p` as primary, and the incarnation it records for `p` is `p`'s current one. A
@@ -195,6 +251,7 @@ def replicate (s : State Node) (r : Node) : State Node :=
 has acknowledged up to there. -/
 def ack (s : State Node) (r : Node) : State Node :=
   { s with acked := update s.acked (primaryOf s r) (update (s.acked (primaryOf s r)) r (s.log r).length),
+           ackedMax := update s.ackedMax (primaryOf s r) (update (s.ackedMax (primaryOf s r)) r (s.log r).length),
            ackHigh := update s.ackHigh r (max (s.ackHigh r) (s.log r).length) }
 
 /-- `commitNext s p`: `p` commits its next entry. If no node has committed this offset yet,
@@ -240,11 +297,21 @@ def makeIneligible (s : State Node) (p r : Node) : State Node :=
   { s with cfg := makeIneligibleCfg s r, localCfg := update s.localCfg p (makeIneligibleCfg s r),
            sync := update s.sync p (update (s.sync p) r false) }
 
+/-- Close every replication connection with `n` at either end. -/
+def closeAll (g : Node → Node → Nat) (n : Node) : Node → Node → Nat :=
+  fun x y => if x = n ∨ y = n then g x y + 1 else g x y
+
+/-- Close every replication connection into `n`: those on which `n` is the replica. -/
+def closeInto (g : Node → Node → Nat) (n : Node) : Node → Node → Nat :=
+  fun x y => if y = n then g x y + 1 else g x y
+
 /-- `learn s n`: `n` adopts the latest configuration; unless it is the primary there,
-it empties its sync set. -/
+it empties its sync set. If its primary changes, its connection to its old primary
+closes; its own replicas stay connected (Valkey's `replicationSetPrimary`). -/
 def learn (s : State Node) (n : Node) : State Node :=
   { s with localCfg := update s.localCfg n s.cfg,
-           sync := update s.sync n (if s.cfg.primary = n then s.sync n else fun _ => false) }
+           sync := update s.sync n (if s.cfg.primary = n then s.sync n else fun _ => false),
+           rgen := if s.cfg.primary = (s.localCfg n).primary then s.rgen else closeInto s.rgen n }
 
 /-- `cfg.eligible \ {cfg.primary, n}`: the eligible set after `n` takes over from the
 current primary. -/
@@ -274,14 +341,18 @@ theorem freshId_not_mem (s : State Node) : freshId s ∉ s.usedIds := fun h => b
 /-- `takeover s n`: eligible replica `n` becomes primary in a new configuration. Its
 sync set is the eligible replicas of the new configuration, its acks and commit point are reset, its
 catch-up point is the end of its log (so it commits what it inherited before anything
-it writes afterwards), and it writes with a fresh replication ID. -/
+it writes afterwards), and it writes with a fresh replication ID. Its old ID becomes its
+secondary ID, valid up to its log's end (Valkey's `shiftReplicationId`), so its replicas
+can continue with PSYNC. -/
 def takeover (s : State Node) (n : Node) : State Node :=
   { s with cfg := takeoverCfg s n, localCfg := update s.localCfg n (takeoverCfg s n),
            sync := update s.sync n (syncAfterTakeover s n),
-           acked := update s.acked n (fun _ => 0),
+           acked := update s.acked n (fun _ => 0), ackedMax := update s.ackedMax n (fun _ => 0),
            commit := update s.commit n 0,
            inheritedEnd := update s.inheritedEnd n (s.log n).length,
-           replId := update s.replId n (freshId s), usedIds := insert (freshId s) s.usedIds }
+           replId := update s.replId n (freshId s), usedIds := insert (freshId s) s.usedIds,
+           replId2 := update s.replId2 n (some (s.replId n, (s.log n).length)),
+           rgen := closeAll s.rgen n }
 
 /-- The point a replica must have acknowledged before `p` counts it: `p`'s catch-up
 point while it is still reconciling, otherwise its commit point. -/
@@ -308,14 +379,21 @@ theorem writable_iff_list (m : Nat) (s : State Node) (p : Node) :
   le_encard_iff_list m _
 
 /-- `resync s r`: a replica whose log has diverged from its primary's replaces it with
-the primary's log up to the primary's catch-up point, and starts acking from 0. -/
+the primary's log up to the primary's catch-up point, and starts acking from 0. As in a
+full sync, it takes the primary's replication ID and drops its secondary ID. -/
 def resync (s : State Node) (r : Node) : State Node :=
   { s with log := update s.log r ((s.log (primaryOf s r)).take (catchUpPoint s (primaryOf s r))),
            acked := update s.acked (primaryOf s r) (update (s.acked (primaryOf s r)) r 0),
-           commit := update s.commit r (min (s.commit r) (s.commit (primaryOf s r))) }
+           ackedMax := update s.ackedMax (primaryOf s r) (update (s.ackedMax (primaryOf s r)) r 0),
+           commit := update s.commit r (min (s.commit r) (s.commit (primaryOf s r))),
+           replId := update s.replId r (s.replId (primaryOf s r)),
+           replId2 := update s.replId2 r none,
+           rgen := closeAll s.rgen r }
 
 /-- `restartEmpty s n`: empty log, new incarnation, no volatile state; the current
-primary forgets `n`'s ack and stops counting it. -/
+primary forgets `n`'s ack and stops counting it. With no file to restore an ID from, `n`
+takes a fresh replication ID and has no secondary ID (Valkey's startup,
+`server.c:2439-2440`). -/
 def restartEmpty (s : State Node) (n : Node) : State Node :=
   { s with log := update s.log n [],
            incarnation := update s.incarnation n (s.incarnation n + 1),
@@ -325,7 +403,12 @@ def restartEmpty (s : State Node) (n : Node) : State Node :=
            sync := fun p => if p = n then (fun _ => false)
                             else if p = s.cfg.primary then update (s.sync p) n false else s.sync p,
            acked := fun p => if p = n then (fun _ => 0)
-                             else if p = s.cfg.primary then update (s.acked p) n 0 else s.acked p }
+                             else if p = s.cfg.primary then update (s.acked p) n 0 else s.acked p,
+           ackedMax := fun p => if p = n then (fun _ => 0)
+                             else if p = s.cfg.primary then update (s.ackedMax p) n 0 else s.ackedMax p,
+           replId := update s.replId n (freshId s), usedIds := insert (freshId s) s.usedIds,
+           replId2 := update s.replId2 n none,
+           rgen := closeAll s.rgen n }
 
 /-- The sync replica set a restarted primary starts from: the replicas that are
 eligible, with a matching recorded incarnation, in the configuration it knows, minus
@@ -333,33 +416,67 @@ itself. Recomputed from the configuration, not from any data transfer. -/
 def rebuiltSync (s : State Node) (n : Node) : Node → Bool :=
   fun r => (s.localCfg n).eligible r && decide ((s.localCfg n).incarnation r = s.incarnation r) && decide (r ≠ n)
 
+/-- The replication IDs after `n` restarts with `k` entries of its log: a node whose
+configuration names it primary takes a fresh ID, with its old one as the secondary ID
+up to `k` (Valkey's startup); a replica keeps the ID it restores from its file and drops
+its secondary ID. -/
+def restartIds (s : State Node) (n : Node) (k : Nat) :
+    (Node → Nat) × Finset Nat × (Node → Option (Nat × Nat)) :=
+  if (s.localCfg n).primary = n then
+    (update s.replId n (freshId s), insert (freshId s) s.usedIds, update s.replId2 n (some (s.replId n, k)))
+  else (s.replId, s.usedIds, update s.replId2 n none)
+
+theorem restartIds_sub (s : State Node) (n : Node) (k : Nat) : s.usedIds ⊆ (restartIds s n k).2.1 := by
+  unfold restartIds; split
+  · exact Finset.subset_insert _ _
+  · exact Finset.Subset.refl _
+
+theorem restartIds_other (s : State Node) (n : Node) (k : Nat) {x : Node} (hx : x ≠ n) :
+    (restartIds s n k).1 x = s.replId x := by
+  unfold restartIds; split
+  · exact update_of_ne _ _ hx
+  · rfl
+
+theorem restartIds_mem (s : State Node) (n : Node) (k : Nat) (h : s.replId n ∈ s.usedIds) :
+    (restartIds s n k).1 n ∈ (restartIds s n k).2.1 := by
+  unfold restartIds; split
+  · simp
+  · exact h
+
 /-- `restartKeep s n`: data and incarnation kept, volatile state lost. `n` must commit
 its whole log again before it serves reads. If `n` is primary, its sync set is rebuilt from
-the configuration it knows (`rebuiltSync`); otherwise it is empty. -/
+the configuration it knows (`rebuiltSync`); otherwise it is empty. A fresh replication
+ID, with the old one as the secondary ID up to the end of the log. -/
 def restartKeep (s : State Node) (n : Node) : State Node :=
   { s with commit := update s.commit n 0,
            inheritedEnd := update s.inheritedEnd n (s.log n).length,
-           acked := update s.acked n (fun _ => 0),
+           acked := update s.acked n (fun _ => 0), ackedMax := update s.ackedMax n (fun _ => 0),
            sync := update s.sync n
              (if (s.localCfg n).primary = n ∧ (s.localCfg n).incarnation n = s.incarnation n
-              then rebuiltSync s n else fun _ => false) }
+              then rebuiltSync s n else fun _ => false),
+           replId := (restartIds s n (s.log n).length).1, usedIds := (restartIds s n (s.log n).length).2.1,
+           replId2 := (restartIds s n (s.log n).length).2.2,
+           rgen := closeAll s.rgen n }
 
 /-- `restartPartialKeep s n k`, keeping the incarnation: `n` restarts from a persistence
 file holding only the first `k` entries of its log. Everything else is RestartKeep on
 the truncated log: volatile state lost, catch-up point at the end of what it holds,
 sync replica set rebuilt if it is primary. -/
 def restartPartialKeep (s : State Node) (n : Node) (k : Nat) : State Node :=
-  { restartKeep s n with log := update s.log n ((s.log n).take k), inheritedEnd := update s.inheritedEnd n k }
+  { restartKeep s n with log := update s.log n ((s.log n).take k), inheritedEnd := update s.inheritedEnd n k,
+                         replId2 := (restartIds s n k).2.2 }
 
 /-- `restartPartialFresh s n k`, taking a new incarnation: RestartEmpty, except that `n` keeps
 the first `k` entries of its log as a starting point for resynchronisation. -/
 def restartPartialFresh (s : State Node) (n : Node) (k : Nat) : State Node :=
-  { restartEmpty s n with log := update s.log n ((s.log n).take k) }
+  { restartEmpty s n with log := update s.log n ((s.log n).take k),
+                          replId := (restartIds s n k).1, usedIds := (restartIds s n k).2.1,
+                          replId2 := (restartIds s n k).2.2 }
 
 /-- The actions of the protocol, as labels on steps. Labels make a run readable: a
 counterexample's statement lists its actions in order. They also let the reply and
 lease layers wrap a replication step (`ReplyAction.core`). A restore from a stale file
-has one label, `restartPartial n k`, although `Step` has two constructors for it: the
+has one label, `restartPartial n k`, although `InstantStep` has two constructors for it: the
 outcome (keep or replace the incarnation) is decided by the node's `ackHigh`, not
 chosen by whoever restarts it. -/
 inductive Action (Node : Type)
@@ -368,77 +485,235 @@ inductive Action (Node : Type)
   | learn (n : Node)
   | takeover (n : Node) | resync (r : Node) | restartEmpty (n : Node) | restartKeep (n : Node)
   | restartPartial (n : Node) (k : Nat)
+  /-- Replication: a replica reconnects with PSYNC; a primary streams its next entry; a
+  replica acknowledges; a message arrives; a message is lost. -/
+  | psync (r : Node) | sendData (p r : Node) | sendAck (r : Node) | deliver (msg : RMsg Node)
+  | dropMsg (msg : RMsg Node)
 
 /-- The restart actions. The acknowledgement layer treats them apart from the other
 actions: a node's held replies die with its client connections when it restarts. -/
 def Action.isRestart : Action Node → Bool
   | .restartEmpty _ | .restartKeep _ | .restartPartial _ _ => true
   | .append _ | .replicate _ | .ack _ | .commit _ | .addToSyncSet _ _ | .removeFromSyncSet _ _
-  | .makeEligible _ _ | .makeIneligible _ _ | .learn _ | .takeover _ | .resync _ => false
+  | .makeEligible _ _ | .makeIneligible _ _ | .learn _ | .takeover _ | .resync _
+  | .psync _ | .sendData _ _ | .sendAck _ | .deliver _ | .dropMsg _ => false
 
-/-- The step relation. `m` is `min-sync-replicas`. Each constructor is one
+/-- The step relation with instant replication: Replicate and Ack move a log entry or
+an acknowledged offset in the step that sends it. `m` is `min-sync-replicas`. Each constructor is one
 action: its arguments after the state are the guard, and its result is the action's
-label and the post-state. -/
-inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
+label and the post-state. Its connections never reopen, so the two acknowledgement
+records are equal along its runs; its guards read `ackedMax`. No theorem uses it now; it is kept as the instant model the
+delayed one refines, which the README's reading guide (`invariant_step`) and FINDINGS
+cite. -/
+inductive InstantStep (m : Nat) : State Node → Action Node → State Node → Prop
   /-- A node that thinks it is primary and has enough sync replicas may append a write.
   It need not have committed its inherited log first: AddToSyncSet and Commit already order
   the inherited entries before any new one (`committed_inherited_first`). -/
-  | append (s p) : ThinksPrimary s p → Writable m s p → Step m s (.append p) (appendWrite s p)
+  | append (s p) : ThinksPrimary s p → Writable m s p → InstantStep m s (.append p) (appendWrite s p)
   /-- A replica whose log is a strict prefix of its primary's may copy the next entry. -/
   | replicate (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      (s.log r).length < (s.log (primaryOf s r)).length → Step m s (.replicate r) (replicate s r)
+      (s.log r).length < (s.log (primaryOf s r)).length → InstantStep m s (.replicate r) (replicate s r)
   /-- A replica whose log is a prefix of its primary's may acknowledge new entries. -/
   | ack (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
-      s.acked (primaryOf s r) r < (s.log r).length → Step m s (.ack r) (ack s r)
+      s.ackedMax (primaryOf s r) r < (s.log r).length → InstantStep m s (.ack r) (ack s r)
   /-- A writable primary may commit its next entry once every sync member has
   acknowledged it. -/
   | commit (s p) : (hThinksPrimary : ThinksPrimary s p) → (hWritable : Writable m s p) → (hHasNext : s.commit p < (s.log p).length) →
-      (hAllAcked : ∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m s (.commit p) (commitNext s p)
+      (hAllAcked : ∀ r, s.sync p r = true → s.commit p < s.ackedMax p r) → InstantStep m s (.commit p) (commitNext s p)
   /-- A primary may count one of its replicas once that replica has acknowledged up
   to the catch-up point. -/
   | addToSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hNotSelf : r ≠ p) → (hFollows : primaryOf s r = p) →
-      (hNotInSync : s.sync p r = false) → (hCaughtUp : catchUpPoint s p ≤ s.acked p r) →
-      Step m s (.addToSyncSet p r) (addToSyncSet s p r)
+      (hNotInSync : s.sync p r = false) → (hCaughtUp : catchUpPoint s p ≤ s.ackedMax p r) →
+      InstantStep m s (.addToSyncSet p r) (addToSyncSet s p r)
   /-- A primary may drop a counted replica that is not eligible in its own configuration
   (design §4: "if the replica falls behind or fails before step 4, the primary simply
   removes it from the commit calculation"). It need not know the latest configuration:
   a deposed primary is fenced only by departed members it lists as eligible, and it
   cannot drop those. -/
   | removeFromSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hInSync : s.sync p r = true) →
-      (hNotLocallyEligible : (s.localCfg p).eligible r = false) → Step m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
+      (hNotLocallyEligible : (s.localCfg p).eligible r = false) → InstantStep m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
   | makeEligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hInSync : s.sync p r = true) →
-      (hNotEligible : s.cfg.eligible r = false) → Step m s (.makeEligible p r) (makeEligible s p r)
+      (hNotEligible : s.cfg.eligible r = false) → InstantStep m s (.makeEligible p r) (makeEligible s p r)
   /-- A primary that knows the latest configuration may make a replica ineligible. -/
   | makeIneligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hEligible : s.cfg.eligible r = true) →
-      Step m s (.makeIneligible p r) (makeIneligible s p r)
+      InstantStep m s (.makeIneligible p r) (makeIneligible s p r)
   /-- A node with a stale configuration may learn the latest one. -/
-  | learn (s n) : (hStale : ¬ KnowsLatest s n) → Step m s (.learn n) (learn s n)
+  | learn (s n) : (hStale : ¬ KnowsLatest s n) → InstantStep m s (.learn n) (learn s n)
   /-- An eligible replica that knows the latest configuration, with a matching
   recorded incarnation, may take over from the current primary. -/
   | takeover (s n) : (hKnowsLatest : KnowsLatest s n) → (hEligible : s.cfg.eligible n = true) → (hNotPrimary : n ≠ s.cfg.primary) →
-      (hIncMatches : s.cfg.incarnation n = s.incarnation n) → Step m s (.takeover n) (takeover s n)
+      (hIncMatches : s.cfg.incarnation n = s.incarnation n) → InstantStep m s (.takeover n) (takeover s n)
   /-- A diverged replica may resync once its primary has neither counted it nor made
   it eligible. -/
   | resync (s r) : (hFollowsOther : primaryOf s r ≠ r) → (hDiverged : ¬ (s.log r <+: s.log (primaryOf s r))) →
       (hNotInSync : s.sync (primaryOf s r) r = false) → (hNotLocallyEligible : (s.localCfg (primaryOf s r)).eligible r = false) →
-      Step m s (.resync r) (resync s r)
+      InstantStep m s (.resync r) (resync s r)
   /-- A node that knows the latest configuration may restart empty while some other
   authoritative node keeps its data (the survival assumption). -/
   | restartEmpty (s n) : (hKnowsLatest : KnowsLatest s n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
-      Step m s (.restartEmpty n) (restartEmpty s n)
+      InstantStep m s (.restartEmpty n) (restartEmpty s n)
   /-- A node that knows the latest configuration may restart and keep its data. -/
-  | restartKeep (s n) : (hKnowsLatest : KnowsLatest s n) → Step m s (.restartKeep n) (restartKeep s n)
+  | restartKeep (s n) : (hKnowsLatest : KnowsLatest s n) → InstantStep m s (.restartKeep n) (restartKeep s n)
   /-- A node may restart from a persistence file holding only the first `k` entries of
   its log. It keeps its incarnation only if the file covers every offset it has
   acknowledged (`ackHigh n ≤ k`). -/
   | restartPartialKeep (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hCoversAcks : s.ackHigh n ≤ k) →
-      Step m s (.restartPartial n k) (restartPartialKeep s n k)
+      InstantStep m s (.restartPartial n k) (restartPartialKeep s n k)
   /-- Otherwise it takes a new incarnation and rejoins as after RestartEmpty, under the
   same survival assumption, keeping the `k` entries it has. -/
   | restartPartialFresh (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hMissesAcks : k < s.ackHigh n) →
       (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
+      InstantStep m s (.restartPartial n k) (restartPartialFresh s n k)
+
+/-! ### Delayed replication -/
+
+/-- A replication message is on an open connection: its connection has not closed
+since it was sent. -/
+def RMsg.Current (s : State Node) (msg : RMsg Node) : Prop :=
+  s.rgen msg.link.1 msg.link.2.1 = msg.link.2.2.1
+
+instance (s : State Node) (msg : RMsg Node) : Decidable (msg.Current s) := by
+  unfold RMsg.Current; infer_instance
+
+/-- A replication message is the oldest still in flight on its link and direction: a
+connection delivers in order. -/
+def RMsg.First (s : State Node) (msg : RMsg Node) : Prop :=
+  (s.rnet.filter fun m => m.link = msg.link).head? = some msg
+
+instance (s : State Node) (msg : RMsg Node) : Decidable (msg.First s) := by
+  unfold RMsg.First; infer_instance
+
+/-- PSYNC acceptance (Valkey's `primaryTryPartialResynchronization`): the offered ID is
+the primary's own, or its secondary ID with the offset within the secondary's range,
+and the offset is within the primary's log. Nothing else is compared. -/
+def PsyncOk (s : State Node) (p : Node) (rid off : Nat) : Prop :=
+  off ≤ (s.log p).length ∧
+    (s.replId p = rid ∨ (s.replId2 p).any (fun x => decide (x.1 = rid ∧ off ≤ x.2)) = true)
+
+instance (s : State Node) (p : Node) (rid off : Nat) : Decidable (PsyncOk s p rid off) := by
+  unfold PsyncOk; infer_instance
+
+/-- `p` streams to `r` on their current connection: `p` accepted `r`'s PSYNC on it, and
+it has not closed since. A replica takes commands from its primary only on such a
+connection. -/
+def StreamOpen (s : State Node) (p r : Node) : Prop :=
+  (s.stream p r).map Prod.snd = some (s.rgen p r)
+
+instance (s : State Node) (p r : Node) : Decidable (StreamOpen s p r) := by
+  unfold StreamOpen; infer_instance
+
+/-- `p` serves PSYNC: its configuration names it primary, or it is a replica connected
+to its own primary (Valkey's `syncCommand`, `replication.c:1519-1520`, refuses a replica
+whose link to its primary is down). -/
+def ServesPsync (s : State Node) (p : Node) : Prop :=
+  (s.localCfg p).primary = p ∨ StreamOpen s (primaryOf s p) p
+
+instance (s : State Node) (p : Node) : Decidable (ServesPsync s p) := by
+  unfold ServesPsync primaryOf; infer_instance
+
+/-- Close the connection from `p` to `r`. -/
+def closeLink (g : Node → Node → Nat) (p r : Node) : Node → Node → Nat :=
+  update g p (update (g p) r (g p r + 1))
+
+/-- `r` reconnects to its primary `p`, which accepts its PSYNC: the old connection from
+`p` to `r` closes, and on the new one `p` will stream from `r`'s offset. `p`'s record of
+`r`'s acknowledgement starts again from 0 (`repl_ack_off` of the new replica client). -/
+def reconnect (s : State Node) (r : Node) : State Node :=
+  { s with rgen := closeLink s.rgen (primaryOf s r) r,
+           acked := update s.acked (primaryOf s r) (update (s.acked (primaryOf s r)) r 0),
+           stream := update s.stream (primaryOf s r)
+             (update (s.stream (primaryOf s r)) r
+               (some ((s.log r).length, s.rgen (primaryOf s r) r + 1))) }
+
+/-- `p` streams its entry at `k` to `r`. -/
+def streamNext (s : State Node) (p r : Node) (k : Nat) : State Node :=
+  { s with rnet := s.rnet ++ [.data p r (s.rgen p r) ((s.log p).getD k 0) (s.replId p)],
+           stream := update s.stream p (update (s.stream p) r (some (k + 1, s.rgen p r))) }
+
+/-- `r` appends a streamed entry and takes the streaming primary's ID. -/
+def applyData (s : State Node) (msg : RMsg Node) (r : Node) (v rid : Nat) : State Node :=
+  { s with rnet := s.rnet.erase msg, log := update s.log r (s.log r ++ [v]),
+           replId := update s.replId r rid }
+
+/-- `r` acknowledges its offset to its primary, and records it. -/
+def sendAckMsg (s : State Node) (r : Node) : State Node :=
+  { s with rnet := s.rnet ++ [.ack r (primaryOf s r) (s.rgen (primaryOf s r) r) (s.log r).length],
+           ackHigh := update s.ackHigh r (max (s.ackHigh r) (s.log r).length) }
+
+/-- `p` records `r`'s acknowledgement of `off`, keeping the larger offset
+(`replication.c:1897`). -/
+def recordAck (s : State Node) (msg : RMsg Node) (p r : Node) (off : Nat) : State Node :=
+  { s with rnet := s.rnet.erase msg, acked := update s.acked p (update (s.acked p) r (max (s.acked p r) off)),
+           ackedMax := update s.ackedMax p (update (s.ackedMax p) r (max (s.ackedMax p r) off)) }
+
+/-- A replication message is lost; as on TCP, its connection closes. -/
+def loseMsg (s : State Node) (msg : RMsg Node) : State Node :=
+  { s with rnet := s.rnet.erase msg, rgen := closeLink s.rgen msg.primary msg.replica }
+
+/-- The step relation with delayed replication. Replicate and Ack go through `rnet`,
+over per-connection ordered channels, with Valkey's PSYNC check and nothing more; a
+full resync needs no divergence, and a node serves PSYNC only if it is primary or
+connected to its own primary. Every other action is `InstantStep`'s. `m` is
+`min-sync-replicas`. -/
+inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
+  | append (s p) : ThinksPrimary s p → Writable m s p → Step m s (.append p) (appendWrite s p)
+  | commit (s p) : (hThinksPrimary : ThinksPrimary s p) → (hWritable : Writable m s p) → (hHasNext : s.commit p < (s.log p).length) →
+      (hAllAcked : ∀ r, s.sync p r = true → s.commit p < s.acked p r) → Step m s (.commit p) (commitNext s p)
+  | addToSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hNotSelf : r ≠ p) → (hFollows : primaryOf s r = p) →
+      (hNotInSync : s.sync p r = false) → (hCaughtUp : catchUpPoint s p ≤ s.acked p r) →
+      Step m s (.addToSyncSet p r) (addToSyncSet s p r)
+  | removeFromSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hInSync : s.sync p r = true) →
+      (hNotLocallyEligible : (s.localCfg p).eligible r = false) → Step m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
+  | makeEligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hInSync : s.sync p r = true) →
+      (hNotEligible : s.cfg.eligible r = false) → Step m s (.makeEligible p r) (makeEligible s p r)
+  | makeIneligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hEligible : s.cfg.eligible r = true) →
+      Step m s (.makeIneligible p r) (makeIneligible s p r)
+  | learn (s n) : (hStale : ¬ KnowsLatest s n) → Step m s (.learn n) (learn s n)
+  | takeover (s n) : (hKnowsLatest : KnowsLatest s n) → (hEligible : s.cfg.eligible n = true) → (hNotPrimary : n ≠ s.cfg.primary) →
+      (hIncMatches : s.cfg.incarnation n = s.incarnation n) → Step m s (.takeover n) (takeover s n)
+  /-- A full resync of a replica its primary neither counts nor lists as eligible. A
+  primary may answer any PSYNC with a full resync (its backlog is finite). -/
+  | resync (s r) : (hFollowsOther : primaryOf s r ≠ r) →
+      (hNotInSync : s.sync (primaryOf s r) r = false) → (hNotLocallyEligible : (s.localCfg (primaryOf s r)).eligible r = false) →
+      Step m s (.resync r) (resync s r)
+  | restartEmpty (s n) : (hKnowsLatest : KnowsLatest s n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
+      Step m s (.restartEmpty n) (restartEmpty s n)
+  | restartKeep (s n) : (hKnowsLatest : KnowsLatest s n) → Step m s (.restartKeep n) (restartKeep s n)
+  | restartPartialKeep (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hCoversAcks : s.ackHigh n ≤ k) →
+      Step m s (.restartPartial n k) (restartPartialKeep s n k)
+  | restartPartialFresh (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hMissesAcks : k < s.ackHigh n) →
+      (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
       Step m s (.restartPartial n k) (restartPartialFresh s n k)
+  /-- A replica reconnects to its primary with PSYNC, offering its replication ID and
+  offset, and the primary accepts: the check passes (`PsyncOk`). The handshake is one
+  step; the replica's state cannot change while its PSYNC is in flight, so this loses no
+  behaviour. A refused PSYNC is a step not taken: the replica then resyncs in full. -/
+  | psync (s r) : (hFollowsOther : primaryOf s r ≠ r) →
+      (hServes : ServesPsync s (primaryOf s r)) →
+      (hOk : PsyncOk s (primaryOf s r) (s.replId r) (s.log r).length) → Step m s (.psync r) (reconnect s r)
+  /-- A primary streams its next entry on a connection whose PSYNC it accepted. -/
+  | sendData (s p r k) : (hStream : s.stream p r = some (k, s.rgen p r)) → (hHasNext : k < (s.log p).length) →
+      Step m s (.sendData p r) (streamNext s p r k)
+  /-- A replica applies the next entry from its primary's stream. -/
+  | deliverData (s p r g v rid) : (hIn : RMsg.data p r g v rid ∈ s.rnet) →
+      (hCurrent : (RMsg.data p r g v rid).Current s) → (hFirst : (RMsg.data p r g v rid).First s) →
+      (hFollows : primaryOf s r = p) →
+      Step m s (.deliver (.data p r g v rid)) (applyData s (.data p r g v rid) r v rid)
+  /-- A replica acknowledges its offset. -/
+  | sendAck (s r) : (hFollowsOther : primaryOf s r ≠ r) → Step m s (.sendAck r) (sendAckMsg s r)
+  /-- A primary records an acknowledgement from a replica whose PSYNC it accepted on
+  that connection. -/
+  | deliverAck (s r p g off k) : (hIn : RMsg.ack r p g off ∈ s.rnet) →
+      (hCurrent : (RMsg.ack r p g off).Current s) → (hFirst : (RMsg.ack r p g off).First s) →
+      (hStream : s.stream p r = some (k, g)) →
+      Step m s (.deliver (.ack r p g off)) (recordAck s (.ack r p g off) p r off)
+  /-- A replication message is lost. -/
+  | dropMsg (s msg) : (hIn : msg ∈ s.rnet) → Step m s (.dropMsg msg) (loseMsg s msg)
+
+/-- The model with instant replication as a labelled transition system. -/
+def instantReplTransitionSystem (m : Nat) : LTS (State Node) (Action Node) where
+  Tr := InstantStep m
 
 /-- The protocol as a labelled transition system (CSLib's `LTS`): `Step` is its
 transition relation, so CSLib's runs (`MTr`), reachability (`CanReach`), invariants

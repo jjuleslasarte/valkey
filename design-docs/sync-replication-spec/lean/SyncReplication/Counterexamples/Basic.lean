@@ -4,8 +4,8 @@ import SyncReplication.Replies
 # Counterexamples: shared setup
 
 Every counterexample is a concrete run on three nodes (`Fin 3`, node 0 the initial
-primary) in a *weakened* protocol: the model's `Step` plus one action with a rule
-removed. The weakened relation is named in the theorem, so the statement says exactly
+primary) in a *weakened* protocol: the model's `Step`, with replication delayed under
+Valkey's PSYNC check, plus one action with a rule removed. The weakened relation is named in the theorem, so the statement says exactly
 which rule the run does without. Each run is a CSLib multi-step transition
 (`LTS.MTr`) whose label list is the trace, so the sequence of actions can be read
 off the theorem statement, and every guard is evaluated by `decide`, so each run is
@@ -48,26 +48,31 @@ theorem mtr_of_step {L : LTS (State N) (Action N)} {m : Nat}
 
 /-! ## A write commits on n0 and n1
 
-n0 promotes n1, writes, n1 replicates and acknowledges, n0 commits. Afterwards the
-write is on n0 and n1, both authoritative, and the committed history is `[1]`. -/
+n0 promotes n1, writes; n1 reconnects with PSYNC (ID 1, offset 0), n0 streams the
+write, n1 applies and acknowledges it; n0 commits. Afterwards the write is on n0 and n1,
+both authoritative, and the committed history is `[1]`. -/
 
 def c0 : State N := init 0
 def c1 := addToSyncSet c0 0 1             -- n0 counts n1
 def c2 := makeEligible c1 0 1          -- n1 eligible
 def c3 := appendWrite c2 0         -- n0 writes at offset 1
-def c4 := replicate c3 1           -- n1 copies it
-def c5 := ack c4 1                 -- n1 acknowledges
+def c4 := applyData (streamNext (reconnect c3 1) 0 1 0) (.data 0 1 1 1 1) 1 1 1   -- n1 copies it
+def c5 := recordAck (sendAckMsg c4 1) (.ack 1 0 1 1) 0 1 1                        -- n1 acknowledges
 def c6 := commitNext c5 0          -- committed on n0 and n1
 
 /-- The shared prefix, at min-sync-replicas = 1. -/
 theorem committed_run : (transitionSystem 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .replicate 1, .ack 1, .commit 0] c6 :=
+    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+     .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0] c6 :=
   .stepL (Step.addToSyncSet c0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.makeEligible c1 0 1 (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.append c2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide))) <|
-  .stepL (Step.replicate c3 1 (by decide) (by decide) (by decide)) <|
-  .stepL (Step.ack c4 1 (by decide) (by decide) (by decide)) <|
+  .stepL (Step.psync c3 1 (by decide) (by decide) (by decide)) <|
+  .stepL (Step.sendData _ 0 1 0 (by decide) (by decide)) <|
+  .stepL (Step.deliverData _ 0 1 1 1 1 (by decide) (by decide) (by decide) (by decide)) <|
+  .stepL (Step.sendAck _ 1 (by decide)) <|
+  .stepL (Step.deliverAck _ 1 0 1 1 1 (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (Step.commit c5 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)) (by decide) (by decide)) <|
   .refl

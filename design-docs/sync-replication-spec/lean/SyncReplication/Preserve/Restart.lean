@@ -56,7 +56,7 @@ theorem repl_restartEmpty : ReplInvariant (restartEmpty s n) := by
       · exact h.noSelfSync p
   ackedPrim := by
     intro r hr
-    show (restartEmpty s n).acked s.cfg.primary r = 0
+    show (restartEmpty s n).ackedMax s.cfg.primary r = 0
     have := hAle s.cfg.primary r; rw [h.ackedPrim r hr] at this; omega
   ackedLe := by
     intro p r hp
@@ -75,7 +75,7 @@ theorem repl_restartEmpty : ReplInvariant (restartEmpty s n) := by
   ackedHigh := by
     intro p m hp hm hf
     obtain ⟨hpn, hp'⟩ := htp p hp
-    show (restartEmpty s n).acked p m ≤ (restartEmpty s n).ackHigh m
+    show (restartEmpty s n).ackedMax p m ≤ (restartEmpty s n).ackHigh m
     rw [restartEmpty_ackHigh]
     by_cases emn : m = n
     · subst emn
@@ -127,7 +127,7 @@ theorem membership_restartEmpty : MembershipInvariant (restartEmpty s n) := by
         intro e; rw [hS, if_neg ep, if_pos ⟨rfl, e⟩] at hs; exact absurd hs (by decide)
       obtain ⟨a, b⟩ := h.syncNew r (hSle _ _ hs) he
       refine ⟨a, ?_⟩
-      show (restartEmpty s n).inheritedEnd s.cfg.primary ≤ (restartEmpty s n).acked s.cfg.primary r
+      show (restartEmpty s n).inheritedEnd s.cfg.primary ≤ (restartEmpty s n).ackedMax s.cfg.primary r
       rw [hRo _ ep, hA, if_neg ep, if_neg (fun c => hrn c.2)]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -189,7 +189,7 @@ theorem failover_restartEmpty : FailoverInvariant (restartEmpty s n) := by
     have hpp := stale_ne_prim h hv
     have hSp : (restartEmpty s n).sync p = s.sync p := by
       funext r; rw [hS, if_neg hpn, if_neg (fun c => hpp c.1)]
-    have hAp : ∀ r, (restartEmpty s n).acked p r = s.acked p r := by
+    have hAp : ∀ r, (restartEmpty s n).ackedMax p r = s.ackedMax p r := by
       intro r; rw [hA, if_neg hpn, if_neg (fun c => hpp c.1)]
     have hF := h.stale p hp' hv
     refine hF.transfer (hsync := hSp) (hkn := fun _ => rfl) (hke := rfl)
@@ -244,7 +244,7 @@ theorem config_restartKeep : ConfigInvariant (restartKeep s n) :=
 theorem repl_restartKeep : ReplInvariant (restartKeep s n) := by
   have hCo : ∀ x, x ≠ n → (restartKeep s n).commit x = s.commit x := fun _ => restartKeep_commit_other
   have hCn := restartKeep_commit_self (s := s) (n := n)
-  have hAo : ∀ x, x ≠ n → (restartKeep s n).acked x = s.acked x := fun _ => restartKeep_acked_other
+  have hAo : ∀ x, x ≠ n → (restartKeep s n).ackedMax x = s.ackedMax x := fun _ => restartKeep_acked_other
   have hAn := restartKeep_acked_self (s := s) (n := n)
   have hSo : ∀ x, x ≠ n → (restartKeep s n).sync x = s.sync x := fun _ => restartKeep_sync_other
   have hSn := restartKeep_sync_self (s := s) (n := n)
@@ -258,7 +258,7 @@ theorem repl_restartKeep : ReplInvariant (restartKeep s n) := by
     · rw [hSo p e]; exact h.noSelfSync p
   ackedPrim := by
     intro r hr
-    show (restartKeep s n).acked s.cfg.primary r = 0
+    show (restartKeep s n).ackedMax s.cfg.primary r = 0
     by_cases e : s.cfg.primary = n
     · rw [e, hAn]
     · rw [hAo _ e]; exact h.ackedPrim r hr
@@ -274,7 +274,7 @@ theorem repl_restartKeep : ReplInvariant (restartKeep s n) := by
     · rw [hAo p e]; exact h.ackHolds p m hp hm hf
   ackedHigh := by
     intro p m hp hm hf
-    show (restartKeep s n).acked p m ≤ s.ackHigh m
+    show (restartKeep s n).ackedMax p m ≤ s.ackHigh m
     by_cases e : p = n
     · subst e; rw [hAn]; exact Nat.zero_le _
     · rw [hAo p e]; exact h.ackedHigh p m hp hm hf
@@ -288,7 +288,7 @@ theorem repl_restartKeep : ReplInvariant (restartKeep s n) := by
 theorem membership_restartKeep : MembershipInvariant (restartKeep s n) := by
   have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hRo : ∀ x, x ≠ n → (restartKeep s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartKeep_inheritedEnd_other
-  have hAo : ∀ x, x ≠ n → (restartKeep s n).acked x = s.acked x := fun _ => restartKeep_acked_other
+  have hAo : ∀ x, x ≠ n → (restartKeep s n).ackedMax x = s.ackedMax x := fun _ => restartKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartKeep s n).sync x = s.sync x := fun _ => restartKeep_sync_other
   have hSn := restartKeep_sync_self (s := s) (n := n)
   have hnse : ThinksPrimary s n → (s.localCfg n).eligible n = true → (s.localCfg n).incarnation n = s.incarnation n → False := by
@@ -323,7 +323,7 @@ theorem membership_restartKeep : MembershipInvariant (restartKeep s n) := by
     · have hs' : s.sync s.cfg.primary r = true := by rw [← hSo _ e]; exact hs
       obtain ⟨a, b⟩ := h.syncNew r hs' he
       refine ⟨a, ?_⟩
-      show (restartKeep s n).inheritedEnd s.cfg.primary ≤ (restartKeep s n).acked s.cfg.primary r
+      show (restartKeep s n).inheritedEnd s.cfg.primary ≤ (restartKeep s n).ackedMax s.cfg.primary r
       rw [hRo _ e, hAo _ e]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -361,7 +361,7 @@ theorem commit_restartKeep : CommitInvariant (restartKeep s n) := by
 theorem failover_restartKeep : FailoverInvariant (restartKeep s n) := by
   have hRo : ∀ x, x ≠ n → (restartKeep s n).inheritedEnd x = s.inheritedEnd x := fun _ => restartKeep_inheritedEnd_other
   have hRn := restartKeep_inheritedEnd_self (s := s) (n := n)
-  have hAo : ∀ x, x ≠ n → (restartKeep s n).acked x = s.acked x := fun _ => restartKeep_acked_other
+  have hAo : ∀ x, x ≠ n → (restartKeep s n).ackedMax x = s.ackedMax x := fun _ => restartKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartKeep s n).sync x = s.sync x := fun _ => restartKeep_sync_other
   have htp := restartKeep_thinksPrimary (s := s) (n := n)
   exact {
@@ -423,7 +423,7 @@ theorem repl_restartPartialKeep : ReplInvariant (restartPartialKeep s n k) := by
   have hLn := restartPartialKeep_log_self (s := s) (n := n) (k := k)
   have hCo : ∀ x, x ≠ n → (restartPartialKeep s n k).commit x = s.commit x := fun _ => restartPartialKeep_commit_other
   have hCn := restartPartialKeep_commit_self (s := s) (n := n) (k := k)
-  have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).acked x = s.acked x := fun _ => restartPartialKeep_acked_other
+  have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).ackedMax x = s.ackedMax x := fun _ => restartPartialKeep_acked_other
   have hAn := restartPartialKeep_acked_self (s := s) (n := n) (k := k)
   have hSo : ∀ x, x ≠ n → (restartPartialKeep s n k).sync x = s.sync x := fun _ => restartPartialKeep_sync_other
   have hSn := restartPartialKeep_sync_self (s := s) (n := n) (k := k)
@@ -436,31 +436,31 @@ theorem repl_restartPartialKeep : ReplInvariant (restartPartialKeep s n k) := by
     · rw [hSo p e]; exact h.noSelfSync p
   ackedPrim := by
     intro r hr
-    show (restartPartialKeep s n k).acked s.cfg.primary r = 0
+    show (restartPartialKeep s n k).ackedMax s.cfg.primary r = 0
     by_cases e : s.cfg.primary = n
     · rw [e, hAn]
     · rw [hAo _ e]; exact h.ackedPrim r hr
   ackedLe := by
     intro p r hp
-    show (restartPartialKeep s n k).acked p r ≤ ((restartPartialKeep s n k).log p).length
+    show (restartPartialKeep s n k).ackedMax p r ≤ ((restartPartialKeep s n k).log p).length
     by_cases e : p = n
     · subst e; rw [hAn]; exact Nat.zero_le _
     · rw [hAo p e, hLo p e]; exact h.ackedLe p r hp
   ackHolds := by
     intro p m hp hm hf
-    show ((restartPartialKeep s n k).log p).take ((restartPartialKeep s n k).acked p m) <+:
+    show ((restartPartialKeep s n k).log p).take ((restartPartialKeep s n k).ackedMax p m) <+:
       (restartPartialKeep s n k).log m
     by_cases e : p = n
     · subst e; rw [hAn]; simp
     · rw [hAo p e, hLo p e]
       by_cases em : m = n
       · subst em; rw [hLn]
-        have hle : s.acked p m ≤ k := Nat.le_trans (h.ackedHigh p m hp hm hf) hkeep
+        have hle : s.ackedMax p m ≤ k := Nat.le_trans (h.ackedHigh p m hp hm hf) hkeep
         exact prefix_take_of_length_le (h.ackHolds p m hp hm hf) (by rw [List.length_take]; omega)
       · rw [hLo m em]; exact h.ackHolds p m hp hm hf
   ackedHigh := by
     intro p m hp hm hf
-    show (restartPartialKeep s n k).acked p m ≤ s.ackHigh m
+    show (restartPartialKeep s n k).ackedMax p m ≤ s.ackHigh m
     by_cases e : p = n
     · subst e; rw [hAn]; exact Nat.zero_le _
     · rw [hAo p e]; exact h.ackedHigh p m hp hm hf
@@ -474,7 +474,7 @@ theorem repl_restartPartialKeep : ReplInvariant (restartPartialKeep s n k) := by
 theorem membership_restartPartialKeep : MembershipInvariant (restartPartialKeep s n k) := by
   have hkn : s.localCfg n = s.cfg := h.localCfgEq n hkl
   have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialKeep_inheritedEnd_other
-  have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).acked x = s.acked x := fun _ => restartPartialKeep_acked_other
+  have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).ackedMax x = s.ackedMax x := fun _ => restartPartialKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartPartialKeep s n k).sync x = s.sync x := fun _ => restartPartialKeep_sync_other
   have hSn := restartPartialKeep_sync_self (s := s) (n := n) (k := k)
   have hnse : ThinksPrimary s n → (s.localCfg n).eligible n = true → (s.localCfg n).incarnation n = s.incarnation n → False := by
@@ -508,7 +508,7 @@ theorem membership_restartPartialKeep : MembershipInvariant (restartPartialKeep 
     · have hs' : s.sync s.cfg.primary r = true := by rw [← hSo _ e]; exact hs
       obtain ⟨a, b⟩ := h.syncNew r hs' he
       refine ⟨a, ?_⟩
-      show (restartPartialKeep s n k).inheritedEnd s.cfg.primary ≤ (restartPartialKeep s n k).acked s.cfg.primary r
+      show (restartPartialKeep s n k).inheritedEnd s.cfg.primary ≤ (restartPartialKeep s n k).ackedMax s.cfg.primary r
       rw [hRo _ e, hAo _ e]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -557,7 +557,7 @@ theorem failover_restartPartialKeep : FailoverInvariant (restartPartialKeep s n 
   have hLn := restartPartialKeep_log_self (s := s) (n := n) (k := k)
   have hRo : ∀ x, x ≠ n → (restartPartialKeep s n k).inheritedEnd x = s.inheritedEnd x := fun _ => restartPartialKeep_inheritedEnd_other
   have hRn := restartPartialKeep_inheritedEnd_self (s := s) (n := n) (k := k)
-  have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).acked x = s.acked x := fun _ => restartPartialKeep_acked_other
+  have hAo : ∀ x, x ≠ n → (restartPartialKeep s n k).ackedMax x = s.ackedMax x := fun _ => restartPartialKeep_acked_other
   have hSo : ∀ x, x ≠ n → (restartPartialKeep s n k).sync x = s.sync x := fun _ => restartPartialKeep_sync_other
   exact {
   stale := by
@@ -666,7 +666,7 @@ theorem repl_restartPartialFresh : ReplInvariant (restartPartialFresh s n k) := 
       · exact h.noSelfSync p
   ackedPrim := by
     intro r hr
-    show (restartPartialFresh s n k).acked s.cfg.primary r = 0
+    show (restartPartialFresh s n k).ackedMax s.cfg.primary r = 0
     have := hAle s.cfg.primary r; rw [h.ackedPrim r hr] at this; omega
   ackedLe := by
     intro p r hp
@@ -685,7 +685,7 @@ theorem repl_restartPartialFresh : ReplInvariant (restartPartialFresh s n k) := 
   ackedHigh := by
     intro p m hp hm hf
     obtain ⟨hpn, hp'⟩ := htp p hp
-    show (restartPartialFresh s n k).acked p m ≤ (restartPartialFresh s n k).ackHigh m
+    show (restartPartialFresh s n k).ackedMax p m ≤ (restartPartialFresh s n k).ackHigh m
     rw [restartPartialFresh_ackHigh]
     by_cases emn : m = n
     · subst emn
@@ -737,7 +737,7 @@ theorem membership_restartPartialFresh : MembershipInvariant (restartPartialFres
         intro e; rw [hS, if_neg ep, if_pos ⟨rfl, e⟩] at hs; exact absurd hs (by decide)
       obtain ⟨a, b⟩ := h.syncNew r (hSle _ _ hs) he
       refine ⟨a, ?_⟩
-      show (restartPartialFresh s n k).inheritedEnd s.cfg.primary ≤ (restartPartialFresh s n k).acked s.cfg.primary r
+      show (restartPartialFresh s n k).inheritedEnd s.cfg.primary ≤ (restartPartialFresh s n k).ackedMax s.cfg.primary r
       rw [hRo _ ep, hA, if_neg ep, if_neg (fun c => hrn c.2)]; exact b
   eligibleInOldConfig := h.eligibleInOldConfig }
 
@@ -800,7 +800,7 @@ theorem failover_restartPartialFresh : FailoverInvariant (restartPartialFresh s 
     have hpp := stale_ne_prim h hv
     have hSp : (restartPartialFresh s n k).sync p = s.sync p := by
       funext r; rw [hS, if_neg hpn, if_neg (fun c => hpp c.1)]
-    have hAp : ∀ r, (restartPartialFresh s n k).acked p r = s.acked p r := by
+    have hAp : ∀ r, (restartPartialFresh s n k).ackedMax p r = s.ackedMax p r := by
       intro r; rw [hA, if_neg hpn, if_neg (fun c => hpp c.1)]
     have hF := h.stale p hp' hv
     refine hF.transfer (hsync := hSp) (hkn := fun _ => rfl) (hke := rfl)

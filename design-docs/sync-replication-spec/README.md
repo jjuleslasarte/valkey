@@ -37,9 +37,9 @@ give the exact margin condition and a sufficient condition for the "Lease durati
 rule.
 
 Over client histories of writes and reads, we prove that every reachable history is
-linearizable (Herlihy and Wing), with the same margin condition. Here the replication
-layer still moves log entries and acknowledgements in one step, so the result covers
-delayed lease messages but not delayed replication messages.
+linearizable (Herlihy and Wing), with the same margin condition. Every property and
+linearizability are proved for the model with replication delayed under Valkey's PSYNC
+check (`Step`); the reply, lease and client layers wrap it.
 
 The proofs are about safety: of the replication log, of linearizable reads under
 leases, and of client histories. They do not cover forced failover or liveness (that a
@@ -92,6 +92,31 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   (Appendix B).
 - **Demotion flow.** The primary commits the replica as ineligible and stops counting
   it, in one step.
+- **Replication.** Log entries and acknowledgements go through the network. A replica
+  connects to its primary with PSYNC, offering its replication ID and offset; the
+  primary accepts if the ID is its own, or its secondary ID with the offset in the
+  secondary's range, and the offset is within its log (`PsyncOk`), and then streams its
+  entries from that offset, one per message, in order. Otherwise the replica resyncs in
+  full, which a primary may always require. The replica appends each entry it receives
+  and takes the primary's ID. It acknowledges its offset, and the primary keeps the
+  larger of the recorded and the acknowledged offset, for a replica whose PSYNC it
+  accepted on that connection. The record is per connection, as Valkey's
+  `repl_ack_off`: when the primary accepts a PSYNC, its record of that replica starts
+  again from 0. Messages are delayed and can be lost. Each connection
+  has its own generation (`rgen p r`): a lost message closes its connection only, as on
+  TCP, a replica's reconnect closes its old connection to that primary, and a learn of
+  a different primary closes the node's connection to its old primary, while its own
+  replicas stay connected; a node's connections all close when it restarts, takes
+  over, or is resynced. A node serves PSYNC only if its configuration names it primary
+  or it is connected to its own primary. No step
+  compares logs. A takeover, and a restart of a node that is primary, give the node a
+  fresh replication ID, with its old one as the secondary ID up to its offset at that
+  moment; a restarted replica keeps the ID its file records, the ID of the primary it
+  last synced from, and offers it in PSYNC. A node restarted without data takes a fresh
+  ID and no secondary ID, as a Valkey replica with no file has no cached primary to offer, so it must
+  resync in full. It may do so only once its primary neither counts it nor lists it as
+  eligible: a replica that restarts empty while eligible waits for its demotion, and it
+  has a new incarnation, so it counts for nothing meanwhile.
 - **Failover.** An eligible replica that knows the latest configuration takes over
   through the takeover compare-and-set, which checks that its incarnation matches the
   one recorded for it, and becomes the **current primary**: the one named in the
@@ -109,8 +134,9 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   acting on its stale configuration until it learns the new one, at which point it
   drops its sync replica set. A node acts as primary only while its configuration
   records its current incarnation.
-- **Full resync.** A replica whose log has diverged from its primary's is replaced by
-  the primary's log up to the catch-up point. This happens only after the replica is
+- **Full resync.** A replica's log is replaced by the primary's log up to the catch-up
+  point. A replica whose PSYNC is refused needs one, and a primary may require one at
+  any time; nothing compares the logs. This happens only after the replica is
   out of the sync replica set and ineligible. While a new primary is still committing
   its inherited log, the catch-up point is the end of that log, so a resync then
   copies inherited entries that are not yet committed.
@@ -175,23 +201,27 @@ The model is `lean/SyncReplication/Model.lean`. It follows the design's terms (d
   not distinguish memory from disk: a restart keeps the log, empties it, or keeps a
   prefix of it.
 
-In the replication model, messages are not separate objects. A replica reads its
-primary's log directly, and an acknowledgement updates the primary's view directly,
-with the replica's offset at that moment. A delayed message corresponds to the same
-step taken later, and a lost connection corresponds to the step never being taken.
-This assumes that a message is never delivered after the connection that carried it
-has been closed by a full resync or a restart: an acknowledgement sent before a resync
-cannot arrive after it. Steps interleave arbitrarily, so any order of events across
-nodes is covered.
+In the replication model, log entries and acknowledgements are messages in flight
+(`rnet`). Each records the connection it was sent on (its `rgen`), and is
+delivered only while that connection is open and only when it is the oldest message
+still in flight on its link and direction, as TCP delivers. Delay is unbounded, and a
+lost message closes its connection. Steps interleave arbitrarily, so any order of events
+across nodes is covered.
 
 The lease layer models its messages. `REPLCONF COMMIT` (the primary's committed offset,
 with or without the echo of an acknowledgement) and the acknowledgement that renews
 the primary lease are sent into a set of messages in flight and delivered later, in
-any order, after any delay, or never. Each records the connection it was sent on;
-connections close when either end restarts, takes over, is resynced, or learns a
-configuration with a different primary, and a message from a closed connection is
-never delivered, as Valkey drops the link. The entries and acknowledged offsets
-themselves still move in one step.
+any order, after any delay, or never. Each records the generation of its connection
+(`gen p r`, per link, as for replication); a planned demotion's drop request closes
+that one connection, a learn of a different primary closes the node's connection to
+its old primary, and every connection of a node closes when it restarts, takes over,
+or is resynced. A message from
+a closed connection is never delivered, as Valkey drops the link. The lease layer wraps the replication model
+with delayed replication (`Step`): log entries and acknowledged offsets travel as
+replication messages, and the lease messages travel separately, with their own
+connection generations. A `REPLCONF COMMIT` is delivered only on the replication
+connection whose PSYNC the sender accepted, as a Valkey replica takes it only from its
+primary's link (`StreamOpen`); nothing compares the logs.
 
 Each log entry records the **replication ID** of the primaryship that wrote it (the
 field `replId`). IDs are compared only for equality, never ordered, and a takeover picks
@@ -273,7 +303,10 @@ ordered configuration; each node's copy may be behind it but never ahead.
   the node's own, so a node that came back empty never matches its old record. For the
   latest configuration this follows (`ConfigInvariant.incLe`).
 
-**Replication** (`ReplInvariant`, design §2). Acknowledgements are real.
+**Replication** (`ReplInvariant`, design §2). Acknowledgements are real. These facts
+read the ghost record `ackedMax`, the highest acknowledgement since the last restart,
+takeover or resync; the per-connection record the steps read never exceeds it
+(`RInvariant.ackedLeMax`).
 - `noSelfSync`: a node is never in its own sync replica set.
 - `ackedPrim`: the current primary has no acknowledgement recorded from a node that
   follows a different primary.
@@ -390,6 +423,17 @@ different proof, and an action may be missing where the map was incomplete. The 
 dropped `KnowsLatest` and the fence counted only eligible members; the rows those
 changes touch (`localCfgEq`, `primKnows`, `eligibleInOldConfig`) are corrected by hand.
 
+The rows from `confirmedNoEcho` down come from a second sweep, after replication was
+delayed: every part of `RInvariant` and `HistOk`, the lease layer's message and
+planned-demotion conjuncts, and the client layer's (Experiment B, phase 2). Again none is
+dead. Two follow from `RInvariant` and are lemmas now, not conjuncts:
+`ReplyInvariant.replIdsIssued` (`RInvariant.ids`) and `ClientInvariant.uniqPrim`
+(`RInvariant.uniqPrim`, through the lease layer). For the rest, each use outside the
+conjunct's own preservation is listed, so a use that only rebuilds the same conjunct
+after a step is left out; no proof without the conjunct was attempted, so a listed use
+may still be replaceable. Within the client layer, `reply` repeats
+`lease.rcore`, but each layer's theorem needs its own.
+
 | Conjunct | Layer | Needed by |
 |---|---|---|
 | `localCfgLe` | Config | Commit, MakeEligible, MakeIneligible, Takeover; NoStaleRead |
@@ -426,11 +470,47 @@ changes touch (`localCfgEq`, `primKnows`, `eligibleInOldConfig`) are corrected b
 | `selfPrimNoLease` | Lease | Learn, Takeover |
 | `committedViewLen` | Lease | the steps that extend logs, data messages |
 | `committedViewHist` | Lease | NoStaleRead |
-| `sentLe` | Lease (messages) | DeliverData, DeliverAck (by use; added with message delay, not swept) |
-| `genLe` | Lease (messages) | Takeover, Resync, Learn, the restarts (by use; not swept) |
-| `commitLe` | Lease (messages) | DeliverData (by use; not swept) |
-| `follows` | Lease (messages) | DeliverData (by use; not swept) |
-| `drop` | Lease (planned demotion) | Demote, SendGrant, DeliverDropRequest, DeliverDropConfirm (by use; not swept) |
+| `sentLe` | Lease (messages) | DeliverData, DeliverAck |
+| `genLe` | Lease (messages) | Learn, Takeover, Resync, the restarts, SendDropRequest |
+| `commitLe` | Lease (messages) | DeliverData |
+| `follows` | Lease (messages) | DeliverData, SendDropRequest |
+| `drop` | Lease (planned demotion) | Demote (a planned demotion: the replica holds no read lease); every other use rebuilds `drop` itself |
+| `confirmedNoEcho` | Lease (`DropInvariant`) | SendGrant |
+| `confirmedNoLease` | Lease (`DropInvariant`) | Demote |
+| `requestNoEcho` | Lease (`DropInvariant`) | DeliverDropRequest |
+| `confirmNoLease` | Lease (`DropInvariant`) | DeliverDropConfirm |
+| `ids` | Replication messages (`RInvariant`) | Takeover, Resync, the restarts, SendData, NewId |
+| `secIds` | Replication messages | the steps that close a node's connections (`RInvariant.reset`), NewId |
+| `msgIds` | Replication messages | DeliverData, NewId, `RInvariant.reset` |
+| `uniqPrim` | Replication messages | AppendWrite |
+| `genLe` (replication) | Replication messages | a lost message, PSYNC, Learn, `RInvariant.reset` |
+| `streamGen` | Replication messages | Learn, `RInvariant.reset`, closing a connection (`RInvariant.regen`) |
+| `stream` | Replication messages | AppendWrite, SendData, DeliverData, SendAck, DeliverAck; the lease layer's DeliverData (`prefix_of_open`) |
+| `dataStream` | Replication messages | DeliverData |
+| `ackOk` | Replication messages | DeliverAck |
+| `hist` (`HistOk`) | Replication messages | PSYNC |
+| `logH` | Replication messages (`HistOk`) | PSYNC, SendData, Takeover, a primary's restart (the secondary ID's history) |
+| `ownH` | Replication messages (`HistOk`) | AppendWrite |
+| `secH` | Replication messages (`HistOk`) | PSYNC |
+| `streamH` | Replication messages (`HistOk`) | DeliverData |
+| `ackedLeMax` | Replication messages | Commit, AddToSyncSet |
+| `core`, `rcore`, `held`, `acked` | Reply (`ReplyInvariant`) | not swept: the replication invariants and the reply layer's own facts |
+| `lease`, `reply` | Client (`ClientInvariant`) | the lease and reply steps of the client layer; RespondRead, Append, Release |
+| `wf` | Client | `linearizable`, Release, RespondRead, the invocations |
+| `idsLt` | Client | InvokeWrite, InvokeRead |
+| `keysNodup` | Client | the lease steps (`ClientInvariant.move`), Release |
+| `opsNodup` | Client | the lease steps, Release |
+| `writtenInv` | Client | the lease steps, InvokeWrite, Release, RespondRead |
+| `writtenIds` | Client | the lease steps |
+| `owned` | Client | Append |
+| `logKeyed`, `histKeyed` | Client | the lease steps; Append (`histKeyed`) |
+| `respondedCommitted` | Client | the lease steps |
+| `heldKeyed`, `heldKeysNodup`, `heldPending` | Client | Append (`heldKeyed`), Release |
+| `waitingInv`, `waitingNodup` | Client | InvokeWrite, Append |
+| `readingInv`, `readingNodup` | Client | InvokeRead, RespondRead |
+| `linShape`, `linWrites` | Client | Append, Release, RespondRead, the lease steps |
+| `linCommitted`, `linMarkLe` | Client | the lease steps; Release, RespondRead (`linMarkLe`) |
+| `linIds`, `linInv`, `linInvLt`, `linResGe`, `linResEq`, `linResp`, `linSorted`, `linLegal` | Client | `linearizable`; the invocations (all but `linIds`, `linSorted`, `linLegal`) |
 
 "Needed by" is about the current proof. No counterexample state was built for any
 conjunct (one that meets all the others, breaks this one, and reaches a violation in one
@@ -443,6 +523,27 @@ held reply that passes the reply fence points at the write it was issued for; an
 AckedDurable itself. A takeover or `NewId` gives the node an ID never handed out before,
 so no held reply matches it and an old reply can never become releasable again.
 Freshness is all the proof uses; no ordering of IDs is needed.
+
+With replication delayed, `Invariant` is unchanged: it reads no message, stream, ID or
+connection generation, and a delivered entry only extends a log, which every conjunct
+allows. What delay needs is that an acknowledgement is real, and for that a second
+invariant, `RInvariant` (`Preserve/Delayed.lean`), proves what the PSYNC check relies
+on. Some map `H` from replication IDs to histories exists such that:
+- every node's log is a prefix of its ID's history, and a node that thinks it is primary
+  holds its ID's whole history; no two such nodes share an ID;
+- a secondary ID agrees with its history up to its offset;
+- on every open, accepted stream, the replica's log followed by the entries in flight is
+  a prefix of the primary's log, ending at the stream position, and each entry extends
+  the replica's log within the history of the ID it was sent under;
+- every acknowledgement on an open, accepted connection is of a prefix the replica holds
+  of the primary's log, within its high-water mark.
+
+PSYNC's check then gives a prefix: if the ID is the primary's own, both logs are
+prefixes of one history and the replica's is no longer; if it is the secondary ID, the
+primary holds that history up to the offset (`prefix_of_psyncOk`). Recording an
+acknowledgement is then a raise of the primary's record to an offset the replica holds
+(`invariant_raiseAck`). A takeover and a primary's restart give the node a fresh ID, whose history
+is the node's log, so `H` changes only there and where a primary appends.
 
 ### 3.2 Lease timing
 
@@ -538,11 +639,13 @@ What these say about the design's own wording is in Appendix B.
 | A restart need not clear the node's grantor rows (primary leases, acknowledgement times, echoes) for property 6 | `SyncReplication.noStaleRead_keepGrantorRows` |
 | Every reachable client history is linearizable for the log (`margin ≥ 2 · drift`) | `SyncReplication.linearizable` |
 | Linearizability is not vacuous: a write released as OK and a later read that returns it | `SyncReplication.client_writeRead_reachable` |
+| With delayed replication under Valkey's PSYNC check, a restart must take a fresh replication ID | `SyncReplication.psyncKeepsId_unsafe` |
+| The secondary ID is not needed for property 1; without it a PSYNC after a takeover is refused, so it buys availability | `SyncReplication.noSecondaryId_safety`, `noSecondaryId_refuses` |
 
-Size: the model is 1,168 lines (481 for the protocol, 140 for the held-reply layer,
-547 for the lease layer), the invariants and their lemmas 2,281 (475 for replication,
-1,806 for leases, which includes their preservation), the per-action contracts 616,
-and the replication preservation proofs 2,551. Lean checks the whole of
+Size: the model is 1,430 lines (756 for the protocol, 140 for the held-reply layer,
+534 for the lease layer), the invariants and their lemmas 2,322 (487 for replication,
+1,835 for leases, which includes their preservation), the per-action contracts 616,
+and the replication preservation proofs 3,999. Lean checks the whole of
 `SyncReplication` in about 20 seconds on a laptop-class machine.
 
 `lean/Check.lean` and `lean/LeaseCheck.lean` list every checked theorem; each
@@ -558,6 +661,10 @@ statement is in the file section 6 names for it.
   serve a linearizable read, its log is the history. Client operations as a history
   are in the client layer, which is proved linearizable (see *Linearizability*
   below). Serializable (non-lease) replica reads are not modelled.
+- **Availability after a reconnect.** A sync replica that reconnects starts with a
+  primary record of 0, so the primary cannot commit past what that replica
+  acknowledges on its new connection: commits wait until it acknowledges again. The
+  model allows the wait; nothing bounds it (see *Liveness*).
 - **Liveness.** Nothing proves that a held reply is ever released, as OK or as
   `UNCOMMITTED`, or that a lease is ever renewed, or that a read is ever served. The model's `UNCOMMITTED` (`abort`) fires only when the primaryship
   that took the write is no longer current. The design's other case, a healthy
@@ -579,14 +686,14 @@ statement is in the file section 6 names for it.
   COMMIT`) is separate, and is what a replica read is served from.
 - **The Cluster V2 bus is assumed correct** and modelled as a compare-and-set register
   (section 1).
-- **Replication messages are abstracted** (section 1). An acknowledgement carries the
-  replica's offset at delivery, so the model assumes no message is delivered after a
-  full resync or restart has closed its connection. The lease layer's messages are
-  delayed, reordered or lost, with unbounded delay, but log entries and acknowledged
-  offsets are not: delaying those is a change to the replication model not made here.
-  A connection closes on a restart, takeover or resync of either end and when a node
-  learns a configuration with a different primary; a message sent on a closed
-  connection is never delivered. The echo of an acknowledgement rides on a separate
+- **Replication messages are ordered per connection** (section 1): delayed or lost,
+  with unbounded delay, but delivered in order on their connection and never after it
+  closes, as on TCP. The lease layer's messages are delayed, reordered or lost, with
+  unbounded delay. A replication connection closes when a message on it is lost or the
+  replica reconnects; in both layers, a learn of a different primary closes the node's
+  connection to its old primary, and every connection of a node closes at its restart,
+  takeover or resync. A
+  message sent on a closed connection is never delivered. The echo of an acknowledgement rides on a separate
   `REPLCONF COMMIT` rather than on every data message, which reaches the same states.
   The model with instant lease messages (`InstantLeaseStep`) is a special case:
   `instant_simulates` turns each of its steps into a run of the delayed model.
@@ -594,6 +701,30 @@ statement is in the file section 6 names for it.
   time is within `drift` of real elapsed time. `Lease/Additive.lean` shows the two
   worst cases the layer uses (holder slow, grantor fast) are exact for this model;
   rate-bounded drift is covered there too, but not in the layer.
+
+### Replication against Valkey
+
+Citations are to `src/` at the fork's `sync-repl-lean` branch. What the model does
+differently from Valkey, as narrowings (Valkey has behaviours the model lacks, so the
+theorems cover fewer runs) and widenings (the model has behaviours Valkey lacks, so a
+counterexample could rely on them; none of the runs in Appendix D does). Three earlier
+differences now match Valkey: a learn of a different primary closes only the link to the
+old primary and keeps the node's own replicas (`replicationSetPrimary`,
+`replication.c:5096`, `:5131`); a restart without data clears the secondary ID
+(`server.c:2440`); and a node serves PSYNC only if it is primary or connected to its own
+primary (`syncCommand`, `replication.c:1519-1520`). The acknowledgement record is per
+connection, as Valkey's `repl_ack_off` (zeroed with the new replica client,
+`replication.c:1719`, raised with the larger offset, `:1897`). What remains:
+- *Narrowing: a replica that adopts a new ID gets no secondary ID.* On a `+CONTINUE`
+  with a new ID, Valkey keeps the old one as the secondary ID (`:4227`) and disconnects
+  its sub-replicas (`:4236`); the model adopts the new ID on the next streamed entry,
+  with neither. Secondary IDs play no part in safety (`noSecondaryId_safety`).
+- *Narrowing: every node starts with the initial primary's ID*, as after a first full
+  sync of the empty history; Valkey starts each node with a random ID
+  (`server.c:2439`).
+- *Widening: lease messages travel apart from the replication stream*, so a
+  `REPLCONF COMMIT` can overtake the entries sent before it; in Valkey both are on one
+  ordered connection.
 
 ### Assumptions stronger than the design
 
@@ -650,13 +781,18 @@ statement is in the file section 6 names for it.
   when it creates or frees its backlog (`replication.c:1619`, `:6102`), on
   `DEBUG change-repl-id` (`debug.c:1056`), and at startup (`server.c:2439`; a restarted
   primary keeps that new ID and stores the RDB's as its secondary ID, `server.c:7760`).
-  The model's `NewId` action covers these, and a primary's restart is the model's
-  restart followed by `NewId`. The node's held replies fail the fence and are answered
-  `UNCOMMITTED`, which is safe but costs availability. A restarted replica gets no new
-  ID; it restores its old primary's ID, as the model keeps `replId` across a restart. A
-  replica adopts its primary's ID on sync (`replication.c:2879`, `:4232`). The model
-  adopts on every `Replicate` step and not on resync; no proof reads a non-primary's ID,
-  so the difference is inert. `PSYNC` accepts the secondary ID up to
+  The model's `NewId` action covers the first two. In the model a restart of a node whose
+  configuration names it primary gives it a fresh ID, with its old one as the secondary
+  ID up to what it loaded, and a takeover does the same with the old ID valid up to the
+  takeover offset. A restarted replica keeps the ID its file records, as a Valkey
+  replica restores its primary's ID from the RDB, and drops its secondary ID; a restart
+  without data gives a fresh ID and no secondary ID, there being no file to restore one
+  from
+  (`restartIds`). A replica adopts its primary's ID on sync
+  (`replication.c:2879`, `:4232`); the model adopts on every streamed entry and
+  on a full resync, which also drops the replica's secondary ID.
+  Every node starts with the initial primary's ID, as after a first full sync of the
+  empty history. `PSYNC` accepts the secondary ID up to
   `second_replid_offset` (`:1174`), so replicas continue across a promotion or a
   primary's restart; the other changes clear the secondary ID (`:1620`, `:6103`,
   `debug.c:1057`) and replicas need a full sync. The fence reads only the primary's own
@@ -755,9 +891,9 @@ Writes and reads map onto events as follows:
 - a read sent to node n responds with n's log once n may serve a linearizable read.
 
 A log entry is identified by its offset and replication ID. A read turns each entry
-into the id of the write that appended it. In this layer a restart is followed by a
-fresh replication ID for the restarted node, as a Valkey primary takes a new ID at
-startup. Appends happen only as client writes. `client_writeRead_reachable` is a
+into the id of the write that appended it. A restart gives the restarted node a fresh
+replication ID (the replication model's restarts do; the client layer's restart adds
+another). Appends happen only as client writes. `client_writeRead_reachable` is a
 reachable history in which a write is released as OK and a later read returns it.
 
 `SyncReplication.linearizable` (`lean/SyncReplication/ClientProof.lean`) proves that
@@ -780,43 +916,44 @@ after its point by `AckedDurable`. A read's answer is the committed history by
 
 Two facts make an entry name its write. No two appends share an offset and
 replication ID. Every entry of every log, and of the committed history, comes from an
-append. The first fact needs the fresh ID at each restart. The proof also shows that
+append. The first fact needs the fresh ID at each restart: with a restart that keeps
+the ID two appends can share a pair, so the recorded history can fail to be
+linearizable while every log is the committed history
+(`restartKeepsReplId_entryNamesAmbiguous`, `restartKeepsReplId_sameLog`). In that run
+the failure is in the naming only. In other runs a restart that keeps its ID breaks the
+replication state itself (Appendix B, `psyncKeepsId_unsafe`). The proof also shows that
 no two nodes that think they are primary share an ID.
 
-**Scope.** The replication layer still moves log entries and acknowledgements in one
-step: message delay is modelled for lease messages only. The result therefore covers
-delayed, reordered and lost lease messages, but not delayed replication messages. It
-is also bounded by the client layer's two narrowings:
+**Scope.** `linearizable` is proved over `Step`, so it covers delayed, reordered and
+lost lease messages, and delayed and lost replication messages, ordered per connection.
+It is bounded by the client layer's two narrowings:
 - a restart always takes a fresh replication ID;
 - every log entry is a client write.
-
-### Future work
-
-Delayed replication messages (log entries and acknowledgements through the network),
-and the linearizability proof over them.
 
 ## 6. How the proof is organized in code
 
 | Path | Contents | Lines |
 |---|---|---|
-| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 481 |
+| `lean/SyncReplication/Model.lean` | The protocol: state, actions, steps, properties | 756 |
 | `lean/SyncReplication/Replies.lean` | Held client replies: the acknowledgement layer, AckedDurable, AckedHeld | 140 |
-| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 547 |
-| `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 475 |
+| `lean/SyncReplication/Leases.lean` | The lease layer: real time, the two leases, the committed view, the read rule, NoStaleRead | 534 |
+| `lean/SyncReplication/Invariant.lean` | The invariant in five layers; the fence; frame lemmas | 487 |
 | `lean/SyncReplication/Contracts.lean` | Each action's effect in design terms, proved without the invariant | 616 |
-| `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Preserve.lean` dispatches on the step | 2,551 |
+| `lean/SyncReplication/Preserve/`, `Preserve.lean` | Preservation, one file per subsystem: `Replication`, `Commit`, `Config`, `Failover`, `Restart`; each action proved one layer at a time; `Delayed` adds the replication-message invariant and the delayed steps; `Preserve.lean` dispatches on the step | 3,999 |
 | `lean/SyncReplication/Safety.lean` | `safety`, `commit_two_copies`, `committed_inherited_first` | 109 |
-| `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 278 |
-| `lean/SyncReplication/InstantLeases.lean` | The lease layer with instant messages is a special case (`instant_simulates`) | 148 |
-| `lean/SyncReplication/RestartGrantorRows.lean` | Restarts that keep the node's grantor rows: property 6 still holds (`noStaleRead_keepGrantorRows`) | 182 |
-| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,806 |
-| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 1,928 |
+| `lean/SyncReplication/Durability.lean` | The held-reply invariant; `ackSafety`, `ackedHeld` | 348 |
+| `lean/SyncReplication/InstantLeases.lean` | The lease layer with instant messages is a special case (`instant_simulates`) | 102 |
+| `lean/SyncReplication/RestartGrantorRows.lean` | Restarts that keep the node's grantor rows: property 6 still holds (`noStaleRead_keepGrantorRows`) | 183 |
+| `lean/SyncReplication/LeaseInvariant.lean` | The lease invariant and its preservation; `noStaleRead`, `lease_safety` | 1,835 |
+| `lean/SyncReplication/Counterexamples/` | One file per rule in Appendix B; each counterexample is in its own weakened step relation. Reachability witnesses, runs of the model itself, for the read rule, the narrowed demotion wait and the state Resync's counted guard excludes (`ResyncCounted.lean`, no weakened relation) | 2,146 |
 | `lean/SyncReplication/Linearizable.lean` | Linearizability (Herlihy and Wing), the log specification, five example histories; definition only | 340 |
 | `lean/SyncReplication/Client.lean` | The client layer: histories of client writes and reads over the lease and reply layers; a reachability witness | 285 |
-| `lean/SyncReplication/ClientProof.lean` | The client invariant and `linearizable`; `Lin.linearizable_of_points` | 1,561 |
+| `lean/SyncReplication/ClientProof.lean` | The client invariant and `linearizable`; `Lin.linearizable_of_points` | 1,560 |
+| `lean/SyncReplication/ClientNaming.lean` | Restarts that keep the node's ID make the client layer's naming of writes ambiguous: a run whose recorded history is not linearizable, with every log the committed history | 247 |
+| `lean/SyncReplication/NoSecondaryId.lean` | Takeovers and restarts without a secondary ID: property 1 still holds, and a PSYNC after a takeover is refused | 115 |
 | `lean/SyncReplication/Lists.lean` | List-prefix lemmas | 68 |
 | `lean/Lease/` | Lease timing (additive and rate clocks, durations) | 377 |
-| `lean/Check.lean` | Prints the axioms of the 47 `SyncReplication` theorems | |
+| `lean/Check.lean` | Prints the axioms of the 53 `SyncReplication` theorems | |
 | `lean/LeaseCheck.lean` | Prints the axioms of the 12 `Lease` theorems | |
 
 Lean 4.35 with Mathlib `v4.35.0`, used for list-prefix lemmas and for `Set.encard`
@@ -837,8 +974,8 @@ and `Reachable m i s` is CSLib's `CanReach` from `init i`: the existence of a ru
 Names follow the design where it has one (`ThinksPrimary`, `KnowsLatest`,
 `IsAuthoritative`, `Writable`, `catchUpPoint`). A counterexample is a concrete run on
 `Fin 3` in a weakened step relation (the model's `Step` plus one action with a rule
-removed), stated as a CSLib multi-step transition (`MTr`) whose label list is the
-trace, with every guard evaluated by `decide`.
+removed), stated as a CSLib multi-step transition (`MTr`) whose label list is
+the trace, with every guard evaluated by `decide`.
 
 **Proof style** (following *TPIL* ch. 5, Appendix A.7). Every sub-goal is a bullet
 closed in place. Hypotheses from a case split are named at the split, never recovered
@@ -853,7 +990,7 @@ property that does not hold gets a counterexample instead.
 cd lean
 lake exe cache get                # once: Mathlib's prebuilt files (about 7 GB)
 lake build                        # builds every proof
-lake env lean Check.lean          # axioms of the 47 SyncReplication theorems
+lake env lean Check.lean          # axioms of the 53 SyncReplication theorems
 lake env lean LeaseCheck.lean     # axioms of the 12 Lease theorems
 ```
 
@@ -1023,7 +1160,7 @@ reference.
 | In this proof | What it is | TPIL |
 |---|---|---|
 | `inductive Action`, `inductive Step` | `Action` is an ordinary enumeration, one case per protocol action. `Step` is a proposition defined by its introduction rules: a `Step m s μ s'` can only be built from the constructor for action `μ`, so a proof of it is a record of which action fired and evidence that its guards held. `Step` is an *inductively defined proposition*; because it is indexed by states and a label it is also an *inductive family*. | Ch. 7, Inductive Types (§7.3, §7.7) |
-| `cases hs with \| append … \| replicate …` in `invariant_step` | Case analysis on which constructor built the step. Lean checks that every constructor is handled. This is the proof-side counterpart of `Step`'s definition. | Ch. 7 (§7.6, Tactics for Inductive Types) |
+| `cases hs with \| append … \| replicate …` in `invariant_step` (over the instant model `InstantStep`; `invariants_step` does the same over `Step`) | Case analysis on which constructor built the step. Lean checks that every constructor is handled. This is the proof-side counterpart of `Step`'s definition. | Ch. 7 (§7.6, Tactics for Inductive Types) |
 | `invariant_trInv`, `LTS.mtrInv_of_trInv` in `invariant_reachable` | "`Invariant` holds initially and every step keeps it" implies "`Invariant` holds in every reachable state". The induction over the run is CSLib's lemma (Appendix A.8); the proof here only supplies the one-step fact. | Ch. 7, Ch. 8 |
 | `structure ConfigInvariant … `, `structure Invariant … extends …` | Record types whose fields are propositions. `Invariant` extends five sub-records, so each conjunct has a name (`h.localCfgEq`), can be cited alone, and the five layers can be proved separately and assembled with `where`. | Ch. 9, Structures and Records |
 | `theorem invariant_takeover : Invariant … where toConfigInvariant := …` | A proof written as a term, field by field, rather than as a tactic script. TPIL contrasts term-style and tactic-style proofs and notes that tactic proofs are harder to read because the reader must predict the effect of each step; where a proof is an assembly of named parts we write it as a term. | Ch. 3, Ch. 5 (introduction) |
@@ -1091,7 +1228,7 @@ write with n1 as its only sync replica. n1 takes over with committed offset 0. n
 promotes n2, whose log is empty. n2 is now eligible without the committed write.
 Rule: until the new primary has committed its inherited log, promotion catch-up and
 full resync are measured against the end of that log. Counterexample:
-`noReconcile_unsafe` (11 steps, `min-sync-replicas = 1`). The run removes only the
+`noReconcile_unsafe` (14 steps, `min-sync-replicas = 1`). The run removes only the
 catch-up part of the rule, in AddToSyncSet; that the resync bound is needed on its own is not
 shown. The fix as first proposed also blocked client writes until the inherited log was
 committed. That block is not needed for safety: with it removed every theorem still
@@ -1118,7 +1255,7 @@ and promotes n2 (which has the write), and commits with n2's acknowledgement onl
 is eligible and authoritative but lacks the committed write. Rule: on restart, the
 primary's sync replica set is the eligible replicas whose recorded incarnation
 matches, so it commits nothing until they acknowledge. Counterexample:
-`noRebuild_unsafe` (9 steps, `min-sync-replicas = 1`).
+`noRebuild_unsafe` (12 steps, `min-sync-replicas = 1`).
 
 **Incarnation check on primaryship** (`Counterexamples/Incarnation.lean`). Design §6
 says the takeover compare-and-set checks the incarnation, so a node that came back
@@ -1128,7 +1265,7 @@ Its configuration is current, and still names it primary under its old incarnati
 so n0 keeps acting as primary. It counts n2, whose log is empty, and makes it
 eligible. n2 is now authoritative without the committed write. Rule: a node acts as
 primary only if its configuration records its current incarnation (`ThinksPrimary`
-in the model). Counterexample: `noIncCheck_unsafe` (9 steps); the run drops the check
+in the model). Counterexample: `noIncCheck_unsafe` (12 steps); the run drops the check
 from AddToSyncSet and MakeEligible only.
 
 **`min-sync-replicas` counts only matching incarnations**
@@ -1136,13 +1273,17 @@ from AddToSyncSet and MakeEligible only.
 without data rejoins as ineligible, but the configuration keeps listing it as eligible
 until the primary demotes it. If `min-sync-replicas` counted it in the meantime, a
 primary could satisfy the minimum with a replica that cannot take over. Scenario: a
-write commits on n0 and n1; n1 restarts empty (n0 survives), copies the log back,
-acknowledges and is counted again; n0 writes and n1 acknowledges. n0 may now commit
+write commits on n0 and n1; n1 restarts from a file holding none of its log and takes a
+new incarnation (it had acknowledged the write; n0 survives), reconnects with the ID its
+file records, copies the log back, acknowledges and is counted again; n0 writes and n1
+acknowledges. n0 may now commit
 with n1 as its only sync member, and after the commit n0 is the only authoritative
 node. Safety is not affected (n1 does hold the data); the two-copies property is.
 Rule: a sync replica counts toward `min-sync-replicas` only if it is eligible with the
 incarnation the configuration records for it (`Writable` in the model).
-Counterexample: `noIncWritable_oneCopy` (14 steps). The model does not check the
+Counterexample: `noIncWritable_oneCopy` (22 steps). A replica that restarted
+with no file has a fresh ID: its PSYNC is refused and, being eligible, it cannot resync
+in full, so the run needs the restart from a file. The model does not check the
 incarnation when counting a replica into the sync replica set: the proof never needed
 it, so the guard was dropped.
 
@@ -1155,7 +1296,7 @@ acknowledgements it no longer backs. Scenario: a write commits on n0 and n1; n1
 restarts from a file holding none of its log and keeps its incarnation. n1 is
 authoritative without the committed write. With one more step, n0 restarting empty
 (allowed, since n1 is authoritative), the write is gone from every node
-(`staleRestoreKeepsInc_loses`, 9 steps); its client had OK. Rule: a node keeps its
+(`staleRestoreKeepsInc_loses`, 12 steps); its client had OK. Rule: a node keeps its
 incarnation across a restart only if the restored data covers its acknowledgement
 high-water mark, the highest offset it has acknowledged as a replica (Ack) or as a
 primary (Commit); otherwise it takes a new incarnation and rejoins as after a restart
@@ -1163,7 +1304,7 @@ without data. The mark must be persisted with the data, or acknowledgements must
 follow fsync. Two weaker rules were checked by TLC and fail: the node's own committed
 offset (a replica's is 0) and the acknowledgements it sent as a replica (a primary's
 commits are not among them; the initial primary has sent none). Counterexample:
-`staleRestoreKeepsInc_unsafe` (8 steps) and `staleRestoreKeepsInc_loses` (9).
+`staleRestoreKeepsInc_unsafe` (11 steps) and `staleRestoreKeepsInc_loses` (12).
 
 **Early removal only before eligibility** (`Counterexamples/RemoveFromSyncSet.lean`). Design §4
 says a primary may drop a counted replica that falls behind or fails "before step 4".
@@ -1172,7 +1313,7 @@ acknowledges; n0 drops n1 from its sync replica set and commits with n2's
 acknowledgement only. n1 is eligible and authoritative without the committed write.
 Rule: a replica that is already eligible leaves the sync replica set only through
 demotion. This is the design's own second ordering rule; the entry records that early
-removal must respect it. Counterexample: `removeFromSyncSetElig_unsafe` (9 steps,
+removal must respect it. Counterexample: `removeFromSyncSetElig_unsafe` (12 steps,
 `min-sync-replicas = 1`). The check is in the primary's own configuration, and early
 removal does not require the primary to know the latest one: a deposed primary may
 drop a member it does not list as eligible. An earlier version of the model required
@@ -1185,7 +1326,7 @@ and n1, n1 restarts empty, then n0 restarts empty. No node holds the write, and 
 node is authoritative. Because no node is authoritative, property 1 holds only
 vacuously in that state, so the theorem states the loss directly: the committed
 history is non-empty and no node's log holds it. Counterexample: `noSurvivor_loses`
-(9 steps). The design calls this case correlated data loss.
+(12 steps). The design calls this case correlated data loss.
 
 **Replication rules the proof uses, each shown needed.** These rules are in the design
 or in the model as described in section 1; each entry deletes one and gives the run
@@ -1196,7 +1337,7 @@ that breaks property 1 without it.
   reconciled. Scenario: a write commits on n0 and n1; n0 counts n2, which has
   acknowledged nothing, and makes it eligible. n2 is authoritative with an empty log.
   The design's own guard forbids the AddToSyncSet, so the run is about the design's half of
-  the rule. Counterexample: `noCatchUp_unsafe` (8 steps, `min-sync-replicas = 1`).
+  the rule. Counterexample: `noCatchUp_unsafe` (11 steps, `min-sync-replicas = 1`).
   F1's run is a second one, for the reconciliation half: AddToSyncSet measured against the
   primary's own commit point is a special case of AddToSyncSet with no guard
   (`stepNoCatchUp_of_stepNoReconcile`).
@@ -1207,7 +1348,7 @@ that breaks property 1 without it.
   survives); n1's log is no longer a prefix of n0's and n0 no longer counts it, so
   without the guard n1 resyncs to the empty log. n1 is still eligible with its
   recorded incarnation: authoritative without the write. Counterexample:
-  `resyncEligible_unsafe` (8 steps, `min-sync-replicas = 1`). The guard is the design's
+  `resyncEligible_unsafe` (11 steps, `min-sync-replicas = 1`). The guard is the design's
   ("replicas that are still eligible but ahead of the new primary" are demoted before a
   full resync, §5). In the run the resync source n0 no longer thinks it is primary
   (its recorded incarnation is stale), and the model's Resync does not ask that of the
@@ -1240,9 +1381,9 @@ proposes the compare-and-set), is safe either way.
   Resync resets the primary's record of the replica's acknowledgement to 0, and the
   invariant bounds the primary's commit point and catch-up obligations by its counted
   members' acknowledgements. The state the guard excludes is reachable:
-  `countedDiverged_reachable` (5 steps, `min-sync-replicas = 0`) has n0 count n1 (a
+  `countedDiverged_reachable` (7 steps of `Step`, `min-sync-replicas = 0`) has n0 count n1 (a
   sync replica, so it may receive uncommitted writes, as the design allows), n0 write,
-  n1 copy the write, n0 restart from a file holding none of its log (keeping its
+  n1 reconnect with PSYNC and receive the write, n0 restart from a file holding none of its log (keeping its
   incarnation, as it has acknowledged nothing; n1 is not eligible, so its rebuilt sync
   replica set is empty), and n0 count n1 again at catch-up point 0, so n1 is counted
   and its log `[1]` is not a prefix of n0's empty log. No counterexample was found. In
@@ -1265,29 +1406,30 @@ proposes the compare-and-set), is safe either way.
 **The lease rules, each needed** (`Counterexamples/Leases.lean`). Property 6 holds
 with the design's lease rules; removing any one of these loses it, each shown by a
 run ending in a stale linearizable read at `min-sync-replicas = 0`:
-- *A replica waits out the primary lease before taking over* (`noWaitPrim_stale`, 8
+- *A replica waits out the primary lease before taking over* (`noWaitPrim_stale`, 9
   steps): without the wait, the deposed primary still holds a valid lease from the
   taker and serves a read of a log that misses the taker's committed write.
-- *The primary waits out the read lease before demoting* (`noWaitRead_stale`, 9
+- *The primary waits out the read lease before demoting* (`noWaitRead_stale`, 10
   steps): without the wait, the demoted replica still holds a valid read lease and
   serves a read that misses the write committed without it.
-- *Read leases go only to sync members* (`grantAny_stale`, 5 steps): a follower
+- *Read leases go only to sync members* (`grantAny_stale`, 6 steps): a follower
   outside the sync set that receives an echo of its acknowledgement gets a read lease
-  the primary never waits on. *And only to eligible ones* (`grantSync_stale`, 7
+  the primary never waits on. *And only to eligible ones* (`grantSync_stale`, 8
   steps): a counted replica that is not yet eligible can be dropped by early removal
   with no wait, then serve a stale read on its lease. The design says "sync replica";
   these two runs are the reason to read that as the eligible members. *And only to
-  ones with a matching incarnation* (`grantNoIncRestart_stale`, 22 steps): a replica
-  that restarted empty stays listed as eligible and may be counted again; granted a read
-  lease, it keeps it when the primary restarts with its data, but the restarted
+  ones with a matching incarnation* (`grantNoIncRestart_stale`, 31 steps): a replica
+  that restarts from a file missing a write it acknowledged takes a new incarnation but
+  keeps its replication ID, so it reconnects with PSYNC; it stays listed as eligible and
+  may be counted again. Granted a read lease, it keeps it when the primary restarts with its data, but the restarted
   primary's rebuilt sync replica set leaves it out (its recorded incarnation is stale),
   so the primary commits without it and it serves a stale read. The run is within the
   design's "Lease durations" rule (primary lease 6, read lease 3, drift 1, margin 2).
-- *The margin is at least twice the drift* (`smallMargin_stale`, 12 steps): with
+- *The margin is at least twice the drift* (`smallMargin_stale`, 13 steps): with
   margin 1 and drift 1 and every rule kept, the taker's wait ends while the deposed
   primary, its clock a drift slow, still believes its lease valid.
 - *A restart clears the node's read lease* (`Counterexamples/RestartReadLease.lean`,
-  `restartKeepsReadLease_stale`, 11 steps): a replica that holds a read lease and
+  `restartKeepsReadLease_stale`, 14 steps): a replica that holds a read lease and
   restarts empty, keeping the lease, comes back with an empty log and committed view
   0, so nothing is uncommitted and it serves a read of an empty log while the history
   is `[1]`.
@@ -1309,7 +1451,7 @@ run ending in a stale linearizable read at `min-sync-replicas = 0`:
   earliest takeover is only `margin - 2 · drift`, zero at the margin bound, whatever the
   primary lease is.
 - *A restarted node does not treat its primary as long silent*
-  (`Counterexamples/RestartTimer.lean`, `restartForgetsTimer_stale`, 13 steps): the
+  (`Counterexamples/RestartTimer.lean`, `restartForgetsTimer_stale`, 14 steps): the
   model restarts the takeover timer at the restart. With the timer set to "long ago"
   instead, n1 restarts with its data while n0 holds a fresh lease from it, takes over at
   once and commits a write alone; the deposed n0 still holds its lease and serves a read
@@ -1355,6 +1497,42 @@ a second drift term. `demotion_in_time` gives a sufficient condition;
 `doc_condition_insufficient_drift` and `_rtt` give runs where the doc's condition
 holds and the primary lease has already expired when the demotion commits. This is an
 availability issue, not a safety one: the primary then stops serving reads.
+
+**The acknowledgement record is per connection** (not shown needed). A primary's record
+of how far a replica has acknowledged lives with the connection, as Valkey's
+`repl_ack_off` lives in the replica client (`replication.c:1719`): when the primary
+accepts a replica's PSYNC, the record starts again from 0, and acknowledgements on the
+new connection raise it with the larger offset (`:1897`). The design doc does not say
+which record Commit and AddToSyncSet read; this is the one an implementation on Valkey
+has. All six properties and linearizability hold with it. The proof keeps a ghost record
+(`ackedMax`), the highest acknowledgement since the last restart, takeover or resync,
+which a reconnect does not reset; the per-connection record never exceeds it
+(`ackedLeMax`), so every guard the model checks also holds of the ghost, and the
+invariant's facts (a sync member's acknowledgement covers the commit point, a follower
+holds its primary's log up to its acknowledgement) are stated over the ghost. A sync
+member that reconnects therefore still holds the committed prefix, while the primary
+cannot commit further until it acknowledges again. That a primary keeping its record
+across a reconnect would be unsafe is not shown: the earlier model did so and every
+theorem held.
+
+**A restart takes a fresh replication ID** (`Counterexamples/PsyncRestartId.lean`). With
+replication delayed (`Step`), a replica reconnects with PSYNC, offering its replication
+ID and offset, and the primary continues the stream if the ID is its own, or its
+secondary ID within range, and the offset is within its log; nothing else is compared,
+as in Valkey. That is sound only if an ID and an offset name one history. A primary,
+whose log may be cut back by a restart and which then writes under its ID, must
+therefore take a new ID, with its old one valid only up to what it loaded, as a Valkey
+primary does at startup (`server.c:2439`, `:7760`). A restarted replica writes nothing
+under its ID, so it may keep the one its file records.
+The design does not state this. Scenario: n0 writes and n1 receives the entry; n1 takes
+over, writes, and n0 continues from it through n1's secondary ID, so both hold
+`[1, 2]`. n1 restarts from a file holding none of its log, keeping its incarnation (it
+acknowledged nothing) and its ID, and writes twice. n0 reconnects offering (ID 2,
+offset 2), which passes the check, so n0 keeps `[1, 2]` while n1 holds `[2, 2]`. n1
+counts n0, makes it eligible and commits offset 1: n0 is authoritative without the
+committed history. With the fresh ID the offer is refused (`psyncFreshId_refused`).
+Counterexample: `psyncKeepsId_unsafe` (22 steps, two nodes, `min-sync-replicas = 0`,
+in `StepRestartKeepsId`, the delayed model plus restarts that keep every ID).
 
 ## Appendix C: The TLA+ models and what they add
 
@@ -1409,24 +1587,31 @@ relation instead.
 
 ## Appendix D: Counterexample runs
 
-The lease runs are in the lease layer with instant messages (`InstantLeaseStep`, plus
-the one weakened action). Every instant run is a run with delayed messages
-(`instant_simulates`), so the reachability witnesses hold in the model itself; a lease
-counterexample shows its rule is needed even when every message arrives at once. The
+The lease runs are in the lease layer with instant lease messages (`InstantLeaseStep`,
+plus the one weakened action); replication in them is `Step`'s, delayed. Every instant
+run is a run with delayed lease messages (`instant_simulates`), so the reachability
+witnesses hold in the model itself; a lease counterexample shows its rule is needed
+even when every lease message arrives at once. The
 planned-demotion runs are the exception: their rules matter only when messages are
 delayed, so they are in the delayed lease layer (`LeaseStep`, plus the one weakened
 action), from the shared prefix turned into a delayed run.
 
-Every counterexample is a concrete run on three nodes (`N := Fin 3`, node 0 the initial
-primary) in a weakened protocol: the model's `Step` plus one action with a rule
-removed, as its own inductive relation with a `step` constructor that admits every
-model step. Each run is a CSLib `MTr` whose label list is the trace, so the sequence of
+Every replication counterexample is a concrete run of the model with replication
+delayed under Valkey's PSYNC check: three nodes (`N := Fin 3`, node 0 the initial
+primary), or two for `PsyncRestartId.lean`, in a weakened protocol, the model's `Step`
+plus one action with a rule removed, as its own inductive relation with a `step`
+constructor that admits every model step. `ReplyFence.lean` runs in the reply layer,
+over the same model. Every run in this appendix, replication, reply and lease, is a run
+of `Step` or of a layer over it. Each run is a CSLib `MTr` whose label list is the trace, so the sequence of
 actions is in the theorem statement; every guard is discharged by `decide`, so each run
 is a genuine execution. `Counterexamples/Basic.lean` has the decidability instances,
 `writable_one` (a `Writable 1` witness from one counted replica), `mtr_of_step` (a run
-of the model is a run of any weakening), and the prefix three runs share: n0 promotes
-n1, writes, n1 replicates and acknowledges, n0 commits (`committed_run`, 6 steps; the
-history is `[1]`, on n0 and n1).
+of the model is a run of any weakening), and the prefix six runs share: n0 promotes n1,
+writes, n1 reconnects with PSYNC and receives the write, acknowledges it, and n0
+commits (`committed_run`, 9 steps; the history is `[1]`, on n0 and n1). In the traces,
+*replicate r* stands for the primary streaming one entry and its delivery, preceded by
+*psync r* when `r` has no open accepted connection, and *ack r* for an acknowledgement
+and its delivery.
 
 | File | Weakened relation | Rule removed | Trace | Violates |
 |---|---|---|---|---|
@@ -1437,15 +1622,16 @@ history is `[1]`, on n0 and n1).
 | `Rebuild.lean` | `StepNoRebuild` | RestartKeep empties the sync replica set instead of rebuilding it | addToSyncSet 0 1, makeEligible 0 1, append 0, **restartKeep 0**, replicate 2, ack 2, addToSyncSet 0 2, makeEligible 0 2, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
 | `Incarnation.lean` | `StepNoInc` | AddToSyncSet and MakeEligible check `localCfg[p].primary = p` only, not the incarnation | *prefix*, restartEmpty 0, **addToSyncSet 0 2**, **makeEligible 0 2** | EligibleHoldsCommitted: n2 authoritative with an empty log |
 | `Survival.lean` | `StepNoSurv` | RestartEmpty without the survival guard | *prefix*, learn 1, restartEmpty 1, **restartEmpty 0** | the history is non-empty, no log holds it, no node is authoritative |
-| `Leases.lean` | `LeaseStepNoWaitPrim`, `LeaseStepNoWaitRead`, `LeaseStepGrantAny`, `LeaseStepGrantSync`, `LeaseStepGrantNoInc` (with `P3`: primary lease 6, read lease 3, within the duration rule), and `leaseTransitionSystem` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the sync set; echo to a counted but ineligible member, then early removal; echo to a restarted-empty eligible member, then a restart of the primary whose rebuilt sync replica set leaves it out; margin 1 with drift 1 | shared prefix addToSyncSet 0 1, makeEligible 0 1, learn 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `leaseInit`) heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
-| `RestartReadLease.lean` | `LeaseStepRestartKeepsReadLease` | RestartEmpty keeps the restarted node's read lease | shared lease prefix, append 0, replicate 1, ack 1, commit 0, heartbeat 1 (grant), **restartEmpty 1** | `ReplCanRead` holds for n1 with an empty log, history `[1]` |
+| `Leases.lean` | `LeaseStepNoWaitPrim`, `LeaseStepNoWaitRead`, `LeaseStepGrantAny`, `LeaseStepGrantSync`, `LeaseStepGrantNoInc` (with `P3`: primary lease 6, read lease 3, within the duration rule), and `leaseTransitionSystem` itself with `P1` | takeover without the primary-lease wait; demotion without the read-lease wait; echo to a follower outside the sync set; echo to a counted but ineligible member, then early removal; echo to an eligible member restarted with a new incarnation, then a restart of the primary whose rebuilt sync replica set leaves it out; margin 1 with drift 1 | shared prefix addToSyncSet 0 1, makeEligible 0 1, learn 1, psync 1, heartbeat 1, ack 1; then **takeover 1**, append 1, commit 1 / heartbeat 1 (grant), **demote 0 1**, append 0, commit 0 / (from `leaseInit`) psync 2, heartbeat 2, ack 2, **heartbeat 2 (grant)**, append 0, commit 0 / tick ×4, takeover 1, append 1, commit 1 | `PrimCanRead` or `ReplCanRead` holds and the log is not the history |
+| `RestartReadLease.lean` | `LeaseStepRestartKeepsReadLease` | RestartEmpty keeps the restarted node's read lease | shared lease prefix, append 0, replicate 1, ack 1 (both as replication messages), commit 0, heartbeat 1 (grant), **restartEmpty 1** | `ReplCanRead` holds for n1 with an empty log, history `[1]` |
 | `RestartDemotionWait.lean` | `LeaseStepRestartNoDemotionWait` | RestartKeep arms no demotion wait (`oldEligible n := fun _ => false`) | shared lease prefix, heartbeat 1 (grant), **restartKeep 0**, demote 0 1, append 0, commit 0 | `ReplCanRead` holds for n1 without the write |
-| `RestartTimer.lean` | `LeaseStepRestartForgetsTimer` | RestartKeep sets the restarted node's takeover timer to 0 (`primaryTraffic n := 0`) | addToSyncSet 0 1, makeEligible 0 1, learn 1, tick ×4, heartbeat 1, ack 1, **restartKeep 1**, takeover 1, append 1, commit 1 | `PrimCanRead` holds for the deposed n0 without the write |
-| `TakeoverDemotionWait.lean` | `LeaseStepTakeoverNoDemotionWait` (with `P3`) | Takeover arms no demotion wait (`oldEligible n := fun _ => false`) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, learn 2, heartbeat 1, ack 1, heartbeat 2, ack 2, tick ×4, heartbeat 2, ack 2, heartbeat 2 (grant), tick, **takeover 1**, demote 1 2, append 1, commit 1 | `ReplCanRead` holds for n2 without the write |
+| `RestartTimer.lean` | `LeaseStepRestartForgetsTimer` | RestartKeep sets the restarted node's takeover timer to 0 (`primaryTraffic n := 0`) | addToSyncSet 0 1, makeEligible 0 1, learn 1, tick ×4, psync 1, heartbeat 1, ack 1, **restartKeep 1**, takeover 1, append 1, commit 1 | `PrimCanRead` holds for the deposed n0 without the write |
+| `TakeoverDemotionWait.lean` | `LeaseStepTakeoverNoDemotionWait` (with `P3`) | Takeover arms no demotion wait (`oldEligible n := fun _ => false`) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, learn 2, psync 1, psync 2, heartbeat 1, ack 1, heartbeat 2, ack 2, tick ×4, heartbeat 2, ack 2, heartbeat 2 (grant), tick, **takeover 1**, demote 1 2, append 1, commit 1 | `ReplCanRead` holds for n2 without the write |
 | `PlannedDemotion.lean` | `LeaseStepNoCloseOnRequest`, `LeaseStepNoResetOnAck`, `LeaseStepNoConfirmGuard` (delayed messages) | the drop request keeps the connection open; an acknowledgement keeps a confirmed drop; a confirmation counts whatever arrived since the request | delayed lease prefix; then sendGrant 0 1, **sendDropRequest 0 1**, deliver request, deliver echo, deliver confirmation / sendDropRequest 0 1, deliver request, deliver confirmation, sendAck 1, **deliver ack**, sendGrant 0 1, deliver echo / sendDropRequest 0 1, sendAck 1, deliver ack, sendGrant 0 1, deliver request, deliver echo, **deliver confirmation**; then demote 0 1, append 0, commit 0 | `ReplCanRead` holds for n1 without the write |
-| `GrantPrimaryLease.lean` | `LeaseStepGrantWithoutPrimaryLease` | Echo without `PrimLeaseValid` (the rest of `MayGrant` kept) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, tick ×4, takeover 1, tick ×3, demote 1 2, append 1, commit 1, ack 2, **heartbeat 2 (grant)** by the deposed n0 | `ReplCanRead` holds for n2 without the write |
+| `GrantPrimaryLease.lean` | `LeaseStepGrantWithoutPrimaryLease` | Echo without `PrimLeaseValid` (the rest of `MayGrant` kept) | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, learn 1, tick ×4, takeover 1, tick ×3, demote 1 2, append 1, commit 1, psync 2, ack 2, **heartbeat 2 (grant)** by the deposed n0 | `ReplCanRead` holds for n2 without the write |
 | `RemoveFromSyncSet.lean` | `StepRemoveFromSyncSetElig` | RemoveFromSyncSet of an eligible counted replica | addToSyncSet 0 1, makeEligible 0 1, addToSyncSet 0 2, makeEligible 0 2, append 0, replicate 2, ack 2, **removeFromSyncSet 0 1**, commit 0 | EligibleHoldsCommitted: n1 authoritative without the write |
-| `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartEmpty 1, replicate 1, ack 1, addToSyncSet 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
+| `MinSyncIncarnation.lean` | `StepNoIncWritable` | AppendWrite and Commit use `Writable` without the incarnation condition | *prefix*, learn 1, restartPartial 1 0 (new incarnation), replicate 1, ack 1, addToSyncSet 0 1, **append 0**, replicate 1, ack 1 (then the **commit 0** whose guard the theorem states) | `commit_two_copies`' conclusion: after the commit, no node but the primary is authoritative |
+| `PsyncRestartId.lean` | `StepRestartKeepsId` (delayed replication, two nodes) | A restart keeps the node's replication ID and adds no secondary ID | append 0, psync 1, accept, sendData 0 1, deliver, addToSyncSet 0 1, makeEligible 0 1, learn 1, takeover 1, append 1, learn 0, psync 0, accept (secondary ID), sendData 1 0, deliver, **restartPartial 1 0**, append 1, append 1, psync 0, accept, sendAck 0, deliver, addToSyncSet 1 0, makeEligible 1 0, commit 1 | EligibleHoldsCommitted: n0 authoritative with `[1, 2]`, history `[2]` |
 | `StaleRestore.lean` | `StepStaleKeep` | RestartPartial keeps the incarnation whatever the file covers | *prefix*, learn 1, **restartPartial 1 0** (then restartEmpty 0 for `_loses`) | EligibleHoldsCommitted: n1 authoritative without the write; after n0 restarts empty, no log holds the history (`staleRestoreKeepsInc_loses`) |
 
 The weakened action in each trace is in bold; *prefix* is `committed_run`. In

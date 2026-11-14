@@ -17,7 +17,7 @@ variable {Node : Type} [DecidableEq Node]
 
 section commit
 
-variable {s : State Node} (h : Invariant s) (p : Node) (hp : ThinksPrimary s p) (hlen : s.commit p < (s.log p).length) (hcap : ∀ r, s.sync p r = true → s.commit p < s.acked p r)
+variable {s : State Node} (h : Invariant s) (p : Node) (hp : ThinksPrimary s p) (hlen : s.commit p < (s.log p).length) (hcap : ∀ r, s.sync p r = true → s.commit p < s.ackedMax p r)
 
 include h hp hlen hcap
 
@@ -243,7 +243,7 @@ end commit
 
 section addToSyncSet
 
-variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p) (hrp : r ≠ p) (hf : primaryOf s r = p) (hcup : catchUpPoint s p ≤ s.acked p r)
+variable {s : State Node} (h : Invariant s) (p r : Node) (hp : ThinksPrimary s p) (hrp : r ≠ p) (hf : primaryOf s r = p) (hcup : catchUpPoint s p ≤ s.ackedMax p r)
 
 include h r hp hrp hf hcup
 
@@ -254,7 +254,7 @@ theorem config_addToSyncSet : ConfigInvariant (addToSyncSet s p r) :=
 
 /-- `r` has acknowledged up to the catch-up point, which is at least `p`'s commit point, so `p` still never commits past a sync replica's acknowledgement. -/
 theorem repl_addToSyncSet : ReplInvariant (addToSyncSet s p r) := by
-  have hle : s.commit p ≤ s.acked p r := Nat.le_trans (commit_le_catchUpPoint h p) hcup
+  have hle : s.commit p ≤ s.ackedMax p r := Nat.le_trans (commit_le_catchUpPoint h p) hcup
   have hS := addToSyncSet_sync (s := s) p r
   exact {
   noSelfSync := by intro q; show (addToSyncSet s p r).sync q q = false; rw [hS, h.noSelfSync q]; simp only [Bool.false_or, decide_eq_false_iff_not]; exact fun ⟨e1, e2⟩ => hrp (e2.symm.trans e1)
@@ -393,11 +393,11 @@ theorem failover_removeFromSyncSet : FailoverInvariant (removeFromSyncSet s p r)
       rintro ⟨e1, e2⟩; subst e1; subst e2
       rw [hel] at hw2; exact absurd hw2.2 (by decide)
     refine DeposedFenced.of_left (w := w) ⟨by rw [hS, hw1]; simp only [Bool.true_and, Bool.not_eq_true', decide_eq_false_iff_not]; exact hwr, hw2⟩ ?_ ?_ ?_ ?_
-    · intro hpa; show s.acked q w ≤ s.inheritedEnd s.cfg.primary; rw [hwF]; exact hF.fenceLeInheritedEnd hpa
-    · intro hpa; show (s.log q).take (s.acked q w) <+: s.log s.cfg.primary; rw [hwF]; exact hF.primHolds hpa
-    · intro hpa; show s.acked q w ≤ s.ackHigh s.cfg.primary; rw [hwF]; exact hF.primAck hpa
+    · intro hpa; show s.ackedMax q w ≤ s.inheritedEnd s.cfg.primary; rw [hwF]; exact hF.fenceLeInheritedEnd hpa
+    · intro hpa; show (s.log q).take (s.ackedMax q w) <+: s.log s.cfg.primary; rw [hwF]; exact hF.primHolds hpa
+    · intro hpa; show s.ackedMax q w ≤ s.ackHigh s.cfg.primary; rw [hwF]; exact hF.primAck hpa
     · intro m hm hi
-      show ((s.log q).take (s.acked q w) <+: s.log m ∧ s.acked q w ≤ s.ackHigh m) ∨
+      show ((s.log q).take (s.ackedMax q w) <+: s.log m ∧ s.ackedMax q w ≤ s.ackHigh m) ∨
         ((removeFromSyncSet s p r).sync q m = true ∧ (s.localCfg m).primary = q)
       rw [hwF]
       rcases hF.eligHolds m hm hi with d | ⟨d1, d2⟩

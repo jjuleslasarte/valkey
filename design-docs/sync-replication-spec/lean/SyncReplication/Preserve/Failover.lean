@@ -53,8 +53,8 @@ theorem repl_takeover : ReplInvariant (takeover s n) := by
   have hKo : ∀ x, x ≠ n → (takeover s n).localCfg x = s.localCfg x := fun _ => takeover_localCfg_other
   have hSn : (takeover s n).sync n = syncAfterTakeover s n := takeover_sync_self
   have hSo : ∀ x, x ≠ n → (takeover s n).sync x = s.sync x := fun _ => takeover_sync_other
-  have hAn : (takeover s n).acked n = fun _ => 0 := takeover_acked_self
-  have hAo : ∀ x, x ≠ n → (takeover s n).acked x = s.acked x := fun _ => takeover_acked_other
+  have hAn : (takeover s n).ackedMax n = fun _ => 0 := takeover_acked_self
+  have hAo : ∀ x, x ≠ n → (takeover s n).ackedMax x = s.ackedMax x := fun _ => takeover_acked_other
   have hCn : (takeover s n).commit n = 0 := takeover_commit_self
   have hCo : ∀ x, x ≠ n → (takeover s n).commit x = s.commit x := fun _ => takeover_commit_other
   have htp := takeover_thinksPrimary hin
@@ -63,7 +63,7 @@ theorem repl_takeover : ReplInvariant (takeover s n) := by
     intro x; by_cases e : x = n
     · subst e; rw [hSn]; exact syncAfterTakeover_self
     · rw [hSo x e]; exact h.noSelfSync x
-  ackedPrim := by intro r _; show (takeover s n).acked n r = 0; rw [hAn]
+  ackedPrim := by intro r _; show (takeover s n).ackedMax n r = 0; rw [hAn]
   ackedLe := by
     intro x y hx
     rcases (htp x).1 hx with rfl | ⟨e, hx'⟩
@@ -161,7 +161,7 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
     takeover_localCfg
   have hKo : ∀ x, x ≠ n → (takeover s n).localCfg x = s.localCfg x := fun _ => takeover_localCfg_other
   have hSo : ∀ x, x ≠ n → (takeover s n).sync x = s.sync x := fun _ => takeover_sync_other
-  have hAo : ∀ x, x ≠ n → (takeover s n).acked x = s.acked x := fun _ => takeover_acked_other
+  have hAo : ∀ x, x ≠ n → (takeover s n).ackedMax x = s.ackedMax x := fun _ => takeover_acked_other
   have hRn : (takeover s n).inheritedEnd n = (s.log n).length := takeover_inheritedEnd_self
   have hNE := eligibleAfterTakeover_iff (s := s) (n := n)
   have htp := takeover_thinksPrimary hin
@@ -189,7 +189,7 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
       · -- Another sync replica had already left x. The current primary records no
         -- acknowledgement from such a replica, so the fence is 0.
         obtain ⟨r, hr1, hr2, hr4, hr3⟩ := hex
-        have h0 : (takeover s n).acked s.cfg.primary r = 0 := by rw [hAx]; exact h.ackedPrim r hr2
+        have h0 : (takeover s n).ackedMax s.cfg.primary r = 0 := by rw [hAx]; exact h.ackedPrim r hr2
         refine DeposedFenced.of_left (hleft r hr1 (by rw [hKo r hr3]; exact hr2) (by rw [h.primKnows]; exact hr4)) ?_ ?_ ?_ ?_ <;> simp [h0]
       · -- n is the only replica that left x: the fence is n's acknowledgement, and n
         -- holds x's log up to it.
@@ -201,15 +201,15 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
           rw [hK, if_pos rfl]; exact hnp
         refine DeposedFenced.of_left (hleft n hsn hnx (by rw [h.primKnows]; exact hel)) ?_ ?_ ?_ ?_
         · intro _
-          change (takeover s n).acked s.cfg.primary n ≤ (takeover s n).inheritedEnd n
+          change (takeover s n).ackedMax s.cfg.primary n ≤ (takeover s n).inheritedEnd n
           rw [hAx, hRn]
           have := hhold.length_le; rw [List.length_take_of_le hlen] at this; exact this
         · intro _
-          change ((takeover s n).log s.cfg.primary).take ((takeover s n).acked s.cfg.primary n) <+:
+          change ((takeover s n).log s.cfg.primary).take ((takeover s n).ackedMax s.cfg.primary n) <+:
             (takeover s n).log n
           rw [hAx, hL]; exact hhold
         · intro _
-          change (takeover s n).acked s.cfg.primary n ≤ s.ackHigh n
+          change (takeover s n).ackedMax s.cfg.primary n ≤ s.ackHigh n
           rw [hAx]; exact h.ackedHigh _ _ hxp hnp hfn
         · -- Every other eligible replica is counted by x and still follows it.
           intro m hm hi
@@ -243,22 +243,22 @@ theorem failover_takeover : FailoverInvariant (takeover s n) := by
         · exact hw2.1) hw2.2
       refine DeposedFenced.of_left hw' ?_ ?_ ?_ ?_
       · intro _
-        change (takeover s n).acked x w ≤ (takeover s n).inheritedEnd n
+        change (takeover s n).ackedMax x w ≤ (takeover s n).inheritedEnd n
         rw [hAx, hwF, hRn]
         have := hn6.1.length_le
         rw [List.length_take_of_le (hwF ▸ h.ackedLe x w hx')] at this; exact this
       · intro _
-        change ((takeover s n).log x).take ((takeover s n).acked x w) <+: (takeover s n).log n
+        change ((takeover s n).log x).take ((takeover s n).ackedMax x w) <+: (takeover s n).log n
         rw [hAx, hwF, hL]; exact hn6.1
       · intro _
-        change (takeover s n).acked x w ≤ s.ackHigh n
+        change (takeover s n).ackedMax x w ≤ s.ackHigh n
         rw [hAx, hwF]; exact hn6.2
       · intro m hm hi
         change eligibleAfterTakeover s n m = true at hm
         change s.cfg.incarnation m = s.incarnation m at hi
         obtain ⟨hm1, _, hm3⟩ := (hNE m).1 hm
-        show ((s.log x).take ((takeover s n).acked x w) <+: s.log m ∧
-            (takeover s n).acked x w ≤ s.ackHigh m) ∨
+        show ((s.log x).take ((takeover s n).ackedMax x w) <+: s.log m ∧
+            (takeover s n).ackedMax x w ≤ s.ackHigh m) ∨
           ((takeover s n).sync x m = true ∧ ((takeover s n).localCfg m).primary = x)
         rw [hAx, hwF, hSx, hKo m hm3]
         exact hF.eligHolds m hm1 hi
