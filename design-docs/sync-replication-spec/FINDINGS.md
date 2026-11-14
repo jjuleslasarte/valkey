@@ -258,8 +258,8 @@ see: dropping the commit side loses the primary case, and the committed offset
 alone says nothing for replicas.
 
 **Proof status:** `SyncReplication.safety`, `ackSafety`, `ackedHeld` and
-`commit_two_copies` now include the action (`Step.restartPartialKeep` under the
-rule, `Step.restartPartialFresh` otherwise). The invariant gained a per-node
+`commit_two_copies` now include the action (`InstantStep.restartPartialKeep` under the
+rule, `InstantStep.restartPartialFresh` otherwise). The invariant gained a per-node
 high-water mark `ackHigh` with three facts: a primary's record of a replica's
 acknowledgement is within the replica's mark (`ackedHigh`), every authoritative
 node's mark covers the committed history (`histAck`), and every deposed
@@ -519,7 +519,8 @@ a takeover it covers only replicas of the replaced configuration as the doc
 says); and read leases go only to eligible sync members with a matching
 incarnation. The incarnation part is shown needed within the "Lease durations"
 rule (`grantNoIncRestart_stale`, primary lease 6, read lease 3, drift 1, margin
-2): a restarted-empty replica, still listed eligible, is granted a read lease; the
+2): a replica restarted with a new incarnation (from a file missing a write it
+acknowledged), still listed eligible, is granted a read lease; the
 primary then restarts with its data, rebuilds its sync replica set without it
 (stale recorded incarnation), and commits with n2 only. A new primary, by contrast, may
 count every eligible replica: leaving out stale-incarnation ones at takeover is
@@ -617,6 +618,20 @@ The review showed that is only half supported:
   ReadDur=2.
 - Capping timestamp ages in the model (`VIEW`) is sound (2 reviewers
   checked it).
+
+## The acknowledgement record is per connection (a rule the doc should state)
+
+Commit and AddToSyncSet read the primary's record of each replica's acknowledgement.
+In Valkey that record is `repl_ack_off`, which lives in the replica client and so
+starts at 0 on every new connection (`replication.c:1719`) and is raised with the
+larger offset (`:1897`). The Lean model now resets it when the primary accepts a
+replica's PSYNC. All six properties and linearizability still hold. The invariant states
+its acknowledgement facts over a ghost record (`ackedMax`), the highest acknowledgement
+since the last restart, takeover or resync, which the per-connection record never
+exceeds. So a sync replica that reconnects still holds the committed prefix, and the
+primary cannot commit past what the replica acknowledges on its new connection: commits
+wait until it acknowledges again. That is an availability cost, not a safety one. Keeping
+the record across a reconnect, as the earlier model did, is not shown unsafe.
 
 ## Model limits so far
 
