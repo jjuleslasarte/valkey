@@ -752,7 +752,7 @@ connection, as Valkey's `repl_ack_off` (zeroed with the new replica client,
   the primary's `acked` row are volatile (a restart resets both) and `acked` lives at the
   primary, not on the node. With the stale-restore guard stated over `max (commit n)
   (acked (primaryOf n) n)` instead, a scratch run (not in the repository) breaks
-  property 1 in 8 steps: a write commits on n0 and n1, n0 restarts with its data (both
+  property 1: a write commits on n0 and n1, n0 restarts with its data (both
   values reset to 0), then restarts from an empty file keeping its incarnation, and is
   the authoritative primary with an empty log. A stale file is
   modelled as a prefix of the log; a file that is not a prefix (a diverged tail) is not
@@ -1434,14 +1434,14 @@ run ending in a stale linearizable read at `min-sync-replicas = 0`:
   0, so nothing is uncommitted and it serves a read of an empty log while the history
   is `[1]`.
 - *A restarted primary waits one read lease plus the margin before demoting*
-  (`Counterexamples/RestartDemotionWait.lean`, `restartNoDemotionWait_stale`, 10
+  (`Counterexamples/RestartDemotionWait.lean`, `restartNoDemotionWait_stale`, 11
   steps): a restart loses the primary's record of when it last heard from each
   replica, so the read-lease wait is vacuous. Without the restart wait, n0 restarts
   with its data while n1 holds a read lease from it, demotes n1 at once, and commits
   a write alone; n1 serves a read that misses it.
 - *After a takeover, the new primary waits one read lease plus the margin before
   demoting a replica of the replaced configuration*
-  (`Counterexamples/TakeoverDemotionWait.lean`, `takeoverNoDemotionWait_stale`, 22
+  (`Counterexamples/TakeoverDemotionWait.lean`, `takeoverNoDemotionWait_stale`, 24
   steps, within the duration rule at `P3`): the new primary has no acknowledgement
   from anyone, so the read-lease wait is vacuous. n0 grants n2 a read lease at the
   last tick it holds its lease from n1; one tick later n1 takes over, demotes n2 at
@@ -1461,7 +1461,7 @@ run ending in a stale linearizable read at `min-sync-replicas = 0`:
   repository), but only because the model has one clock that keeps running across a
   restart; a monotonic clock does not survive a host reboot.
 - *Only a primary holding its primary lease grants read leases*
-  (`Counterexamples/GrantPrimaryLease.lean`, `grantWithoutPrimaryLease_stale`, 18
+  (`Counterexamples/GrantPrimaryLease.lean`, `grantWithoutPrimaryLease_stale`, 19
   steps): n0 promotes n1 and n2; n1 waits out n0's lease, takes over, waits out the
   post-takeover window, demotes n2 and commits a write alone. n0 and n2 have not
   learned of it, so n2 still follows n0 and n0 still thinks it is primary; n2
