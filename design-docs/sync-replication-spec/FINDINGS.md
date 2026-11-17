@@ -81,14 +81,14 @@ after a takeover that leaves no sync replica: `CoreRecon_strictReachLoneReconMin
 explores the full state space without ever reconciling such a primary,
 while `CoreRecon_ReachLoneReconMin1` (the fix) reconciles it in 12 states.
 Lean counterexample without the fix: `SyncReplication.noReconcile_unsafe`
-(11 steps). AddToSyncSet's catch-up guard cannot simply be dropped either:
+(14 steps). AddToSyncSet's catch-up guard cannot simply be dropped either:
 `SyncReplication.noCatchUp_unsafe` deletes it and, after a write commits on n0
-and n1, has n0 count and promote n2, which has acknowledged nothing (8 steps).
+and n1, has n0 count and promote n2, which has acknowledged nothing (11 steps).
 That AddToSyncSet is one the doc's own step 1 already forbids; F1 is about the case
 the doc's guard lets through.
 Full resync of an eligible replica is excluded by the model, as the doc says
 (eligible replicas ahead of the new primary are demoted first):
-`SyncReplication.resyncEligible_unsafe` (8 steps) resyncs one from a primary
+`SyncReplication.resyncEligible_unsafe` (11 steps) resyncs one from a primary
 that restarted from a stale file. Requiring instead that the resync source
 thinks it is primary also works (a scratch Lean build, not in the
 repository), but the proof then
@@ -165,7 +165,7 @@ records eligibility in Cluster V2. Section 5, "Restarts", says only that
 lease state is in memory. A primary that restarts with its data comes back
 with an empty sync set and can commit without an eligible replica.
 
-**Counterexample** (Lean `SyncReplication.noRebuild_unsafe`, 9 steps,
+**Counterexample** (Lean `SyncReplication.noRebuild_unsafe`, 12 steps,
 min-sync = 1; TLC `CoreRestart_noRebuildMin1`, 10 states, breaks the same
 invariant):
 1. n0 is primary. It counts n1, makes it eligible, and writes.
@@ -216,7 +216,7 @@ restart *without* data, so this node keeps its incarnation and its eligibility,
 the takeover check lets it through, and the primary still counts the stale
 acknowledgement.
 
-**Counterexample** (Lean `SyncReplication.staleRestoreKeepsInc_unsafe`, 8 steps,
+**Counterexample** (Lean `SyncReplication.staleRestoreKeepsInc_unsafe`, 11 steps,
 min-sync = 1, every other fix on; TLC `CoreRestart_staleKeepMin1`, 9 states):
 1. n0 is primary. It counts n1 and makes it eligible.
 2. n0 writes; n1 replicates and acknowledges; n0 commits (the write is
@@ -284,7 +284,7 @@ Section 6 says the takeover compare-and-set checks the incarnation, so a node
 that came back empty cannot be promoted. That is not enough: the node may
 already be the primary.
 
-**Counterexample** (Lean `SyncReplication.noIncCheck_unsafe`, 9 steps,
+**Counterexample** (Lean `SyncReplication.noIncCheck_unsafe`, 12 steps,
 min-sync = 1, every other fix on):
 1. A write commits on n0 (primary) and n1 (eligible).
 2. n0 restarts empty, with a new incarnation. n1 keeps the write.
@@ -304,7 +304,7 @@ each has now been settled on its own. Counting a replica into the sync set
 (`AddToSyncSet` in Lean, `Count` in the TLA+ spec) needs no incarnation check: the proofs never used it, and the guard
 has been removed from the Lean model. Counting toward min-sync-replicas
 (`Writable`) does need it, for the two-copies property rather than for safety:
-`SyncReplication.noIncWritable_oneCopy` (14 steps, min-sync = 1) has a replica
+`SyncReplication.noIncWritable_oneCopy` (22 steps, min-sync = 1) has a replica
 restart empty, stay listed as eligible, catch up and be counted again; the
 primary then commits with it as its only sync member, and after the commit
 the primary is the only authoritative node. The data is on the replica, but
@@ -318,7 +318,7 @@ Section 4: "If the replica falls behind or fails before step 4, the primary
 simply removes it from the commit calculation." The Lean model has this as
 `RemoveFromSyncSet`. "Before step 4" is
 load-bearing: dropping a replica that is already eligible lets the primary
-commit without it (`SyncReplication.removeFromSyncSetElig_unsafe`, 9 steps, min-sync = 1;
+commit without it (`SyncReplication.removeFromSyncSetElig_unsafe`, 12 steps, min-sync = 1;
 TLC `Core_earlyDrop`, `CoreRecon_earlyDropMin1`, `CoreRestart_earlyDropMin1`).
 "Not yet eligible" is read in the primary's own configuration, and that is
 enough: the proofs hold with no requirement that the primary knows the latest
@@ -341,7 +341,7 @@ detected"). The proofs therefore assume that at every restart without data,
 some other authoritative node keeps its data. This entry records that the
 guarantee depends on it.
 
-**Counterexample** (Lean `SyncReplication.noSurvivor_loses`, 9 steps; TLC
+**Counterexample** (Lean `SyncReplication.noSurvivor_loses`, 12 steps; TLC
 `CoreRestart_noSurvivorMin0`, `CoreRestart_noSurvivorMin1`): a write commits
 on n0 and n1, n1 restarts empty, then n0 restarts empty. No node holds the
 write, and no node is authoritative. Because no node is authoritative,
@@ -502,7 +502,7 @@ The takeover half of the doc's restart rule ("A node that restarts waits one
 full lease duration before it attempts a takeover") is needed: a restarted
 node that skips the wait, treating its primary as long silent, takes over at
 once while the old primary still holds its lease from it, and the old primary
-serves a stale read (`restartForgetsTimer_stale`, 13 steps). The model
+serves a stale read (`restartForgetsTimer_stale`, 14 steps). The model
 implements the wait by restarting the takeover timer at the restart.
 Persisting the timer across the restart also kept every theorem in a scratch
 build (not in the repository), but the model has one clock that keeps running
