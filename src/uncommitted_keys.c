@@ -1,7 +1,5 @@
 #include "server.h"
 #include "zmalloc.h"
-#include "script.h"
-#include <assert.h>
 #include <math.h>
 
 /*================================= Internal Data Structures ================= */
@@ -10,37 +8,38 @@ typedef struct uncommittedKeyEntry {
     long long offset;
 } uncommittedKeyEntry;
 
-/**
- * Pending key reference used during multi-command blocks (MULTI/EXEC, Lua).
- * We mark keys dirty immediately but don't yet know the final replication
- * offset, so we keep a reference to update the offset after the transaction
- * completes.
- */
+/* Reference to a key marked dirty with the LLONG_MAX placeholder offset. The
+ * final replication offset is only known once the execution unit that modified
+ * the key has propagated, so we keep a reference to stamp it then. */
 typedef struct pendingUncommittedKey {
     robj *key;
     hashtable *uncommitted_keys;
 } pendingUncommittedKey;
 
-/* Pending keys buffered during MULTI/EXEC or Lua scripts.  These are keys
- * that have already been marked dirty in uncommitted_keys (with LLONG_MAX
- * as a placeholder offset) but whose real offset is not yet known. */
-static list *pending_uncommitted_keys;
+/* Keys modified in the current execution unit, fed from signalModifiedKey()
+ * for every writer (client commands, MULTI/EXEC, scripts, modules, expiry,
+ * eviction). They are already in uncommitted_keys with the LLONG_MAX
+ * placeholder; stampPendingUncommittedData() sets the real offset. */
+static list *pending_modified_keys;
 
-/* Pending databases dirtied during a multi-command block. */
+// Databases dirtied (FLUSHDB/SWAPDB) in the current execution unit.
 static list *pending_uncommitted_dbs;
+
+/* Whether all databases were dirtied (FLUSHALL) in the current execution
+ * unit. Module-local state, only accessed within uncommitted_keys.c. */
+static bool all_dbs_dirty_in_current_cmd;
 
 
 /*================================= Internal Prototypes ====================== */
 
-static void addUncommittedKey(sds key, long long offset, hashtable *uncommittedKeys);
+static bool addUncommittedKey(sds key, long long offset, hashtable *uncommittedKeys);
 static void pendingUncommittedKeyDestructor(void *entry);
 static uint64_t uncommittedKeysHash(const void *key);
 static int uncommittedKeysKeyCompare(const void *key1, const void *key2);
 static const void *uncommittedKeyEntryGetKey(const void *entry);
 static void uncommittedKeyEntryDestructor(void *entry);
-static void handleDirtyDatabase(client *c, serverDb *db);
+static void handleDirtyDatabase(serverDb *db);
 static bool swapdbGetParams(robj **argv, int argc, int *id1_p, int *id2_p);
-static bool getDbIdFromRobj(robj *obj, int *db_id);
 
 /*================================= Hashtable Type =========================== */
 
@@ -68,7 +67,7 @@ static uint64_t uncommittedKeysHash(const void *key) {
 static int uncommittedKeysKeyCompare(const void *key1, const void *key2) {
     const sds s1 = (const sds)key1;
     const sds s2 = (const sds)key2;
-    return sdslen(s1) != sdslen(s2) || memcmp(s1, s2, sdslen(s1));
+    return sdslen(s1) == sdslen(s2) && memcmp(s1, s2, sdslen(s1)) == 0;
 }
 
 static const void *uncommittedKeyEntryGetKey(const void *entry) {
@@ -94,33 +93,33 @@ unsigned long long getNumberOfUncommittedKeys(void) {
 
 /*================================= Key Tracking ============================= */
 
-/**
- * Mark a key as uncommitted at a particular replication offset.
- * If the key already exists in the hashtable, update its offset.
- */
-static void addUncommittedKey(const sds key, const long long offset, hashtable *uncommittedKeys) {
+/* Mark a key as uncommitted at a particular replication offset, or update the
+ * offset of a key that is already tracked. Looks the key up first so that a
+ * hot key costs no allocation. Returns false when the key already carried the
+ * LLONG_MAX placeholder (it is then already referenced by a pending record). */
+static bool addUncommittedKey(const sds key, const long long offset, hashtable *uncommittedKeys) {
+    hashtablePosition position;
+    void *existing = NULL;
+    if (!hashtableFindPositionForInsert(uncommittedKeys, key, &position, &existing)) {
+        uncommittedKeyEntry *existing_entry = existing;
+        bool was_placeholder = (existing_entry->offset == LLONG_MAX);
+        existing_entry->offset = offset;
+        return !was_placeholder;
+    }
+
     uncommittedKeyEntry *entry = zmalloc(sizeof(*entry));
     entry->key = sdsdup(key);
     entry->offset = offset;
-
-    void *existing = NULL;
-    if (hashtableAddOrFind(uncommittedKeys, entry, &existing)) {
-        return; /* newly added */
-    }
-
-    /* Key already tracked — update to the latest offset */
-    uncommittedKeyEntry *existing_entry = existing;
-    existing_entry->offset = offset;
-    sdsfree(entry->key);
-    zfree(entry);
+    hashtableInsertAtPosition(uncommittedKeys, entry, &position);
+    return true;
 }
 
-/**
- * Retrieve the uncommitted replication offset for a given key, purge the given
- * key from uncommitted keys set if the replication offset has been committed.
- */
-long long durabilityPurgeAndGetUncommittedKeyOffset(const sds key, serverDb *db) {
-    // serverAssert(iAmPrimary());
+/* Retrieve the uncommitted replication offset for a given key.
+ * Returns -1 if the key is not tracked or has already been committed
+ * (offset <= previous_acked_offset). Does NOT purge — cleanup is handled
+ * by drainCommittedKeys(). Also used on a replica under sync replication,
+ * where keys stay uncommitted until REPLCONF COMMIT. */
+long long getUncommittedKeyOffset(const sds key, serverDb *db, long long previous_acked_offset) {
     uncommittedKeyEntry *entry = NULL;
     if (!hashtableFind(db->uncommitted_keys, key, (void **)&entry)) {
         return -1;
@@ -128,71 +127,52 @@ long long durabilityPurgeAndGetUncommittedKeyOffset(const sds key, serverDb *db)
 
     long long key_offset = entry->offset;
 
-    if (key_offset <= server.durability.previous_acked_offset) {
-        hashtableDelete(db->uncommitted_keys, key);
+    if (key_offset <= previous_acked_offset) {
         return -1;
     }
 
     return key_offset;
 }
 
-/**
- * Handle a dirty key for a given client.
- *
- * Keys are marked dirty immediately in db->uncommitted_keys.  For single
- * commands outside a transaction the real replication offset is known.
- *
- * Inside a MULTI/EXEC or Lua script we use LLONG_MAX as a placeholder
- * offset (so reads are blocked immediately) and buffer a reference in
- * pending_uncommitted_keys.  processPendingUncommittedData() will later
- * update the offset once the transaction completes.
- *
- * Cleanup happens in drainCommittedKeys() which iterates the hashtable
- * and removes entries whose offset has been committed.
- */
-void handleUncommittedKeyForClient(const client *c, robj *key, serverDb *db) {
-    sds keystr = objectGetVal(key);
+/* Record a key modified by any writer, fed from signalModifiedKey(). The key is
+ * marked dirty with the LLONG_MAX placeholder right away, so a read of it can
+ * never see it as committed; stampPendingUncommittedData() sets the real
+ * offset once the execution unit has propagated the write. */
+void trackModifiedKey(serverDb *db, robj *key) {
+    if (all_dbs_dirty_in_current_cmd) return;
 
-    if ((c != NULL) && ((c->flag.multi) || scriptIsRunning())) {
-        if (server.durability.all_dbs_dirty_in_current_cmd) return;
-
-        /* Mark dirty immediately with placeholder offset */
-        addUncommittedKey(keystr, LLONG_MAX, db->uncommitted_keys);
-
-        /* Buffer a reference so we can update offset later */
-        if (pending_uncommitted_keys == NULL) {
-            pending_uncommitted_keys = listCreate();
-            listSetFreeMethod(pending_uncommitted_keys, pendingUncommittedKeyDestructor);
-        }
-        pendingUncommittedKey *dirty_key = zmalloc(sizeof(pendingUncommittedKey));
+    if (addUncommittedKey(objectGetVal(key), LLONG_MAX, db->uncommitted_keys)) {
+        pendingUncommittedKey *entry = zmalloc(sizeof(*entry));
         incrRefCount(key);
-        dirty_key->key = key;
-        dirty_key->uncommitted_keys = db->uncommitted_keys;
-        listAddNodeTail(pending_uncommitted_keys, dirty_key);
-    } else {
-
-         /* [WBL] - On a replica, primary_repl_offset doesn't advance for
-         * commands from the replication stream. Use the primary
-         * client's applied replication offset instead. */
-        long long offset = server.primary_repl_offset;
-        if (server.primary != NULL && server.current_client != NULL &&
-            server.current_client->flag.primary) {
-            offset = server.primary->repl_data->reploff;
-        }
-        addUncommittedKey(keystr, offset, db->uncommitted_keys);
+        entry->key = key;
+        entry->uncommitted_keys = db->uncommitted_keys;
+        listAddNodeTail(pending_modified_keys, entry);
     }
+}
+
+/* True when keys or databases dirtied in the current execution unit still
+ * wait for stampPendingUncommittedData(). Used by the post-execution-unit
+ * pending-work gate so the stamp is never skipped. */
+bool hasPendingUncommittedData(void) {
+    return (pending_modified_keys != NULL && listLength(pending_modified_keys) != 0) ||
+           (pending_uncommitted_dbs != NULL && listLength(pending_uncommitted_dbs) != 0) ||
+           all_dbs_dirty_in_current_cmd;
 }
 
 /*================================= Database Modification ==================== */
 
-static void handleDirtyDatabase(client *c, serverDb *db) {
-    if ((c->flag.multi) || scriptIsRunning()) {
-        if (server.durability.all_dbs_dirty_in_current_cmd) return;
+/* computeCommandBlockingOffset() runs after the command has left its execution
+ * unit, so a nesting level of zero means the command was top level and has
+ * already propagated. Inside MULTI/EXEC, scripts and module calls the offset is
+ * only final at the end of the outer unit, so the database is stamped then. */
+static void handleDirtyDatabase(serverDb *db) {
+    if (server.execution_nesting) {
+        if (all_dbs_dirty_in_current_cmd) return;
         if (db != NULL) {
             listAddNodeTail(pending_uncommitted_dbs, db);
         } else {
-            server.durability.all_dbs_dirty_in_current_cmd = true;
-            listEmpty(pending_uncommitted_keys);
+            all_dbs_dirty_in_current_cmd = true;
+            listEmpty(pending_modified_keys);
             listEmpty(pending_uncommitted_dbs);
             /* FLUSHALL inside a transaction: any keys previously dirtied
              * in this transaction are now gone.  Clear the per-DB
@@ -221,13 +201,13 @@ void handleDatabaseModification(client *c) {
     if (c->cmd->proc == swapdbCommand && server.cluster_enabled == 0) {
         int id1, id2;
         if (swapdbGetParams(c->argv, c->argc, &id1, &id2)) {
-            handleDirtyDatabase(c, server.db[id1]);
-            handleDirtyDatabase(c, server.db[id2]);
+            handleDirtyDatabase(server.db[id1]);
+            handleDirtyDatabase(server.db[id2]);
         }
     } else if (c->cmd->proc == flushdbCommand) {
-        handleDirtyDatabase(c, c->db);
+        handleDirtyDatabase(c->db);
     } else if (c->cmd->proc == flushallCommand) {
-        handleDirtyDatabase(c, NULL);
+        handleDirtyDatabase(NULL);
     }
 }
 
@@ -248,44 +228,15 @@ static bool swapdbGetParams(robj **argv, int argc, int *id1_p, int *id2_p) {
     return true;
 }
 
-static bool getDbIdFromRobj(robj *obj, int *db_id) {
-    if ((getIntFromObject(obj, db_id) != C_OK) || (*db_id < 0) || (*db_id >= server.dbnum)) {
-        return false;
-    }
-    return true;
-}
-
-bool getTargetDbIdForCopyCommand(int argc, robj **argv, int selected_dbid, int *target_dbid) {
-    const int copy_command_optional_arg_start_index = 3;
-
-    *target_dbid = selected_dbid;
-
-    for (int j = copy_command_optional_arg_start_index; j < argc; j++) {
-        if (!strcasecmp(objectGetVal(argv[j]), "replace")) {
-            continue;
-        } else if (!strcasecmp(objectGetVal(argv[j]), "db") && (argc > j + 1)) {
-            if (!getDbIdFromRobj(argv[j + 1], target_dbid)) {
-                return false;
-            }
-            j++;
-        } else {
-            return false;
-        }
-    }
-    return true;
-}
-
 /*================================= Drain / Cleanup ========================== */
 
-/**
- * Remove committed entries from the per-DB uncommitted_keys hashtables.
+/* Remove committed entries from the per-DB uncommitted_keys hashtables.
  *
  * Iterates each database's uncommitted_keys hashtable with a safe iterator
  * and deletes entries whose offset has been durably committed.
  *
  * With appendfsync=always the uncommitted set stays small (bounded by keys
- * written between fsyncs), so the full-scan cost is smaller than the fsync.
- */
+ * written between fsyncs), so the full-scan cost is smaller than the fsync. */
 void drainCommittedKeys(long long committed_offset) {
     for (int i = 0; i < server.dbnum; i++) {
         serverDb *db = server.db[i];
@@ -310,32 +261,35 @@ void drainCommittedKeys(long long committed_offset) {
     }
 }
 
-/**
- * Initialize sync replication related fields for a database.
- */
-void durabilityInitDatabase(serverDb *db) {
+// Initialize sync replication related fields for a database.
+void replyBlockingInitDatabase(serverDb *db) {
     db->uncommitted_keys = hashtableCreate(&uncommittedKeysHashtableType);
     db->dirty_repl_offset = -1;
 }
 
-/**
- * Clear all uncommitted keys for each database.
- */
+// Clear all uncommitted keys for each database.
 void clearAllUncommittedKeys(void) {
-    serverLog(LL_NOTICE, "Clearing all uncommitted keys for sync replication");
+    serverLog(LL_DEBUG, "Clearing all uncommitted keys");
+    /* Clear pending list first — entries hold raw pointers to db->uncommitted_keys
+     * hashtables that we're about to free. */
+    if (pending_modified_keys != NULL) {
+        listEmpty(pending_modified_keys);
+    }
+    if (pending_uncommitted_dbs != NULL) {
+        listEmpty(pending_uncommitted_dbs);
+    }
+    all_dbs_dirty_in_current_cmd = false;
     for (int i = 0; i < server.dbnum; i++) {
         serverDb *db = server.db[i];
         if (db == NULL) continue;
         hashtableRelease(db->uncommitted_keys);
-        durabilityInitDatabase(db);
+        replyBlockingInitDatabase(db);
     }
 }
 
 /*================================= Access Validation ======================== */
 
-/**
- * Determine if there are uncommitted keys in the server.
- */
+// Determine if there are uncommitted keys in the server.
 int hasUncommittedKeys(void) {
     for (int i = 0; i < server.dbnum; i++) {
         if (server.db[i] && (hashtableSize(server.db[i]->uncommitted_keys) > 0))
@@ -347,16 +301,16 @@ int hasUncommittedKeys(void) {
 /*================================= Pending Data Processing ================== */
 
 void uncommittedKeysInitPending(void) {
-    pending_uncommitted_keys = listCreate();
-    listSetFreeMethod(pending_uncommitted_keys, pendingUncommittedKeyDestructor);
+    pending_modified_keys = listCreate();
+    listSetFreeMethod(pending_modified_keys, pendingUncommittedKeyDestructor);
     pending_uncommitted_dbs = listCreate();
-    server.durability.all_dbs_dirty_in_current_cmd = false;
+    all_dbs_dirty_in_current_cmd = false;
 }
 
 void uncommittedKeysCleanupPending(void) {
-    if (pending_uncommitted_keys != NULL) {
-        listRelease(pending_uncommitted_keys);
-        pending_uncommitted_keys = NULL;
+    if (pending_modified_keys != NULL) {
+        listRelease(pending_modified_keys);
+        pending_modified_keys = NULL;
     }
     if (pending_uncommitted_dbs != NULL) {
         listRelease(pending_uncommitted_dbs);
@@ -364,40 +318,39 @@ void uncommittedKeysCleanupPending(void) {
     }
 }
 
-/**
- * After a transaction completes, update the placeholder offsets on keys
- * that were dirtied during the transaction to the real replication offset.
- * Cleanup will happen when drainCommittedKeys() iterates the hashtable.
- */
-void processPendingUncommittedData(long long blocking_repl_offset) {
-    if (listLength(pending_uncommitted_keys) > 0) {
+/* Apply the final replication offset to the keys and databases dirtied in the
+ * execution unit that just completed. Called from postExecutionUnitOperations()
+ * after propagatePendingCommands(), so the offset is final. Cleanup happens when
+ * drainCommittedKeys() iterates the hashtable. */
+void stampPendingUncommittedData(long long blocking_repl_offset) {
+    if (listLength(pending_modified_keys) > 0) {
         listIter li;
         listNode *key_node;
-        listRewind(pending_uncommitted_keys, &li);
+        listRewind(pending_modified_keys, &li);
         while ((key_node = listNext(&li)) != NULL) {
             const pendingUncommittedKey *uk = listNodeValue(key_node);
             sds keystr = objectGetVal(uk->key);
 
-            /* Update the placeholder offset to the real one */
+            // Update the placeholder offset to the real one
             uncommittedKeyEntry *entry = NULL;
             if (hashtableFind(uk->uncommitted_keys, keystr, (void **)&entry)) {
-                /* Only update if still at placeholder or our offset is newer */
+                // Only update if still at placeholder or our offset is newer
                 if (entry->offset == LLONG_MAX || entry->offset < blocking_repl_offset) {
                     entry->offset = blocking_repl_offset;
                 }
             }
 
-            listDelNode(pending_uncommitted_keys, key_node);
+            listDelNode(pending_modified_keys, key_node);
         }
     }
 
-    if (server.durability.all_dbs_dirty_in_current_cmd) {
+    if (all_dbs_dirty_in_current_cmd) {
         for (int i = 0; i < server.dbnum; i++) {
             if (server.db[i] != NULL) {
                 server.db[i]->dirty_repl_offset = blocking_repl_offset;
             }
         }
-        server.durability.all_dbs_dirty_in_current_cmd = false;
+        all_dbs_dirty_in_current_cmd = false;
     } else if (listLength(pending_uncommitted_dbs) > 0) {
         listIter li;
         listNode *db_node;
@@ -409,9 +362,7 @@ void processPendingUncommittedData(long long blocking_repl_offset) {
         }
     }
 
-    serverAssert(listLength(pending_uncommitted_keys) == 0);
+    serverAssert(listLength(pending_modified_keys) == 0);
     serverAssert(listLength(pending_uncommitted_dbs) == 0);
-    serverAssert(server.durability.all_dbs_dirty_in_current_cmd == false);
-
-    updateFuncStoreBlockingOffsetForWrite(blocking_repl_offset);
+    serverAssert(all_dbs_dirty_in_current_cmd == false);
 }

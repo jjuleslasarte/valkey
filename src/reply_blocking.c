@@ -1,11 +1,14 @@
 #include "server.h"
 #include "zmalloc.h"
 #include "script.h"
-#include <assert.h>
+#include <stdatomic.h>
 
 /* Forward declarations from module.h to avoid pulling in full module internals
  * which has header dependency issues when included before server.h */
 int moduleClientIsBlockedOnKeys(client *c);
+
+/* Set while processEventsWhileBlocked() runs the event loop (server.c). */
+extern int ProcessingEventsWhileBlocked;
 
 /*============================ Internal prototypes ========================= */
 static void resetPreExecutionOffset(struct client *c);
@@ -13,168 +16,355 @@ static void trackCommandPreExecutionPosition(struct client *c);
 static int unblockClientWaitingAck(struct client *c);
 static bool clientEligibleForResponseTracking(client *c);
 static void unblockFirstResponse(const struct client *c);
+static inline int isCommandReplicatedToMonitors(void);
+static void finalizeMonitors(client *c, long long blockingReplOffset);
 static int isBlockingNeededForOffset(const struct client *c, long long offset);
-static void blockClientAndMonitorsOnReplOffset(struct client *c, long long blockingReplOffset);
 static long long getSingleCommandBlockingOffsetForReplicatingCommand(client *c);
 static long long getSingleCommandBlockingOffsetForNonReplicatingCommand(client *c);
 static long long getSingleCommandBlockingOffsetForConsistentWrites(client *c);
-static void durabilityResetPrimaryState(bool is_free_clients_needed);
+static void replyBlockingResetPrimaryState(bool is_free_clients_needed);
+
+/* The client whose command recorded the MONITOR positions, or NULL. Commands
+ * that run while it yields (busy script, module yield) leave them alone. */
+static client *monitor_snapshot_owner = NULL;
 
 
 /*================================= Utility functions ======================== */
 
-/**
- * Utility function to determine whether durability is enabled.
- * Durability is enabled when any registered durability provider reports
- * itself as enabled (e.g. the built-in AOF provider enables when
- * appendonly + appendfsync always).
- */
-int isDurabilityEnabled(void) {
-    return anyDurabilityProviderEnabled();
+/* Returns the replication offset acknowledged by the AOF fsync subsystem,
+ * i.e. the most recent offset whose data has been persisted to disk.
+ *
+ * Uses fsynced_reploff_pending directly instead of fsynced_reploff so that
+ * when async AOF flushing is used (BIO threads), the latest fsync progress
+ * is observed immediately rather than waiting for the next beforeSleep()
+ * iteration to copy it into fsynced_reploff. Falls back to fsynced_reploff
+ * if pending is still 0 but a non-zero fsynced_reploff has been recorded
+ * (e.g. after server load). */
+static long long aofAckedOffset(void) {
+    long long fsynced_offset = atomic_load_explicit(&server.fsynced_reploff_pending, memory_order_relaxed);
+    if (fsynced_offset == 0 && server.fsynced_reploff > 0) {
+        fsynced_offset = server.fsynced_reploff;
+    }
+    return fsynced_offset;
 }
 
-/**
- * Utility function to determine whether durability is enabled on a primary node.
- */
-int isPrimaryDurabilityEnabled(void) {
-    return isDurabilityEnabled() && iAmPrimary();
+/* Utility function to determine whether AOF is configured for synchronous
+ * reply-blocking — i.e. AOF is enabled and appendfsync is set to always. */
+int isAofReplyBlockingEnabled(void) {
+    return server.aof_state != AOF_OFF && server.aof_fsync == AOF_FSYNC_ALWAYS;
+}
+
+/* Returns the replication offset that is durable in the local AOF: the
+ * fsynced offset, or the value frozen by DEBUG reply-blocking-pause. Returns
+ * primary_repl_offset when AOF reply blocking is not in effect. */
+long long getAofDurableOffset(void) {
+    if (!isAofReplyBlockingEnabled()) {
+        return server.primary_repl_offset;
+    }
+    /* While the initial rewrite after CONFIG SET appendonly yes runs, fsyncs go
+     * to an INCR file the manifest does not reference yet, so nothing new is
+     * durable until the rewrite completes. Hold at what was already released,
+     * like beforeSleep() holds fsynced_reploff for WAITAOF. */
+    if (server.aof_state == AOF_WAIT_REWRITE) {
+        return server.reply_blocking.previous_acked_offset;
+    }
+    if (server.reply_blocking.aof_paused) {
+        return server.reply_blocking.aof_paused_offset;
+    }
+    return aofAckedOffset();
+}
+
+/* Sync replication: replies are also held until min-sync-replicas replicas in
+ * the in-sync replica set (ISR) have acknowledged the write. */
+int isReplicationReplyBlockingEnabled(void) {
+    return server.min_sync_replicas > 0;
+}
+
+/* True when any source of durable acknowledgements (AOF fsync, sync replicas)
+ * is configured. */
+static int isAnyReplyBlockingSourceEnabled(void) {
+    return isAofReplyBlockingEnabled() || isReplicationReplyBlockingEnabled();
+}
+
+/* Compute the offset acknowledged by the sync replicas: the minimum ack offset
+ * over all online replicas in the ISR (is_in_sync set).
+ *
+ * A replica is in the ISR when:
+ *   1. It declared REPLICA_CAPA_SYNC capability via REPLCONF
+ *   2. Its repl_ack_off caught up to the committed offset
+ *   3. It has not timed out (checked by replicationCron)
+ *
+ * Returns -1 when fewer than min-sync-replicas replicas are in the ISR, which
+ * blocks progress (the shard is not writable). */
+static long long replicationAckedOffset(void) {
+    listIter li;
+    listNode *ln;
+    int sync_replica_count = 0;
+    long long min_offset = LLONG_MAX;
+
+    listRewind(server.replicas, &li);
+    while ((ln = listNext(&li))) {
+        client *replica = ln->value;
+
+        /* Only consider replicas that are online and in the ISR. */
+        if (replica->repl_data->repl_state != REPLICA_STATE_ONLINE) continue;
+        if (!replica->repl_data->is_in_sync) continue;
+
+        sync_replica_count++;
+        if (replica->repl_data->repl_ack_off < min_offset) {
+            min_offset = replica->repl_data->repl_ack_off;
+        }
+    }
+
+    if (sync_replica_count < server.min_sync_replicas) return -1;
+    return (min_offset == LLONG_MAX) ? 0 : min_offset;
+}
+
+/* Returns the offset acknowledged by the sync replicas, or the value frozen by
+ * DEBUG reply-blocking-pause replication. Returns primary_repl_offset when sync
+ * replication is not in effect. */
+static long long getReplicationDurableOffset(void) {
+    if (!isReplicationReplyBlockingEnabled()) return server.primary_repl_offset;
+    if (server.reply_blocking.replication_paused) return server.reply_blocking.replication_paused_offset;
+    return replicationAckedOffset();
+}
+
+/* Returns the consensus offset that client replies are held against: the
+ * minimum over the enabled sources (local AOF, sync replicas), so a write is
+ * released only once every enabled source has acknowledged it. -1 means no
+ * progress is possible. */
+long long getDurablyCommittedOffset(void) {
+    long long aof = getAofDurableOffset();
+    long long repl = getReplicationDurableOffset();
+    return repl < aof ? repl : aof;
+}
+
+/* Pause / resume sync-replication reply-blocking progress (via DEBUG command),
+ * like pauseAofReplyBlocking() / resumeAofReplyBlocking(). */
+void pauseReplicationReplyBlocking(void) {
+    server.reply_blocking.replication_paused_offset = replicationAckedOffset();
+    server.reply_blocking.replication_paused = true;
+    serverLog(LL_NOTICE, "Paused replication reply-blocking (frozen at offset %lld)",
+              server.reply_blocking.replication_paused_offset);
+}
+
+void resumeReplicationReplyBlocking(void) {
+    server.reply_blocking.replication_paused = false;
+    notifyReplyBlockingProgress();
+    serverLog(LL_NOTICE, "Resumed replication reply-blocking");
+}
+
+/* Pause AOF reply-blocking progress (via DEBUG command).
+ * The current AOF-acked offset is captured and frozen — any writes after
+ * the pause point will block until reply-blocking is resumed and catches up. */
+void pauseAofReplyBlocking(void) {
+    /* Snapshot the current acked offset before pausing so that writes
+     * already acknowledged remain unblocked. */
+    server.reply_blocking.aof_paused_offset = aofAckedOffset();
+    server.reply_blocking.aof_paused = true;
+    serverLog(LL_NOTICE, "Paused AOF reply-blocking (frozen at offset %lld)",
+              server.reply_blocking.aof_paused_offset);
+}
+
+/* Resume AOF reply-blocking progress (via DEBUG command).
+ * After resuming, triggers a reply-blocking progress check to unblock any
+ * clients that can now proceed. */
+void resumeAofReplyBlocking(void) {
+    server.reply_blocking.aof_paused = false;
+    // Trigger a reply-blocking check to unblock any clients that can now proceed
+    notifyReplyBlockingProgress();
+    serverLog(LL_NOTICE, "Resumed AOF reply-blocking");
+}
+
+/* Utility function to determine whether reply-blocking is enabled.
+ * Reply-blocking is enabled when the BIO AOF offload path is active and a
+ * durable source is configured: AOF reply-blocking (appendonly + appendfsync
+ * always) or sync replication (min-sync-replicas > 0). */
+int isReplyBlockingEnabled(void) {
+    return server.bio_aof_offload_enabled && isAnyReplyBlockingSourceEnabled();
+}
+
+// Utility function to determine whether reply-blocking is enabled on a primary node.
+int isPrimaryReplyBlockingEnabled(void) {
+    return isReplyBlockingEnabled() && iAmPrimary();
 }
 
 /*================================= Client management ======================== */
 
-/**
- * Reset the pre-execution offset fields.
- */
+// Reset the pre-execution offset fields.
 static void resetPreExecutionOffset(struct client *c) {
-    c->clientDurabilityInfo.offset.recorded = false;
-    c->clientDurabilityInfo.offset.reply_block = NULL;
-    c->clientDurabilityInfo.offset.byte_offset = 0;
+    c->reply_blocking_state.offset.recorded = false;
+    c->reply_blocking_state.offset.reply_block = NULL;
+    c->reply_blocking_state.offset.byte_offset = 0;
 }
 
 
-/**
- * Track the pre-execution position in the client reply COB.
- */
+// Track the pre-execution position in the client reply COB.
 static void trackCommandPreExecutionPosition(struct client *c) {
+    /* A recorded position means the reply may be held, which needs the
+     * per-client lists. A client created while reply blocking was off (e.g.
+     * while a replica's AOF was stopped to load the primary's RDB) has none,
+     * and an AOF restart turns the feature on without visiting every client. */
+    replyBlockingClientInit(c);
     resetPreExecutionOffset(c);
     list *reply = c->reply;
     int bufpos = c->bufpos;
 
     if (reply != NULL && listLength(reply) > 0) {
         listNode *last_reply_block = listLast(reply);
-        c->clientDurabilityInfo.offset.reply_block = last_reply_block;
-        c->clientDurabilityInfo.offset.byte_offset = ((clientReplyBlock *)listNodeValue(last_reply_block))->used;
+        clientReplyBlock *tail = listNodeValue(last_reply_block);
+        c->reply_blocking_state.offset.reply_block = last_reply_block;
+        c->reply_blocking_state.offset.byte_offset = tail->used;
+        /* In an encoded buffer the next reply could extend the current payload
+         * header across the boundary; a write capped at the boundary would then
+         * stop in the middle of it. Start a new header instead. */
+        tail->last_header = NULL;
     } else if (bufpos > 0) {
-        c->clientDurabilityInfo.offset.reply_block = NULL;
-        c->clientDurabilityInfo.offset.byte_offset = bufpos;
+        c->reply_blocking_state.offset.reply_block = NULL;
+        c->reply_blocking_state.offset.byte_offset = bufpos;
     }
-    c->clientDurabilityInfo.offset.recorded = true;
+    c->last_header = NULL;
+    c->reply_blocking_state.offset.recorded = true;
 }
 
-/**
- * If the client is currently waiting for durability acknowledgement,
- * mark it unblocked and reset the client flags.
- */
+/* If the client is currently waiting for reply-blocking acknowledgement,
+ * mark it unblocked and reset the client flags. */
 static int unblockClientWaitingAck(struct client *c) {
-    if (c->clientDurabilityInfo.durability_blocked) {
-        listNode *node = listSearchKey(server.durability.clients_waiting_ack, c);
-        if (node != NULL) {
-            listDelNode(server.durability.clients_waiting_ack, node);
-            c->clientDurabilityInfo.durability_blocked = 0;
-            return 1;
-        }
-    }
-    return 0;
+    if (c->reply_blocking_state.waiting_ack_node == NULL) return 0;
+    listDelNode(server.reply_blocking.clients_waiting_ack, c->reply_blocking_state.waiting_ack_node);
+    c->reply_blocking_state.waiting_ack_node = NULL;
+    return 1;
 }
 
-/**
- * Initialize the durability client attributes when client is created.
- */
-void durabilityClientInit(client *c) {
-    if (!isDurabilityEnabled()) {
+// Initialize the reply-blocking client attributes when client is created.
+void replyBlockingClientInit(client *c) {
+    if (!isReplyBlockingEnabled()) {
         return;
     }
-    if (c->clientDurabilityInfo.blocked_responses == NULL) {
-        c->clientDurabilityInfo.blocked_responses = listCreate();
-        listSetFreeMethod(c->clientDurabilityInfo.blocked_responses, zfree);
+    if (c->reply_blocking_state.blocked_responses == NULL) {
+        c->reply_blocking_state.blocked_responses = listCreate();
+        listSetFreeMethod(c->reply_blocking_state.blocked_responses, zfree);
         resetPreExecutionOffset(c);
-        c->clientDurabilityInfo.current_command_repl_offset = -1;
-        c->clientDurabilityInfo.module_cmd_blocking_offset = -1;
-        c->clientDurabilityInfo.pending_notify_tasks = listCreate();
+        c->reply_blocking_state.current_command_repl_offset = -1;
+        c->reply_blocking_state.deferred_block_offset = -1;
+        c->reply_blocking_state.pending_notify_tasks = listCreate();
     }
 }
 
-/**
- * Reset the client durability attributes during a client clean-up.
- */
-void durabilityClientReset(client *c) {
+// Reset the client reply-blocking attributes during a client clean-up.
+void replyBlockingClientReset(client *c) {
+    /* waiting_ack_node is set iff the client is on clients_waiting_ack. */
+    debugServerAssert(c->reply_blocking_state.waiting_ack_node == NULL ||
+                      listNodeValue(c->reply_blocking_state.waiting_ack_node) == c);
     if (unblockClientWaitingAck(c)) {
-        server.durability.clients_disconnected_before_unblocking++;
+        server.reply_blocking.clients_disconnected_before_unblocking++;
     }
 
-    if (c->clientDurabilityInfo.blocked_responses != NULL) {
-        listRelease(c->clientDurabilityInfo.blocked_responses);
-        c->clientDurabilityInfo.blocked_responses = NULL;
+    if (c->reply_blocking_state.blocked_responses != NULL) {
+        listRelease(c->reply_blocking_state.blocked_responses);
+        c->reply_blocking_state.blocked_responses = NULL;
     }
 
-    if (c->clientDurabilityInfo.pending_notify_tasks != NULL) {
-        durableTaskNotifyClientDestroy(c->clientDurabilityInfo.pending_notify_tasks);
-        listRelease(c->clientDurabilityInfo.pending_notify_tasks);
-        c->clientDurabilityInfo.pending_notify_tasks = NULL;
+    if (c->reply_blocking_state.pending_notify_tasks != NULL) {
+        postCommitTaskNotifyClientDestroy(c->reply_blocking_state.pending_notify_tasks);
+        listRelease(c->reply_blocking_state.pending_notify_tasks);
+        c->reply_blocking_state.pending_notify_tasks = NULL;
     }
 
+    if (monitor_snapshot_owner == c) finalizeMonitors(c, -1);
     resetPreExecutionOffset(c);
-    c->clientDurabilityInfo.current_command_repl_offset = -1;
-    c->clientDurabilityInfo.module_cmd_blocking_offset = -1;
+    c->reply_blocking_state.current_command_repl_offset = -1;
 }
 
-/**
- * Determines if a client is doing a transaction or not.
- */
+// Determines if a client is doing a transaction or not.
 static bool isClientDoingTransaction(client *c) {
     return c->cmd->proc == execCommand || IS_SCRIPT_CALL_CMD(c->cmd);
 }
 
-/**
- * Returns true if the client is eligible for response tracking.
+/* Returns true if the client is eligible for response tracking.
  * [WBL] On a replica, the primary's replication connection must NOT be tracked —
- * blocking it would stall the replication stream.
- */
+ * blocking it would stall the replication stream. */
 static bool clientEligibleForResponseTracking(client *c) {
     if (c->cmd == NULL) return false;
 
     /* [WBL] Never block the replication stream from the primary. */
     if (c->flag.primary) return false;
 
-    bool is_keyspace_informational_cmd = IS_KEYSPACE_INFORMATIONAL(c->cmd);
+    bool is_keyspace_global_cmd = IS_KEYSPACE_GLOBAL(c->cmd);
 
-    if ((c->cmd->flags & CMD_ADMIN) && !(c->cmd->flags & CMD_WRITE) && !is_keyspace_informational_cmd) {
+    if ((c->cmd->flags & CMD_ADMIN) && !(c->cmd->flags & CMD_WRITE) && !is_keyspace_global_cmd) {
         return false;
     }
 
-    return ((c->cmd->flags & (CMD_WRITE | CMD_READONLY)) || isClientDoingTransaction(c) || is_keyspace_informational_cmd || isFunctionStoreRWCommand(c));
+    return ((c->cmd->flags & (CMD_WRITE | CMD_READONLY)) || isClientDoingTransaction(c) || is_keyspace_global_cmd || isFunctionStoreRWCommand(c));
 }
 
-/**
- * Check if we only allow client to receive up to a certain
- * position in the client reply buffer.
- */
+/* True for a MONITOR client while a command it is recording is still running.
+ * Its output for that command has no boundary until finalize, and finalize
+ * needs the recorded position to still exist, so nothing is written to it in
+ * the meantime (e.g. from processEventsWhileBlocked() during a busy script). */
+bool isMonitorOutputHeld(const client *c) {
+    return c->flag.monitor && c->reply_blocking_state.offset.recorded;
+}
+
+/* Record each MONITOR's COB position for client c's command. */
+static void snapshotMonitors(client *c) {
+    if (monitor_snapshot_owner != NULL || !isCommandReplicatedToMonitors()) return;
+    monitor_snapshot_owner = c;
+    listNode *ln;
+    listIter li;
+    listRewind(server.monitors, &li);
+    while ((ln = listNext(&li))) {
+        client *monitor = ln->value;
+        /* The recorded position points into the monitor's reply list, so no
+         * write may free that block before finalize. Mark the monitor held
+         * first, then finish an in-flight I/O write here, so the post-write
+         * cleanup that frees blocks runs before the snapshot and does not
+         * dispatch a new write. */
+        monitor->reply_blocking_state.offset.recorded = true;
+        waitForClientIO(monitor);
+        if (monitor->io_write_state == CLIENT_COMPLETED_IO) processClientIOWriteDone(monitor);
+        trackCommandPreExecutionPosition(monitor);
+    }
+}
+
+/* Apply the boundary for client c's command to every MONITOR (offset -1: no
+ * hold) and let them write again. A no-op unless c recorded the positions. */
+static void finalizeMonitors(client *c, long long blockingReplOffset) {
+    if (monitor_snapshot_owner != c) return;
+    monitor_snapshot_owner = NULL;
+    listNode *ln;
+    listIter li;
+    listRewind(server.monitors, &li);
+    while ((ln = listNext(&li))) {
+        client *monitor = ln->value;
+        if (!monitor->reply_blocking_state.offset.recorded) continue;
+        if (blockingReplOffset != -1 && isPrimaryReplyBlockingEnabled()) {
+            blockClientOnReplOffset(monitor, blockingReplOffset);
+        } else {
+            resetPreExecutionOffset(monitor);
+        }
+        /* Writes skipped while held dropped it from the pending-write queue. */
+        if (clientHasPendingReplies(monitor)) putClientInPendingWriteQueue(monitor);
+    }
+}
+
+/* Check if we only allow client to receive up to a certain
+ * position in the client reply buffer. */
 inline bool isClientReplyBufferLimited(client *c) {
-    return c->clientDurabilityInfo.blocked_responses != NULL &&
-           listLength(c->clientDurabilityInfo.blocked_responses) > 0;
+    return c->reply_blocking_state.blocked_responses != NULL &&
+           listLength(c->reply_blocking_state.blocked_responses) > 0;
 }
 
 /*================================= Response blocking ======================= */
 
-/**
- * Store the metrics for a command when blocking
+/* Store the metrics for a command when blocking
  * @param c The client that issued the command.
- * @param br The Node at which commands are blocked.
- */
+ * @param br The Node at which commands are blocked. */
 static inline void initCmdMetrics(const client *c, struct blockedResponse *br) {
     if (!c->cmd) {
-        // If client command is NULL, eg Monitor clients, we do not start the timer
-        // because we do not emit metrics for this response.
+        /* If client command is NULL, eg Monitor clients, we do not start the timer
+         * because we do not emit metrics for this response. */
         br->blocked_command_timer = 0;
         return;
     }
@@ -182,30 +372,28 @@ static inline void initCmdMetrics(const client *c, struct blockedResponse *br) {
     elapsedStart(&br->blocked_command_timer);
     // For end-to-end latency measurement
 
-    if (c->clientDurabilityInfo.durability_flags & DURABILITY_CLIENT_LAST_CMD_WRITE) {
-        server.durability.write_responses_blocked++;
-        br->cmd_type = DURABLE_BLOCKED_CMD_WRITE;
-    } else if (c->clientDurabilityInfo.durability_flags & DURABILITY_CLIENT_LAST_CMD_READONLY) {
-        server.durability.read_responses_blocked++;
-        br->cmd_type = DURABLE_BLOCKED_CMD_READ;
+    if (c->reply_blocking_state.reply_blocking_flags & REPLY_BLOCKING_CLIENT_LAST_CMD_WRITE) {
+        server.reply_blocking.write_responses_blocked++;
+        br->cmd_type = REPLY_BLOCKED_CMD_WRITE;
+    } else if (c->reply_blocking_state.reply_blocking_flags & REPLY_BLOCKING_CLIENT_LAST_CMD_READONLY) {
+        server.reply_blocking.read_responses_blocked++;
+        br->cmd_type = REPLY_BLOCKED_CMD_READ;
     } else {
-        server.durability.other_responses_blocked++;
-        br->cmd_type = DURABLE_BLOCKED_CMD_OTHER;
+        server.reply_blocking.other_responses_blocked++;
+        br->cmd_type = REPLY_BLOCKED_CMD_OTHER;
     }
 }
 
 
-/**
- * Block the last response if it exists in the client output buffer.
- */
+// Block the last response if it exists in the client output buffer.
 static void blockLastResponseIfExist(const client *c, const long long blocked_offset) {
-    serverAssert(c->clientDurabilityInfo.offset.recorded);
+    serverAssert(c->reply_blocking_state.offset.recorded);
 
     bool has_new_response = false;
     listNode *disallowed_reply_block =
-        c->clientDurabilityInfo.offset.reply_block;
+        c->reply_blocking_state.offset.reply_block;
     size_t disallowed_byte_offset =
-        c->clientDurabilityInfo.offset.byte_offset;
+        c->reply_blocking_state.offset.byte_offset;
 
     if (disallowed_reply_block == NULL) {
         if ((size_t)c->bufpos > disallowed_byte_offset) {
@@ -232,119 +420,130 @@ static void blockLastResponseIfExist(const client *c, const long long blocked_of
         new_block->disallowed_byte_offset = disallowed_byte_offset;
         new_block->disallowed_reply_block = disallowed_reply_block;
         initCmdMetrics(c, new_block);
-        listAddNodeTail(c->clientDurabilityInfo.blocked_responses, new_block);
+        listAddNodeTail(c->reply_blocking_state.blocked_responses, new_block);
     }
 }
 
 
-/**
- * Process the metrics of all commands blocked at a BlockedResponse while unblocking
- * @param br The Node at which commands are blocked.
- */
+/* Process the metrics of all commands blocked at a BlockedResponse while unblocking
+ * @param br The Node at which commands are blocked. */
 static inline void processCmdMetrics(struct blockedResponse *br) {
-    if (br->blocked_command_timer == 0) return; // Do not count the response if timer is not started
+    if (br->blocked_command_timer == 0) return; /* Do not count the response if timer is not started */
 
     unsigned long long duration = elapsedUs(br->blocked_command_timer);
 
-    if (br->cmd_type == DURABLE_BLOCKED_CMD_WRITE) {
-        server.durability.write_responses_blocked_cumulative_time_us += duration;
-        server.durability.write_responses_unblocked++;
-    } else if (br->cmd_type == DURABLE_BLOCKED_CMD_READ) {
-        server.durability.read_responses_blocked_cumulative_time_us += duration;
-        server.durability.read_responses_unblocked++;
+    if (br->cmd_type == REPLY_BLOCKED_CMD_WRITE) {
+        server.reply_blocking.write_responses_blocked_cumulative_time_us += duration;
+        server.reply_blocking.write_responses_unblocked++;
+    } else if (br->cmd_type == REPLY_BLOCKED_CMD_READ) {
+        server.reply_blocking.read_responses_blocked_cumulative_time_us += duration;
+        server.reply_blocking.read_responses_unblocked++;
     } else {
-        server.durability.other_responses_blocked_cumulative_time_us += duration;
-        server.durability.other_responses_unblocked++;
+        server.reply_blocking.other_responses_blocked_cumulative_time_us += duration;
+        server.reply_blocking.other_responses_unblocked++;
     }
 }
-/**
- * Unblocks the first response in the client's blocked responses list.
- */
+// Unblocks the first response in the client's blocked responses list.
 static void unblockFirstResponse(const client *c) {
-    serverAssert(c->clientDurabilityInfo.blocked_responses != NULL);
-    if (listLength(c->clientDurabilityInfo.blocked_responses) > 0) {
-        listNode *first = listFirst(c->clientDurabilityInfo.blocked_responses);
+    serverAssert(c->reply_blocking_state.blocked_responses != NULL);
+    if (listLength(c->reply_blocking_state.blocked_responses) > 0) {
+        listNode *first = listFirst(c->reply_blocking_state.blocked_responses);
         processCmdMetrics(listNodeValue(first));
-        listDelNode(c->clientDurabilityInfo.blocked_responses, first);
+        listDelNode(c->reply_blocking_state.blocked_responses, first);
     }
 }
 
-/**
- * Determines if we need to block on a given replication offset for a given client.
- */
+// Determines if we need to block on a given replication offset for a given client.
 static int isBlockingNeededForOffset(const client *c, const long long offset) {
-    if (offset == -1 || anyDurabilityProviderEnabled() == 0) {
+    /* An offset at or below the last acknowledged one is already durable.
+     * Holding at it would wait for the next ack to advance past it, i.e. for
+     * an unrelated write (e.g. a module write that propagated nothing). */
+    if (offset == -1 || offset <= server.reply_blocking.previous_acked_offset || isAnyReplyBlockingSourceEnabled() == 0) {
         return 0;
     }
 
-    if (listLength(c->clientDurabilityInfo.blocked_responses) == 0)
+    if (listLength(c->reply_blocking_state.blocked_responses) == 0)
         return 1;
 
-    listNode *last_response = listLast(c->clientDurabilityInfo.blocked_responses);
+    listNode *last_response = listLast(c->reply_blocking_state.blocked_responses);
     long long previous_offset = ((blockedResponse *)listNodeValue(last_response))->primary_repl_offset;
     return previous_offset < offset;
 }
 
-/**
- * Block a given client on the specified replication offset if applicable.
- */
+// Block a given client on the specified replication offset if applicable.
 void blockClientOnReplOffset(client *c, const long long blockingReplOffset) {
-    serverAssert(isDurabilityEnabled());
+    serverAssert(isReplyBlockingEnabled());
 
-    if (isBlockingNeededForOffset(c, blockingReplOffset)) {
+    /* A client scheduled for async close is freed at the next beforeSleep and
+     * is refused all writes until then, so there is no reply to hold. Without a
+     * recorded start position (the command began before reply blocking was
+     * turned on, e.g. CONFIG SET appendfsync always) there is no boundary to
+     * hold at either. */
+    if (!c->flag.close_asap && c->reply_blocking_state.offset.recorded &&
+        isBlockingNeededForOffset(c, blockingReplOffset)) {
+        /* A MONITOR client held on another client's write has no command. */
         serverLog(LL_DEBUG, "client should be blocked at offset %lld, cmd=%s, is_write=%d",
-                  blockingReplOffset, c->cmd->declared_name, (c->cmd->flags & CMD_WRITE) ? 1 : 0);
+                  blockingReplOffset, c->cmd ? c->cmd->declared_name : "(none)",
+                  (c->cmd && (c->cmd->flags & CMD_WRITE)) ? 1 : 0);
         blockLastResponseIfExist(c, blockingReplOffset);
-        if (!c->clientDurabilityInfo.durability_blocked) {
-            listAddNodeTail(server.durability.clients_waiting_ack, c);
-            c->clientDurabilityInfo.durability_blocked = 1;
-            server.durability.clients_blocked++;
+        if (c->reply_blocking_state.waiting_ack_node == NULL) {
+            listAddNodeTail(server.reply_blocking.clients_waiting_ack, c);
+            c->reply_blocking_state.waiting_ack_node = listLast(server.reply_blocking.clients_waiting_ack);
+            server.reply_blocking.clients_blocked++;
         }
     }
 
     resetPreExecutionOffset(c);
 }
 
-/**
- * Utility function to determine whether a command should be replicated to monitors.
- */
+// Utility function to determine whether a command should be replicated to monitors.
 static inline int isCommandReplicatedToMonitors(void) {
     return listLength(server.monitors) && !server.loading;
 }
 
-/**
- * Block a client and all connected MONITOR clients on the specified replication offset.
- */
-static void blockClientAndMonitorsOnReplOffset(client *c, long long blockingReplOffset) {
-    blockClientOnReplOffset(c, blockingReplOffset);
+/* Snapshot the COB tail just before a parked deferred reply is committed, so the
+ * durability boundary lands on the bytes about to be appended. Snapshotting here
+ * (rather than reusing the pre-execution snapshot) keeps the raw reply-list pointer
+ * from dangling across the module-blocked window. */
+void replyBlockingSnapshotBeforeDeferredReplyCommit(client *c) {
+    if (!isPrimaryReplyBlockingEnabled()) return;
+    if (c->reply_blocking_state.deferred_block_offset == -1) return;
+    trackCommandPreExecutionPosition(c);
+}
 
-    if (isCommandReplicatedToMonitors()) {
-        listNode *ln;
-        listIter li;
-        listRewind(server.monitors, &li);
-        while ((ln = listNext(&li))) {
-            client *monitor = ln->value;
-            blockClientOnReplOffset(monitor, blockingReplOffset);
-        }
+/* Apply the stashed durability boundary over the deferred reply just committed
+ * into the COB (paired with the snapshot above). */
+void replyBlockingApplyDeferredReplyBoundary(client *c) {
+    if (c->reply_blocking_state.deferred_block_offset == -1) return;
+    long long offset = c->reply_blocking_state.deferred_block_offset;
+    c->reply_blocking_state.deferred_block_offset = -1;
+    if (!isPrimaryReplyBlockingEnabled()) {
+        resetPreExecutionOffset(c);
+        return;
+    }
+    /* Already durable (module held the client past the ack): send now, no boundary.
+     * Otherwise hold the reply until the ack advances the consensus offset. */
+    if (getDurablyCommittedOffset() >= offset) {
+        resetPreExecutionOffset(c);
+    } else {
+        blockClientOnReplOffset(c, offset);
     }
 }
 
 /*================================= Unblocking ============================== */
 
-/**
- * Unblock responses and tasks of all blocked clients with a given consensus acked offset.
- */
-void unblockResponsesWithAckOffset(const durable_t *durability, const long long consensus_ack_offset) {
+// Unblock responses and tasks of all blocked clients with a given consensus acked offset.
+void unblockResponsesWithAckOffset(const reply_blocking_t *rb_state, const long long consensus_ack_offset) {
     serverLog(LL_DEBUG, "unblocking clients for consensus offset %lld,", consensus_ack_offset);
     listIter li, li_response;
     listNode *ln, *ln_response;
-    listRewind(durability->clients_waiting_ack, &li);
+    listRewind(rb_state->clients_waiting_ack, &li);
     blockedResponse *br = NULL;
     while ((ln = listNext(&li))) {
         client *c = ln->value;
 
-        serverAssert(c->clientDurabilityInfo.blocked_responses != NULL);
-        listRewind(c->clientDurabilityInfo.blocked_responses, &li_response);
+        serverAssert(c->reply_blocking_state.blocked_responses != NULL);
+        listRewind(c->reply_blocking_state.blocked_responses, &li_response);
         bool unblocked_responses = false;
 
         while ((ln_response = listNext(&li_response))) {
@@ -358,9 +557,9 @@ void unblockResponsesWithAckOffset(const durable_t *durability, const long long 
                 break;
             }
         }
-        if (listLength(c->clientDurabilityInfo.blocked_responses) == 0) {
+        if (listLength(c->reply_blocking_state.blocked_responses) == 0) {
             if (unblockClientWaitingAck(c)) {
-                server.durability.clients_unblocked++;
+                server.reply_blocking.clients_unblocked++;
             }
         }
         if (unblocked_responses) {
@@ -373,20 +572,58 @@ void unblockResponsesWithAckOffset(const durable_t *durability, const long long 
 
 /*================================= Post-ack handlers ======================= */
 
-void notifyDurabilityProgress(void) {
-    if (!isDurabilityEnabled()) {
+/* The durably committed offset as last seen on the main thread, for threads
+ * that must not send data past it (the forkless sync thread). LLONG_MAX when
+ * reply blocking is not in effect, so nothing waits. */
+static _Atomic long long durable_offset_for_threads = LLONG_MAX;
+
+/* Publish the current durably committed offset for other threads. */
+void replyBlockingPublishDurableOffset(void) {
+    long long offset = isPrimaryReplyBlockingEnabled() ? getDurablyCommittedOffset() : LLONG_MAX;
+    atomic_store_explicit(&durable_offset_for_threads, offset, memory_order_release);
+}
+
+/* Read the offset published by replyBlockingPublishDurableOffset(). Safe to
+ * call from any thread. */
+long long replyBlockingDurableOffsetForThreads(void) {
+    return atomic_load_explicit(&durable_offset_for_threads, memory_order_acquire);
+}
+
+void notifyReplyBlockingProgress(void) {
+    replyBlockingPublishDurableOffset();
+    if (!isReplyBlockingEnabled()) {
         return;
     }
 
-    durable_t *durability = &server.durability;
-    const long long consensus_ack_offset = getDurabilityConsensusOffset();
-    if (consensus_ack_offset <= durability->previous_acked_offset) {
+    reply_blocking_t *rb_state = &server.reply_blocking;
+
+    /* Re-arm parked replicas on every call, independent of the consensus
+     * check below: the send cap follows the AOF offset, not the consensus, and
+     * a "did the offset advance" guard would fail after a demotion and
+     * re-promotion, where the replication offset drops below any watermark
+     * kept from the previous history. The wake is a no-op unless a replica has
+     * sendable bytes and no write handler. */
+    wakeReplicasForDurableProgress();
+
+    /* Don't release replies or run deferred tasks (pub/sub publishes,
+     * invalidation pushes) while a busy script or a yielding module command is
+     * in the middle of its execution: other clients would observe effects
+     * interleaved with it. The next regular beforeSleep catches up. */
+    if (ProcessingEventsWhileBlocked || server.execution_nesting) return;
+
+    /* Every writer ends its execution unit with postExecutionUnitOperations(),
+     * which stamps the keys and tasks it registered. Anything still pending
+     * here means a writer skipped it: its keys would hold reads forever. */
+    debugServerAssert(server.also_propagate.numops || (!hasPendingUncommittedData() && !hasPendingDeferredTasks()));
+
+    const long long consensus_ack_offset = getDurablyCommittedOffset();
+    if (consensus_ack_offset <= rb_state->previous_acked_offset) {
         return;
     }
 
-    durability->previous_acked_offset = consensus_ack_offset;
+    rb_state->previous_acked_offset = consensus_ack_offset;
     drainCommittedKeys(consensus_ack_offset);
-    unblockResponsesWithAckOffset(durability, consensus_ack_offset);
+    unblockResponsesWithAckOffset(rb_state, consensus_ack_offset);
 }
 
 /*================================= Function Store Tracking ================== */
@@ -399,75 +636,65 @@ bool isFunctionStoreRWCommand(client *c) {
     return isFunctionRWCommand(c) || c->cmd->proc == fcallCommand || c->cmd->proc == fcallroCommand;
 }
 
-bool isDurableFunctionStoreUncommitted(void) {
-    return server.durability.func_store_blocking_offset > server.durability.previous_acked_offset;
+bool isUncommittedFunctionStore(void) {
+    return server.reply_blocking.func_store_blocking_offset > server.reply_blocking.previous_acked_offset;
 }
 
 void handleUncommittedFunctionStore(void) {
     if (server.execution_nesting) {
-        server.durability.processed_func_write_in_transaction = true;
+        server.reply_blocking.processed_func_write_in_transaction = true;
     } else {
-        server.durability.func_store_blocking_offset = server.primary_repl_offset;
+        server.reply_blocking.func_store_blocking_offset = server.primary_repl_offset;
     }
 }
 
 long long getFuncStoreBlockingOffset(void) {
-    return server.durability.func_store_blocking_offset;
+    return server.reply_blocking.func_store_blocking_offset;
 }
 
 void updateFuncStoreBlockingOffsetForWrite(long long blocking_repl_offset) {
-    if (server.durability.processed_func_write_in_transaction) {
-        server.durability.func_store_blocking_offset = blocking_repl_offset;
-        server.durability.processed_func_write_in_transaction = false;
+    if (server.reply_blocking.processed_func_write_in_transaction) {
+        server.reply_blocking.func_store_blocking_offset = blocking_repl_offset;
+        server.reply_blocking.processed_func_write_in_transaction = false;
+    }
+}
+
+/*========================== Read dependency tracking ======================= */
+
+/* Raise the reply-blocking offset of the client command being executed when it
+ * looks up a key that is not durable yet. Called from lookupKey(), so it sees
+ * keys the command reads that are not in its key specs: SORT BY/GET patterns,
+ * keys opened by modules through the low-level key API, and the destination of
+ * COPY and MOVE in another database. Reads are attributed to
+ * server.current_client, the client whose command runs, also for nested
+ * script and module calls. Only commands tracked for reply blocking (with a
+ * recorded start position) are affected. */
+void replyBlockingTrackKeyRead(serverDb *db, robj *key) {
+    client *c = server.current_client;
+    if (c == NULL || !c->reply_blocking_state.offset.recorded || !isPrimaryReplyBlockingEnabled()) return;
+
+    const long long acked = server.reply_blocking.previous_acked_offset;
+    long long offset = db->dirty_repl_offset > acked ? db->dirty_repl_offset : -1;
+    if (hashtableSize(db->uncommitted_keys) > 0) {
+        long long key_offset = getUncommittedKeyOffset(objectGetVal(key), db, acked);
+        if (key_offset > offset) offset = key_offset;
+    }
+    if (offset > c->reply_blocking_state.current_command_repl_offset) {
+        c->reply_blocking_state.current_command_repl_offset = offset;
     }
 }
 
 /*========================== Command offset calculation ===================== */
 
-/**
- * Process a single replicating command for consistent write blocking.
- */
+/* Process a single command that propagated something. The keys it modified are
+ * tracked by signalModifiedKey(), so all that is left is the reply: hold it at
+ * the post-propagation offset. That covers everything the command read too,
+ * since the log is ordered. This applies to reads that propagate as well, such
+ * as a lazy expiry DEL during MGET, which must not skip the check of the other
+ * dirty keys they return. */
 static long long getSingleCommandBlockingOffsetForReplicatingCommand(client *c) {
-    if (!(c->cmd->flags & CMD_WRITE)) {
-        return -1;
-    }
-
     if (isFunctionRWCommand(c)) {
         handleUncommittedFunctionStore();
-    } else {
-        getKeysResult result;
-        initGetKeysResult(&result);
-        /* Use key specs directly to extract key positions. We avoid
-         * getKeysFromCommand / getkeys_proc because some commands (e.g. SET)
-         * rewrite argv during execution (EX→PXAT) and the custom getkeys_proc
-         * may crash on the rewritten embedded-string robj. We only need key
-         * positions here, not per-key flags, so key specs are sufficient. */
-        int numkeys = getKeysUsingKeySpecs(c->cmd, c->argv, c->argc, GET_KEYSPEC_DEFAULT, &result);
-        keyReference *keys = result.keys;
-        if (numkeys > 0) {
-            if (c->cmd->proc == moveCommand) {
-                int dest_dbid = -1;
-                if (getIntFromObject(c->argv[2], &dest_dbid) == C_ERR) {
-                    getKeysFreeResult(&result);
-                    return -1;
-                }
-                handleUncommittedKeyForClient(c, c->argv[keys[0].pos], server.db[dest_dbid]);
-            } else if (c->cmd->proc == copyCommand) {
-                int dest_dbid;
-                if (!getTargetDbIdForCopyCommand(c->argc, c->argv, c->db->id, &dest_dbid)) {
-                    getKeysFreeResult(&result);
-                    return -1;
-                }
-                if (dest_dbid != c->db->id) {
-                    handleUncommittedKeyForClient(c, c->argv[2], server.db[dest_dbid]);
-                }
-            }
-
-            for (int i = 0; i < numkeys; i++) {
-                handleUncommittedKeyForClient(c, c->argv[keys[i].pos], c->db);
-            }
-        }
-        getKeysFreeResult(&result);
     }
 
     if (!server.execution_nesting) {
@@ -477,9 +704,7 @@ static long long getSingleCommandBlockingOffsetForReplicatingCommand(client *c) 
     return -1;
 }
 
-/**
- * Process a single non-replicating command for consistent write blocking.
- */
+// Process a single non-replicating command for consistent write blocking.
 static long long getSingleCommandBlockingOffsetForNonReplicatingCommand(client *c) {
     long long blocking_repl_offset = -1;
 
@@ -487,8 +712,6 @@ static long long getSingleCommandBlockingOffsetForNonReplicatingCommand(client *
         blocking_repl_offset = getFuncStoreBlockingOffset();
     } else if (IS_SCRIPT_CALL_READONLY_CMD(c->cmd)) {
         return -1;
-    } else if ((c->cmd->flags & CMD_MODULE) && (c->clientDurabilityInfo.module_cmd_blocking_offset != -1)) {
-        blocking_repl_offset = c->clientDurabilityInfo.module_cmd_blocking_offset;
     } else if (c->cmd->flags & (CMD_READONLY | CMD_WRITE)) {
         blocking_repl_offset = c->db->dirty_repl_offset;
         getKeysResult result;
@@ -498,24 +721,9 @@ static long long getSingleCommandBlockingOffsetForNonReplicatingCommand(client *
 
         for (int i = 0; i < numkeys; i++) {
             sds keystr = objectGetVal(c->argv[keys[i].pos]);
-            long long offset = durabilityPurgeAndGetUncommittedKeyOffset(keystr, c->db);
+            long long offset = getUncommittedKeyOffset(keystr, c->db, server.reply_blocking.previous_acked_offset);
             if (offset > blocking_repl_offset) {
                 blocking_repl_offset = offset;
-            }
-        }
-
-        /* COPY/MOVE may target a different DB; check the destination key there too. */
-        if (c->cmd->proc == moveCommand) {
-            int dest_dbid = -1;
-            if (getIntFromObject(c->argv[2], &dest_dbid) == C_OK && dest_dbid != c->db->id) {
-                long long offset = durabilityPurgeAndGetUncommittedKeyOffset(objectGetVal(c->argv[1]), server.db[dest_dbid]);
-                if (offset > blocking_repl_offset) blocking_repl_offset = offset;
-            }
-        } else if (c->cmd->proc == copyCommand) {
-            int dest_dbid;
-            if (getTargetDbIdForCopyCommand(c->argc, c->argv, c->db->id, &dest_dbid) && dest_dbid != c->db->id) {
-                long long offset = durabilityPurgeAndGetUncommittedKeyOffset(objectGetVal(c->argv[2]), server.db[dest_dbid]);
-                if (offset > blocking_repl_offset) blocking_repl_offset = offset;
             }
         }
 
@@ -525,67 +733,64 @@ static long long getSingleCommandBlockingOffsetForNonReplicatingCommand(client *
     return blocking_repl_offset;
 }
 
-/**
- * Process a single command for consistent write blocking.
- */
+// Process a single command for consistent write blocking.
 static long long getSingleCommandBlockingOffsetForConsistentWrites(struct client *c) {
-    serverAssert(isDurabilityEnabled());
+    serverAssert(isReplyBlockingEnabled());
 
-    if (!anyDurabilityProviderEnabled())
+    if (!isAnyReplyBlockingSourceEnabled())
         return -1;
 
     long long blocking_repl_offset = -1;
 
-    // we can't trust keyspace info if we have any dirty data
-    if (IS_KEYSPACE_INFORMATIONAL(c->cmd) &&
-        (listLength(server.durability.clients_waiting_ack) > 0 || hasUncommittedKeys() || isDurableFunctionStoreUncommitted())) {
+    // Whole-keyspace commands have no key argument, so their result depends on
+    // any uncommitted write anywhere. Block them on the newest offset whenever
+    // any data is dirty.
+    if (IS_KEYSPACE_GLOBAL(c->cmd) &&
+        (listLength(server.reply_blocking.clients_waiting_ack) > 0 || hasUncommittedKeys() || isUncommittedFunctionStore())) {
         blocking_repl_offset = server.primary_repl_offset;
-    } else if ((server.primary_repl_offset > server.durability.pre_call_replication_offset) || (server.also_propagate.numops > server.durability.pre_call_num_ops_pending_propagation)) {
+    } else if ((server.primary_repl_offset > server.reply_blocking.pre_call_replication_offset) || (server.also_propagate.numops > server.reply_blocking.pre_call_num_ops_pending_propagation)) {
         blocking_repl_offset = getSingleCommandBlockingOffsetForReplicatingCommand(c);
     } else if (c->flag.primary && (c->cmd->flags & CMD_WRITE)) {
         /* [WBL] On a replica, write commands from the replication stream don't
-         * advance primary_repl_offset (no sub-replicas), but we still
-         * need to track their keys as uncommitted until REPLCONF COMMIT
-         * confirms the offset. Call the replicating-command path to
-         * register the keys, but return -1 so we don't block the
-         * replication stream client itself. */
+         * advance primary_repl_offset (no sub-replicas). Their keys are tracked
+         * as uncommitted through signalModifiedKey() until REPLCONF COMMIT
+         * confirms the offset; return -1 so we don't block the replication
+         * stream client itself. */
         getSingleCommandBlockingOffsetForReplicatingCommand(c);
         blocking_repl_offset = -1;
     } else {
         blocking_repl_offset = getSingleCommandBlockingOffsetForNonReplicatingCommand(c);
     }
 
-    if (blocking_repl_offset <= server.durability.previous_acked_offset) {
+    if (blocking_repl_offset <= server.reply_blocking.previous_acked_offset) {
         blocking_repl_offset = -1;
     }
 
     return blocking_repl_offset;
 }
 
-static void durabilitySetClientCmdFlags(client *c) {
-    // Transaction wrapper commands, e.g., eval, exec, fcall, should not interfere with the
-    // final classification of the transaction itself as read or write. Rather the commands
-    // executed inside the transaction will define if it is read or write or none.
+static void replyBlockingSetClientCmdFlags(client *c) {
+    /* Transaction wrapper commands, e.g., eval, exec, fcall, should not interfere with the
+     * final classification of the transaction itself as read or write. Rather the commands
+     * executed inside the transaction will define if it is read or write or none. */
     if (isClientDoingTransaction(c)) return;
     if (c->cmd->flags & CMD_WRITE)
-        c->clientDurabilityInfo.durability_flags |= DURABILITY_CLIENT_LAST_CMD_WRITE;
+        c->reply_blocking_state.reply_blocking_flags |= REPLY_BLOCKING_CLIENT_LAST_CMD_WRITE;
     else if (c->cmd->flags & CMD_READONLY)
-        c->clientDurabilityInfo.durability_flags |= DURABILITY_CLIENT_LAST_CMD_READONLY;
+        c->reply_blocking_state.reply_blocking_flags |= REPLY_BLOCKING_CLIENT_LAST_CMD_READONLY;
 }
 
 /*=========================== Command hook functions ======================= */
 
-/**
- * Record the starting replication offset of the command about to be executed.
- */
-void beforeCommandTrackReplOffset(struct client *c) {
-    if (!isDurabilityEnabled()) return;
+// Record the starting replication offset of the command about to be executed.
+void recordReplOffsetBaseline(struct client *c) {
+    if (!isReplyBlockingEnabled()) return;
 
-    durabilitySetClientCmdFlags(c);
+    replyBlockingSetClientCmdFlags(c);
 
 
-    server.durability.pre_call_replication_offset = server.primary_repl_offset;
-    server.durability.pre_call_num_ops_pending_propagation = server.also_propagate.numops;
+    server.reply_blocking.pre_call_replication_offset = server.primary_repl_offset;
+    server.reply_blocking.pre_call_num_ops_pending_propagation = server.also_propagate.numops;
 }
 
 static bool isClientBlockedByModule(struct client *c) {
@@ -595,201 +800,231 @@ static bool isClientBlockedByModule(struct client *c) {
            !moduleClientIsBlockedOnKeys(c);
 }
 
-/**
- * After processing a command, track the replication offset and update
- * the blocking offset for the command block.
- */
-void afterCommandTrackReplOffset(client *c) {
-    serverLog(LL_DEBUG, "afterCommandTrackReplOffset entered for command '%s'", c->cmd->declared_name);
-    if (!isDurabilityEnabled() || (c->flag.blocked && !isClientBlockedByModule(c)))
+/* After processing a command, track the replication offset and update
+ * the blocking offset for the command block. */
+void computeCommandBlockingOffset(client *c) {
+    serverLog(LL_DEBUG, "computeCommandBlockingOffset entered for command '%s'", c->cmd->declared_name);
+    if (!isReplyBlockingEnabled() || (c->flag.blocked && !isClientBlockedByModule(c)))
         return;
 
     long long current_cmd_blocking_offset = getSingleCommandBlockingOffsetForConsistentWrites(c);
 
     client *tracking_client = server.current_client ? server.current_client : c;
 
-    if (current_cmd_blocking_offset > tracking_client->clientDurabilityInfo.current_command_repl_offset) {
-        tracking_client->clientDurabilityInfo.current_command_repl_offset = current_cmd_blocking_offset;
+    if (current_cmd_blocking_offset > tracking_client->reply_blocking_state.current_command_repl_offset) {
+        tracking_client->reply_blocking_state.current_command_repl_offset = current_cmd_blocking_offset;
     }
 
     handleDatabaseModification(c);
 }
 
-char *preScriptCmd(client *c) {
-    UNUSED(c);
-    return NULL;
-}
+// Perform pre-processing before command execution for a given client.
+void beginCommandReplyBlocking(client *c) {
+    c->reply_blocking_state.reply_blocking_flags = 0;
+    c->reply_blocking_state.current_command_repl_offset = -1;
+    c->reply_blocking_state.deferred_block_offset = -1;
 
-/**
- * Perform pre-processing before command execution for a given client.
- */
-int preCommandExec(client *c) {
-    c->clientDurabilityInfo.current_command_repl_offset = -1;
-    c->clientDurabilityInfo.module_cmd_blocking_offset = -1;
-
-    if (isDurabilityEnabled() && clientEligibleForResponseTracking(c)) {
+    if (isReplyBlockingEnabled() && clientEligibleForResponseTracking(c)) {
         trackCommandPreExecutionPosition(c);
 
-        if (isCommandReplicatedToMonitors()) {
-            listNode *ln;
-            listIter li;
-            listRewind(server.monitors, &li);
-            while ((ln = listNext(&li))) {
-                client *monitor = ln->value;
-                trackCommandPreExecutionPosition(monitor);
-            }
-        }
+        snapshotMonitors(c);
     }
 
-    server.durability.pre_command_replication_offset = server.primary_repl_offset;
-    return CMD_FILTER_ALLOW;
+    server.reply_blocking.pre_command_replication_offset = server.primary_repl_offset;
 }
 
-/**
- * Perform post-processing after command execution for a given client.
- */
-void postCommandExec(client *c) {
-    if (!isDurabilityEnabled() || c->cmd == NULL || c->flag.multi) {
+// Perform post-processing after command execution for a given client.
+void finalizeCommandReplyBlocking(client *c) {
+    if (!isReplyBlockingEnabled() || c->cmd == NULL || c->flag.multi) {
+        finalizeMonitors(c, -1);
         return;
     }
 
-    long long blocking_repl_offset = c->clientDurabilityInfo.current_command_repl_offset;
+    /* A command that is not tracked is never held, even if the offset moved
+     * while it ran (a REPLCONF ACK can finish a diskless sync). */
+    const bool tracked = clientEligibleForResponseTracking(c);
+    long long blocking_repl_offset = tracked ? c->reply_blocking_state.current_command_repl_offset : -1;
 
-    if (server.primary_repl_offset > server.durability.pre_command_replication_offset && (c->cmd->flags & CMD_WRITE || isClientDoingTransaction(c)) && c->cmd->proc != syncCommand && c->cmd->proc != clusterCommand && c->cmd->proc != shutdownCommand) {
+    /* A tracked command that propagated is held at the post-propagation offset,
+     * not only CMD_WRITE ones: a read can propagate a lazy expiry DEL. Admin
+     * commands are never tracked, so they are never held. */
+    if (server.primary_repl_offset > server.reply_blocking.pre_command_replication_offset && tracked && c->cmd->proc != syncCommand && c->cmd->proc != clusterCommand && c->cmd->proc != shutdownCommand) {
         blocking_repl_offset = server.primary_repl_offset;
     }
 
-    if (blocking_repl_offset > server.durability.pre_command_replication_offset) {
-        serverAssert(clientEligibleForResponseTracking(c));
+    /* A key read in the same unit that modified it still carries the LLONG_MAX
+     * placeholder when the read is checked. The unit has ended by now, so the
+     * key's final offset is the current one. */
+    if (blocking_repl_offset > server.primary_repl_offset) {
+        blocking_repl_offset = server.primary_repl_offset;
     }
 
-    processPendingUncommittedData(server.primary_repl_offset);
+    updateFuncStoreBlockingOffsetForWrite(server.primary_repl_offset);
 
-    blockClientAndMonitorsOnReplOffset(c, blocking_repl_offset);
+    if (c->flag.blocked && isDeferredReplyEnabled(c) && listLength(c->deferred_reply) > 0) {
+        /* A module blocked the client on its KSN callback, so the reply is parked in the
+         * deferred buffer, not the COB. Stash the offset and apply the boundary when the
+         * reply is committed (commitDeferredReplyBuffer); block monitors now (not deferred). */
+        resetPreExecutionOffset(c);
+        c->reply_blocking_state.deferred_block_offset = blocking_repl_offset;
+    } else {
+        blockClientOnReplOffset(c, blocking_repl_offset);
+    }
+    finalizeMonitors(c, blocking_repl_offset);
 
     certifyPendingDeferredTasks();
 }
 
 /*================================= Lifecycle =============================== */
 
-/**
- * Initialize the durability subsystem.
- */
-void durabilityInit(void) {
-    serverLog(LL_DEBUG, "Initializing durability subsystem");
+// Initialize the reply-blocking subsystem.
+void replyBlockingInit(void) {
+    serverLog(LL_DEBUG, "Initializing reply-blocking subsystem");
 
-    /* Initialize uncommitted keys pending data */
+    // Initialize uncommitted keys pending data
     uncommittedKeysInitPending();
 
-    /* Have to init the handlers before using them. */
+    // Have to init the handlers before using them.
     initTaskTypes();
-    server.durability.previous_acked_offset = -1;
-    server.durability.clients_waiting_ack = listCreate();
-    durableTaskInitLists();
-    server.durability.clients_blocked = 0;
-    server.durability.clients_unblocked = 0;
-    server.durability.clients_disconnected_before_unblocking = 0;
-    server.durability.read_responses_blocked = 0;
-    server.durability.write_responses_blocked = 0;
-    server.durability.other_responses_blocked = 0;
-    server.durability.read_responses_unblocked = 0;
-    server.durability.write_responses_unblocked = 0;
-    server.durability.other_responses_unblocked = 0;
-    server.durability.read_responses_blocked_cumulative_time_us = 0;
-    server.durability.write_responses_blocked_cumulative_time_us = 0;
-    server.durability.other_responses_blocked_cumulative_time_us = 0;
+    server.reply_blocking.previous_acked_offset = -1;
+    server.reply_blocking.clients_waiting_ack = listCreate();
+    postCommitTaskInitLists();
+    server.reply_blocking.clients_blocked = 0;
+    server.reply_blocking.clients_unblocked = 0;
+    server.reply_blocking.clients_disconnected_before_unblocking = 0;
+    server.reply_blocking.read_responses_blocked = 0;
+    server.reply_blocking.write_responses_blocked = 0;
+    server.reply_blocking.other_responses_blocked = 0;
+    server.reply_blocking.read_responses_unblocked = 0;
+    server.reply_blocking.write_responses_unblocked = 0;
+    server.reply_blocking.other_responses_unblocked = 0;
+    server.reply_blocking.read_responses_blocked_cumulative_time_us = 0;
+    server.reply_blocking.write_responses_blocked_cumulative_time_us = 0;
+    server.reply_blocking.other_responses_blocked_cumulative_time_us = 0;
 
-    /* Initialize function store blocking state */
-    server.durability.all_dbs_dirty_in_current_cmd = false;
-    server.durability.func_store_blocking_offset = -1;
-    server.durability.processed_func_write_in_transaction = false;
+    // Initialize function store blocking state
+    server.reply_blocking.func_store_blocking_offset = -1;
+    server.reply_blocking.processed_func_write_in_transaction = false;
 
-    /* Register built-in durability providers (AOF) */
-    registerBuiltinDurabilityProviders();
+    // Initialize AOF reply-blocking pause state (used by DEBUG for testing)
+    server.reply_blocking.aof_paused = false;
+    server.reply_blocking.aof_paused_offset = 0;
+    server.reply_blocking.replication_paused = false;
+    server.reply_blocking.replication_paused_offset = 0;
+
+    // Not executing deferred post-commit tasks at startup.
+    server.reply_blocking.in_post_commit_task_execution = false;
 }
 
-/**
- * Clean up the durability subsystem on server shutdown.
- */
-void durabilityCleanup(void) {
-    if (server.durability.clients_waiting_ack != NULL) {
-        listRelease(server.durability.clients_waiting_ack);
-        server.durability.clients_waiting_ack = NULL;
+// Clean up the reply-blocking subsystem on server shutdown.
+void replyBlockingCleanup(void) {
+    if (server.reply_blocking.clients_waiting_ack != NULL) {
+        listRelease(server.reply_blocking.clients_waiting_ack);
+        server.reply_blocking.clients_waiting_ack = NULL;
     }
 
     uncommittedKeysCleanupPending();
 
-    /* Cleanup deferred tasks waiting for durability ack */
-    durableTaskCleanupLists();
-
-    /* Reset the durability provider registry so it can be re-initialized */
-    resetDurabilityProviders();
+    // Cleanup deferred tasks waiting for reply-blocking ack
+    postCommitTaskCleanupLists();
 
     clearAllUncommittedKeys();
 }
 
-/**
- * Disconnect and free clients waiting for durability ack.
- */
-static void freeClientsWaitingAck(const durable_t *durability) {
+/* Disconnect clients waiting for reply-blocking ack. Async: the client that
+ * issued the role change can be on this list and is still executing. */
+static void freeClientsWaitingAck(reply_blocking_t *rb_state) {
     listIter li;
     listNode *ln;
-    listRewind(durability->clients_waiting_ack, &li);
+    listRewind(rb_state->clients_waiting_ack, &li);
     while ((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
-        freeClient(c);
+        c->reply_blocking_state.waiting_ack_node = NULL;
+        rb_state->clients_disconnected_before_unblocking++;
+        freeClientAsync(c);
     }
-    listEmpty(durability->clients_waiting_ack);
+    listEmpty(rb_state->clients_waiting_ack);
 }
 
-/**
- * Reset primary state for the durability subsystem.
- */
-static void durabilityResetPrimaryState(bool is_free_clients_needed) {
-    if (listLength(server.durability.clients_waiting_ack) > 0) {
-        if (is_free_clients_needed) {
-            freeClientsWaitingAck(&server.durability);
-        } else {
-            unblockResponsesWithAckOffset(&server.durability, LLONG_MAX);
-        }
-        serverAssert(listLength(server.durability.clients_waiting_ack) == 0);
+// Reset primary state for the reply-blocking subsystem.
+/* Make everything written so far durable before it is released. A forced
+ * flush waits for an in-flight BIO write+fsync and writes the rest of the AOF
+ * buffer; the fsync covers modes that would otherwise defer it (everysec).
+ * With AOF off, stopAppendOnly() has already flushed and fsynced. */
+static void syncAofBeforeRelease(void) {
+    if (server.aof_state == AOF_OFF || server.aof_fd == -1) return;
+    flushAppendOnlyFile(1);
+    if (valkey_fsync(server.aof_fd) == -1) {
+        serverLog(LL_WARNING, "Failed to fsync the AOF before releasing held replies: %s", strerror(errno));
     }
-    durableTaskEmptyLists();
 }
 
-/**
- * Clear the durability attributes specific to the primary.
- * Invoked when a primary node becomes a replica.
- */
-void durabilityClearPrimaryState(void) {
-    if (!isDurabilityEnabled()) return;
-    durabilityResetPrimaryState(true);
+/* Stop tracking durability on this primary. Turning the feature off releases
+ * held replies and runs every deferred task once the AOF is synced. On
+ * demotion the held writes may not survive: clients waiting for them are
+ * disconnected and their keyspace events dropped, but invalidations are still
+ * sent, since a spurious one is harmless and a missed one leaves a client's
+ * cache stale. */
+static void replyBlockingResetPrimaryState(bool is_free_clients_needed) {
+    if (is_free_clients_needed) {
+        executeAllDeferredTasks(false);
+        freeClientsWaitingAck(&server.reply_blocking);
+    } else {
+        syncAofBeforeRelease();
+        unblockResponsesWithAckOffset(&server.reply_blocking, LLONG_MAX);
+        executeAllDeferredTasks(true);
+    }
+    serverAssert(listLength(server.reply_blocking.clients_waiting_ack) == 0);
 }
 
-/**
- * Generate INFO string for durability stats.
- */
-sds genDurabilityInfoString(sds info) {
-    if (!isDurabilityEnabled()) {
-        info = sdscatprintf(info, "durability_enabled:0\r\n");
+/* Drop the tracking of not-yet-durable writes: uncommitted keys, dirty
+ * databases and the function store offset. They describe a history this node
+ * may not keep, so they are not cleared at demotion (the replica cap kept those
+ * writes from any replica, so whether they survive is not known yet). Instead
+ * they are cleared once it is: when a full sync replaces the dataset, and when
+ * a PSYNC succeeds, which makes them part of the new primary's history. Left
+ * in place, they would hold reads after a re-promotion until the new history
+ * passed the old offsets. */
+void replyBlockingClearDatasetState(void) {
+    clearAllUncommittedKeys();
+    server.reply_blocking.func_store_blocking_offset = -1;
+    server.reply_blocking.processed_func_write_in_transaction = false;
+}
+
+/* Clear the reply-blocking attributes specific to the primary.
+ * Invoked when a primary node becomes a replica. */
+void replyBlockingClearPrimaryState(void) {
+    if (!isReplyBlockingEnabled()) return;
+    replyBlockingResetPrimaryState(true);
+    /* Our offset now follows the new primary and may drop below the acked
+     * watermark, which would then never be exceeded after a re-promotion. */
+    server.reply_blocking.previous_acked_offset = -1;
+}
+
+// Generate INFO string for reply-blocking stats.
+sds genReplyBlockingInfoString(sds info) {
+    if (!isReplyBlockingEnabled()) {
+        info = sdscatprintf(info, "reply_blocking_enabled:0\r\n");
         return info;
     }
 
     info = sdscatprintf(info,
-                        "durability_enabled:1\r\n"
-                        "durability_read_blocked_count:%lld\r\n"
-                        "durability_write_blocked_count:%lld\r\n"
-                        "durability_clients_waiting_ack:%lu\r\n"
-                        "durability_uncommitted_keys:%llu\r\n"
-                        "durability_committed_offset:%lld\r\n"
-                        "durability_primary_repl_offset:%lld\r\n"
-                        "durability_sync_replicas:%d\r\n"
-                        "durability_min_sync_replicas:%d\r\n",
-                        server.durability.read_responses_blocked,
-                        server.durability.write_responses_blocked,
-                        listLength(server.durability.clients_waiting_ack),
+                        "reply_blocking_enabled:1\r\n"
+                        "reply_blocking_read_blocked_count:%lld\r\n"
+                        "reply_blocking_write_blocked_count:%lld\r\n"
+                        "reply_blocking_clients_waiting_ack:%lu\r\n"
+                        "reply_blocking_clients_disconnected_before_unblocking:%llu\r\n"
+                        "reply_blocking_uncommitted_keys:%llu\r\n"
+                        "reply_blocking_previous_acked_offset:%lld\r\n"
+                        "reply_blocking_primary_repl_offset:%lld\r\n"
+                        "reply_blocking_sync_replicas:%d\r\n"
+                        "reply_blocking_min_sync_replicas:%d\r\n",
+                        server.reply_blocking.read_responses_blocked,
+                        server.reply_blocking.write_responses_blocked,
+                        listLength(server.reply_blocking.clients_waiting_ack),
+                        server.reply_blocking.clients_disconnected_before_unblocking,
                         getNumberOfUncommittedKeys(),
-                        server.durability.previous_acked_offset,
+                        server.reply_blocking.previous_acked_offset,
                         server.primary_repl_offset,
                         getSyncReplicaCount(),
                         server.min_sync_replicas);
@@ -797,22 +1032,26 @@ sds genDurabilityInfoString(sds info) {
     return info;
 }
 
-/**
- * Reset related resources when enabling/disabling durability.
- */
-void durabilityReset(void) {
-    if (isDurabilityEnabled()) {
-        server.durability.pre_command_replication_offset = server.primary_repl_offset;
+// Reset related resources when enabling/disabling reply-blocking.
+void replyBlockingReset(void) {
+    /* The durable offset restarts from 0 on an appendonly toggle; re-seed the
+     * acked watermark from the next progress notification. */
+    server.reply_blocking.previous_acked_offset = -1;
+    if (isReplyBlockingEnabled()) {
+        server.reply_blocking.pre_command_replication_offset = server.primary_repl_offset;
         listIter li;
         listNode *ln;
         listRewind(server.clients, &li);
         while ((ln = listNext(&li)) != NULL) {
             client *c = listNodeValue(ln);
-            durabilityClientInit(c);
+            replyBlockingClientInit(c);
         }
     } else {
         if (iAmPrimary()) {
-            durabilityResetPrimaryState(false);
+            replyBlockingResetPrimaryState(false);
+            /* The replica send limit is the buffer tail again; queue replicas
+             * that were parked at the durable offset. */
+            wakeReplicasForDurableProgress();
         }
         clearAllUncommittedKeys();
     }

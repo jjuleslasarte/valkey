@@ -6,6 +6,7 @@
 
 #include "generated_wrappers.hpp"
 
+#include <cstdint>
 #include <cstdio>
 
 extern "C" {
@@ -47,4 +48,48 @@ TEST_F(ZmallocTest, TestZmallocAllocZeroByteAndFree) {
     zfree(ptr);
 
     ASSERT_EQ(zmalloc_used_memory(), used_memory_before);
+}
+
+TEST_F(ZmallocTest, TestZmallocCacheAlignedAllocAndFree) {
+    size_t used_memory_before = zmalloc_used_memory();
+    void *ptr = zmalloc_cache_aligned(123);
+    uintptr_t alignment;
+    size_t usable_size;
+
+    ASSERT_NE(ptr, nullptr);
+    alignment = (uintptr_t)ptr % CACHE_LINE_SIZE;
+    usable_size = zmalloc_usable_size(ptr);
+
+    zfree(ptr);
+
+    ASSERT_EQ(alignment, 0u);
+    ASSERT_GE(usable_size, 123u);
+    ASSERT_EQ(zmalloc_used_memory(), used_memory_before);
+}
+
+TEST_F(ZmallocTest, TestZmallocExternalUsedMemory) {
+    size_t used_memory_before = zmalloc_used_memory();
+    size_t external_memory_before = zmalloc_used_external_memory();
+
+    ASSERT_EQ(zmalloc_increase_used_memory_external(123), 0);
+    ASSERT_EQ(zmalloc_used_external_memory(), external_memory_before + 123);
+    ASSERT_EQ(zmalloc_used_memory(), used_memory_before + 123);
+
+    ASSERT_EQ(zmalloc_decrease_used_memory_external(123), 0);
+    ASSERT_EQ(zmalloc_used_external_memory(), external_memory_before);
+    ASSERT_EQ(zmalloc_used_memory(), used_memory_before);
+}
+
+TEST_F(ZmallocTest, TestZmallocExternalUsedMemoryBounds) {
+    size_t external_memory_before = zmalloc_used_external_memory();
+
+    ASSERT_EQ(zmalloc_decrease_used_memory_external(external_memory_before + 1), -1);
+    if (external_memory_before == 0) {
+        ASSERT_EQ(zmalloc_increase_used_memory_external(1), 0);
+        ASSERT_EQ(zmalloc_increase_used_memory_external(SIZE_MAX), -1);
+        ASSERT_EQ(zmalloc_decrease_used_memory_external(1), 0);
+    } else {
+        ASSERT_EQ(zmalloc_increase_used_memory_external(SIZE_MAX - external_memory_before + 1), -1);
+    }
+    ASSERT_EQ(zmalloc_used_external_memory(), external_memory_before);
 }

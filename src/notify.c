@@ -59,6 +59,7 @@ int keyspaceEventsStringToFlags(char *classes) {
         case 'm': flags |= NOTIFY_KEY_MISS; break;
         case 'd': flags |= NOTIFY_MODULE; break;
         case 'n': flags |= NOTIFY_NEW; break;
+        case 'p': flags |= NOTIFY_PATH_HASH; break;
         default: return -1;
         }
     }
@@ -86,8 +87,9 @@ sds keyspaceEventsFlagsToString(int flags) {
         if (flags & NOTIFY_EVICTED) res = sdscatlen(res, "e", 1);
         if (flags & NOTIFY_STREAM) res = sdscatlen(res, "t", 1);
         if (flags & NOTIFY_MODULE) res = sdscatlen(res, "d", 1);
-        if (flags & NOTIFY_NEW) res = sdscatlen(res, "n", 1);
+        if (flags & NOTIFY_PATH_HASH) res = sdscatlen(res, "p", 1);
     }
+    if (flags & NOTIFY_NEW) res = sdscatlen(res, "n", 1);
     if (flags & NOTIFY_KEYSPACE) res = sdscatlen(res, "K", 1);
     if (flags & NOTIFY_KEYEVENT) res = sdscatlen(res, "E", 1);
     if (flags & NOTIFY_KEY_MISS) res = sdscatlen(res, "m", 1);
@@ -105,77 +107,84 @@ sds keyspaceEventsFlagsToString(int flags) {
 void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
     sds chan;
     robj *chanobj, *eventobj;
-    int len = -1;
     char buf[24];
     client *c = server.executing_client;
-    debugServerAssert(moduleNotifyKeyspaceSubscribersCnt() == 0 ||
-                      (type & (NOTIFY_GENERIC | NOTIFY_STRING | NOTIFY_LIST | NOTIFY_SET | NOTIFY_HASH | NOTIFY_ZSET | NOTIFY_STREAM)) == 0 ||
-                      c == NULL ||
-                      c->cmd == NULL ||
-                      (c->cmd->flags & CMD_WRITE) == 0 ||
-                      c->flag.buffered_reply == 0 ||
-                      c->flag.keyspace_notified == 1 ||
-                      c->id == UINT64_MAX || // AOF client
-                      getClientType(c) != CLIENT_TYPE_NORMAL);
 
-    if (!(type & NOTIFY_IN_DURABLE_TASK)) {
-        if (isPrimaryDurabilityEnabled()) {
-            bool shouldSendDelayedNotificationToClients = (server.notify_keyspace_events & type);
+    if (!server.reply_blocking.in_post_commit_task_execution) {
+        debugServerAssert(moduleNotifyKeyspaceSubscribersCnt() == 0 ||
+                          (type & (NOTIFY_GENERIC | NOTIFY_STRING | NOTIFY_LIST | NOTIFY_SET | NOTIFY_HASH | NOTIFY_ZSET | NOTIFY_STREAM | NOTIFY_PATH_HASH)) == 0 ||
+                          c == NULL ||
+                          c->cmd == NULL ||
+                          (c->cmd->flags & CMD_WRITE) == 0 ||
+                          c->flag.buffered_reply == 0 ||
+                          c->flag.keyspace_notified == 1 ||
+                          c->id == UINT64_MAX || // AOF client
+                          getClientType(c) != CLIENT_TYPE_NORMAL);
 
-            /* Defer client notifications until durability providers acknowledge the write. */
-            if (shouldSendDelayedNotificationToClients) {
-                type = type | NOTIFY_IN_DURABLE_TASK;
-                /* Register deferred task, executed when offset is acknowledged
-                 * by durability providers */
-                durabilityRegisterDeferredTask(
-                    DURABLE_KEYSPACE_NOTIFY_TASK,
+        /* Notify modules inline, at the time the keyspace change occurs (bypassing
+         * notify-keyspace-events; the module engine filters by each subscriber's event mask).
+         * Doing it here rather than from the deferred task ensures subscribers are notified for
+         * every write regardless of config or origin, and lets a module that blocks the client
+         * from its callback engage the deferred-reply buffer before the reply is committed. */
+        moduleNotifyKeyspaceEvent(type, event, key, dbid);
+        if (c) {
+            c->flag.keyspace_notified = 1;
+            commitDeferredReplyBuffer(c, 1);
+        }
+
+        if (isPrimaryReplyBlockingEnabled()) {
+            /* Defer only the client (pub/sub) notification until the write is acknowledged.
+             * The deferred task re-enters this function while
+             * in_post_commit_task_execution is set, so modules are not notified again. */
+            if (server.notify_keyspace_events & type) {
+                replyBlockingRegisterPostCommitTask(
+                    POST_COMMIT_KEYSPACE_NOTIFY_TASK,
                     (void *)(long)type,
                     (void *)event,
                     (void *)key,
                     (void *)(long)dbid);
             }
-
-            // At this point (ZDL branch), we have notified modules, or queued a task.  For clients,
-            //  there is never a direct notification (either queue the notification or nothing).
             return;
         }
-        moduleNotifyKeyspaceEvent(type, event, key, dbid);
-    } else {
-        if (c) {
-            c->flag.keyspace_notified = 1;
-            commitDeferredReplyBuffer(c, 1);
-        }
     }
-
-    type = type & ~NOTIFY_IN_DURABLE_TASK;
 
     /* If notifications for this class of events are off, return ASAP. */
     if (!(server.notify_keyspace_events & type)) return;
 
-    eventobj = createStringObject(event, strlen(event));
+    /* If neither keyspace nor keyevent notifications are enabled, or there
+     * are no clients subscribed to any channel or pattern, there is no point
+     * in building the event object and the channel names. */
+    if (!(server.notify_keyspace_events & (NOTIFY_KEYSPACE | NOTIFY_KEYEVENT))) return;
+    if (serverPubsubSubscriptionCount() == 0) return;
+
+    size_t eventlen = strlen(event);
+    int len = ll2string(buf, sizeof(buf), dbid);
 
     /* __keyspace@<db>__:<key> <event> notifications. */
     if (server.notify_keyspace_events & NOTIFY_KEYSPACE) {
-        chan = sdsnewlen("__keyspace@", 11);
-        len = ll2string(buf, sizeof(buf), dbid);
+        chan = sdsnewlen(SDS_NOINIT, 11 + len + 3 + sdslen(objectGetVal(key)));
+        sdsclear(chan);
+        chan = sdscatlen(chan, "__keyspace@", 11);
         chan = sdscatlen(chan, buf, len);
         chan = sdscatlen(chan, "__:", 3);
         chan = sdscatsds(chan, objectGetVal(key));
         chanobj = createObject(OBJ_STRING, chan);
+        eventobj = createStringObject(event, eventlen);
         pubsubPublishMessage(chanobj, eventobj, 0);
         decrRefCount(chanobj);
+        decrRefCount(eventobj);
     }
 
     /* __keyevent@<db>__:<event> <key> notifications. */
     if (server.notify_keyspace_events & NOTIFY_KEYEVENT) {
-        chan = sdsnewlen("__keyevent@", 11);
-        if (len == -1) len = ll2string(buf, sizeof(buf), dbid);
+        chan = sdsnewlen(SDS_NOINIT, 11 + len + 3 + eventlen);
+        sdsclear(chan);
+        chan = sdscatlen(chan, "__keyevent@", 11);
         chan = sdscatlen(chan, buf, len);
         chan = sdscatlen(chan, "__:", 3);
-        chan = sdscatsds(chan, objectGetVal(eventobj));
+        chan = sdscatlen(chan, event, eventlen);
         chanobj = createObject(OBJ_STRING, chan);
         pubsubPublishMessage(chanobj, key, 0);
         decrRefCount(chanobj);
     }
-    decrRefCount(eventobj);
 }

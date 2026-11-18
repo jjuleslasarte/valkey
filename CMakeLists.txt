@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.24)
 
 # Must be done first
 if (APPLE)
@@ -13,7 +13,8 @@ if (APPLE)
 endif ()
 
 # Options
-option(BUILD_LUA "Build Valkey Lua scripting engine" ON)
+set(BUILD_LUA "static" CACHE STRING "Build Valkey Lua scripting engine: static (default), module, no")
+set(BUILD_ZSTD "no" CACHE STRING "Build Zstandard streaming RDB and replication compression: yes, no")
 option(BUILD_UNIT_GTESTS "Build valkey-unit-gtests" OFF)
 option(BUILD_TEST_MODULES "Build all test modules" OFF)
 option(BUILD_EXAMPLE_MODULES "Build example modules" OFF)

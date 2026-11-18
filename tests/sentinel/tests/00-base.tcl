@@ -1,6 +1,7 @@
 # Check the basic monitoring and failover capabilities.
 source "../tests/includes/start-init-tests.tcl"
 source "../tests/includes/init-tests.tcl"
+source "../../support/cli.tcl"
 
 foreach_sentinel_id id {
     S $id sentinel debug default-down-after 1000
@@ -35,7 +36,11 @@ test "Sentinel command flag infrastructure works correctly" {
 }
 
 test "SENTINEL HELP output the sentinel subcommand help" {
-    assert_match "*SENTINEL <subcommand> *" [S 0 SENTINEL HELP]
+    set help [S 0 SENTINEL HELP]
+    assert_match "*SENTINEL <subcommand> *" $help
+    assert {[string first \
+        {SIMULATE-FAILURE (CRASH-AFTER-ELECTION|CRASH-AFTER-PROMOTION|HELP) [(CRASH-AFTER-ELECTION|CRASH-AFTER-PROMOTION|HELP) ...]} \
+        $help] != -1}
 }
 
 test "SENTINEL MYID return the sentinel instance ID" {
@@ -76,6 +81,29 @@ test "SENTINEL SIMULATE-FAILURE HELP list supported flags" {
     set res [S 0 SENTINEL SIMULATE-FAILURE HELP]
     assert_morethan_equal [llength $res] 2
     assert_equal {crash-after-election crash-after-promotion} $res
+}
+
+test "SENTINEL SIMULATE-FAILURE command metadata" {
+    set docs [dict get [S 0 COMMAND DOCS sentinel|simulate-failure] sentinel|simulate-failure]
+    set mode [lindex [dict get $docs arguments] 0]
+    assert_equal {multiple} [dict get $mode flags]
+
+    set modes [dict get $mode arguments]
+    foreach {index token} {0 CRASH-AFTER-ELECTION 1 CRASH-AFTER-PROMOTION 2 HELP} {
+        assert_equal $token [dict get [lindex $modes $index] token]
+    }
+}
+
+test "SENTINEL SIMULATE-FAILURE valkey-cli hint" {
+    set cmd [list $::VALKEY_CLI_BIN \
+        -h [get_instance_attrib sentinel 0 host] \
+        -p [get_instance_attrib sentinel 0 port]]
+    lappend cmd {*}[valkeycli_tls_config "../.."]
+    lappend cmd --test_hint "SENTINEL SIMULATE-FAILURE "
+
+    assert_equal \
+        {CRASH-AFTER-ELECTION|CRASH-AFTER-PROMOTION|HELP [CRASH-AFTER-ELECTION|CRASH-AFTER-PROMOTION|HELP ...]} \
+        [exec {*}$cmd]
 }
 
 test "Basic failover works if the primary is down" {
@@ -127,6 +155,7 @@ test "The old primary eventually gets reconfigured as a slave" {
 }
 
 test "ODOWN is not possible without N (quorum) Sentinels reports" {
+    set sentinels [llength $::sentinel_instances]
     foreach_sentinel_id id {
         S $id SENTINEL SET mymaster quorum [expr $sentinels+1]
     }
@@ -135,13 +164,28 @@ test "ODOWN is not possible without N (quorum) Sentinels reports" {
     assert {[lindex $addr 1] == $old_port}
     kill_instance valkey $master_id
 
-    # Make sure failover did not happened.
+    # Make sure failover did not happen.
     set addr [S 0 SENTINEL GET-PRIMARY-ADDR-BY-NAME mymaster]
     assert {[lindex $addr 1] == $old_port}
     restart_instance valkey $master_id
 }
 
 test "Failover is not possible without majority agreement" {
+    set quorum [expr {$sentinels/2 + 1}]
+
+    # The previous test just restarted the primary. Sentinels can still show it
+    # as disconnected, and cross down-after right after we lower the quorum,
+    # which starts a real failover with every Sentinel alive. Wait until each
+    # one is connected and has had a recent PONG.
+    foreach_sentinel_id id {
+        wait_for_condition 1000 50 {
+            [dict get [S $id SENTINEL PRIMARY mymaster] flags] eq "master" &&
+            [dict get [S $id SENTINEL PRIMARY mymaster] last-ok-ping-reply] < 1000
+        } else {
+            fail "Sentinel $id does not see the primary as healthy"
+        }
+    }
+
     foreach_sentinel_id id {
         S $id SENTINEL SET mymaster quorum $quorum
     }
@@ -154,7 +198,7 @@ test "Failover is not possible without majority agreement" {
     # Kill the current master
     kill_instance valkey $master_id
 
-    # Make sure failover did not happened.
+    # Make sure failover did not happen.
     set addr [S $quorum SENTINEL GET-PRIMARY-ADDR-BY-NAME mymaster]
     assert {[lindex $addr 1] == $old_port}
     restart_instance valkey $master_id
@@ -202,7 +246,7 @@ test "New primary [join $addr {:}] role matches" {
     assert {[RI $master_id role] eq {master}}
 }
 
-test "SENTINEL RESET can resets the primary" {
+test "SENTINEL RESET can reset the primary" {
     # After SENTINEL RESET, sometimes the sentinel can sense the primary again,
     # causing the test to fail. Here we give it a few more chances.
     for {set j 0} {$j < 10} {incr j} {

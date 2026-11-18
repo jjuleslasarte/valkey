@@ -32,6 +32,7 @@
 
 #include "fmacros.h"
 #include "config.h"
+#include "compression.h"
 #include "solarisfixes.h"
 #include "rio.h"
 #include "commands.h"
@@ -105,7 +106,19 @@ static_assert(sizeof(off_t) >= 8, "off_t must be 64-bit; ensure _FILE_OFFSET_BIT
 #define dismissMemory zmadvise_dontneed
 
 #define VALKEYMODULE_CORE 1
-typedef struct serverObject robj;
+
+/* serverObject (aka robj) is currently overloaded for 2 purposes.  This is a legacy artifact.
+ *   1. It's carries a reference counted STRING (a keyless value) during parsing and command execution.
+ *   2. It's also used to carry a key/value pair which is inserted into the DB.  In this form, the
+ *      value is not limited to being a string.
+ *
+ * The typedef "dbEntry" is used to explicitly connote the latter form.  It indicates a key/value
+ * pair which is suitable to exist in the DB.  It might be active in the DB, or may be unlinked from
+ * the DB (but still contains a key/value).  The value may be any of the Valkey data types/encodings.
+ */
+typedef struct serverObject robj;    // A keyless string OR a key/value pair
+typedef struct serverObject dbEntry; // Explicitly a key/value pair
+
 #include "valkeymodule.h" /* Modules API defines. */
 
 /* Following includes allow test functions to be called from main() */
@@ -144,6 +157,7 @@ struct ValkeyModule;
 #define CRON_DBS_PER_CALL 16
 #define CRON_DICTS_PER_DB 16
 #define NET_MAX_WRITES_PER_EVENT (1024 * 64)
+#define VALKEY_THREAD_STACK_SIZE (1024 * 1024 * 4)
 #define PROTO_SHARED_SELECT_CMDS 10
 #define OBJ_SHARED_INTEGERS 10000
 #define OBJ_SHARED_BULKHDR_LEN 32
@@ -157,7 +171,8 @@ struct ValkeyModule;
 #define CONFIG_BGSAVE_RETRY_DELAY 5              /* Wait a few secs before trying again. */
 #define CONFIG_DEFAULT_PID_FILE "/var/run/valkey.pid"
 #define CONFIG_DEFAULT_BINDADDR_COUNT 2
-#define CONFIG_DEFAULT_BINDADDR {"*", "-::*"}
+#define CONFIG_DEFAULT_BINDADDR \
+    {"*", "-::*"}
 #define CONFIG_BINDADDR_MAX 16
 #define CONFIG_MIN_RESERVED_FDS 32
 #define CONFIG_DEFAULT_PROC_TITLE_TEMPLATE "{title} {listen-addr} {server-mode}"
@@ -197,14 +212,16 @@ struct ValkeyModule;
 /* Instantaneous metrics tracking. */
 #define STATS_METRIC_SAMPLES 16 /* Number of samples per metric. */
 typedef enum {
-    STATS_METRIC_COMMAND = 0,            /* Number of commands executed. */
-    STATS_METRIC_NET_INPUT,              /* Bytes read from network. */
-    STATS_METRIC_NET_OUTPUT,             /* Bytes written to network. */
-    STATS_METRIC_NET_INPUT_REPLICATION,  /* Bytes read from network during replication. */
-    STATS_METRIC_NET_OUTPUT_REPLICATION, /* Bytes written to network during replication. */
-    STATS_METRIC_EL_CYCLE,               /* Number of eventloop cycled. */
-    STATS_METRIC_EL_DURATION,            /* Eventloop duration. */
-    STATS_METRIC_COUNT                   /* Total count */
+    STATS_METRIC_COMMAND = 0,             /* Number of commands executed. */
+    STATS_METRIC_NET_INPUT,               /* Bytes read from network. */
+    STATS_METRIC_NET_OUTPUT,              /* Bytes written to network. */
+    STATS_METRIC_NET_INPUT_REPLICATION,   /* Bytes read from network during replication. */
+    STATS_METRIC_NET_OUTPUT_REPLICATION,  /* Bytes written to network during replication. */
+    STATS_METRIC_EL_CYCLE,                /* Number of eventloop cycled. */
+    STATS_METRIC_EL_DURATION,             /* Eventloop duration. */
+    STATS_METRIC_IO_WAIT,                 /* IO queue size */
+    STATS_METRIC_MAIN_THREAD_ACTIVE_TIME, /* Main-thread active time */
+    STATS_METRIC_COUNT                    /* Total count */
 } instantaneous_metric_type;
 
 /* Protocol and I/O related defines */
@@ -233,47 +250,6 @@ typedef enum {
 
 extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 
-#define COMMAND_GET 0
-#define COMMAND_SET 1
-#define COMMAND_HGET 2
-#define COMMAND_HSET 3
-#define COMMAND_MSET 4
-
-/* Command flags. Please check the definition of struct serverCommand in this file
- * for more information about the meaning of every flag. */
-#define CMD_WRITE (1ULL << 0)
-#define CMD_READONLY (1ULL << 1)
-#define CMD_DENYOOM (1ULL << 2)
-#define CMD_MODULE (1ULL << 3) /* Command exported by module. */
-#define CMD_ADMIN (1ULL << 4)
-#define CMD_PUBSUB (1ULL << 5)
-#define CMD_NOSCRIPT (1ULL << 6)
-#define CMD_BLOCKING (1ULL << 8) /* Has potential to block. */
-#define CMD_LOADING (1ULL << 9)
-#define CMD_STALE (1ULL << 10)
-#define CMD_SKIP_MONITOR (1ULL << 11)
-#define CMD_SKIP_COMMANDLOG (1ULL << 12)
-#define CMD_ASKING (1ULL << 13)
-#define CMD_FAST (1ULL << 14)
-#define CMD_NO_AUTH (1ULL << 15)
-#define CMD_MAY_REPLICATE (1ULL << 16)
-#define CMD_SENTINEL (1ULL << 17)
-#define CMD_ONLY_SENTINEL (1ULL << 18)
-#define CMD_NO_MANDATORY_KEYS (1ULL << 19)
-#define CMD_PROTECTED (1ULL << 20)
-#define CMD_MODULE_GETKEYS (1ULL << 21)    /* Use the modules getkeys interface. */
-#define CMD_MODULE_NO_CLUSTER (1ULL << 22) /* Deny on Cluster. */
-#define CMD_NO_ASYNC_LOADING (1ULL << 23)
-#define CMD_NO_MULTI (1ULL << 24)
-#define CMD_MOVABLE_KEYS (1ULL << 25) /* The legacy range spec doesn't cover all keys. \
-                                       * Populated by populateCommandLegacyRangeSpec. */
-#define CMD_ALLOW_BUSY ((1ULL << 26))
-#define CMD_MODULE_GETCHANNELS (1ULL << 27) /* Use the modules getchannels interface. */
-#define CMD_TOUCHES_ARBITRARY_KEYS (1ULL << 28)
-#define CMD_ALL_DBS (1ULL << 29)
-/* Command flags. Please don't forget to add command flag documentation in struct
- * serverCommand in this file. */
-
 /* Command flags that describe ACLs categories. */
 #define ACL_CATEGORY_KEYSPACE (1ULL << 0)
 #define ACL_CATEGORY_READ (1ULL << 1)
@@ -296,6 +272,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define ACL_CATEGORY_CONNECTION (1ULL << 18)
 #define ACL_CATEGORY_TRANSACTION (1ULL << 19)
 #define ACL_CATEGORY_SCRIPTING (1ULL << 20)
+#define ACL_CATEGORY_PATHHASH (1ULL << 21)
 
 /* Key-spec flags *
  * -------------- */
@@ -387,6 +364,7 @@ typedef enum blocking_type {
     BLOCKED_ZSET,     /* BZPOP et al. */
     BLOCKED_POSTPONE, /* Blocked by processCommand, re-try processing later. */
     BLOCKED_SHUTDOWN, /* SHUTDOWN. */
+    BLOCKED_INUSE,    /* Key in use by background thread. */
     BLOCKED_NUM,      /* Number of blocked states. */
     BLOCKED_END       /* End of enumeration */
 } blocking_type;
@@ -492,10 +470,17 @@ typedef enum {
 #define REPLICA_CAPA_PSYNC2 (1 << 1)            /* Supports PSYNC2 protocol. */
 #define REPLICA_CAPA_DUAL_CHANNEL (1 << 2)      /* Supports dual channel replication sync */
 #define REPLICA_CAPA_SKIP_RDB_CHECKSUM (1 << 3) /* Supports skipping RDB checksum for sync requests. */
-#define REPLICA_CAPA_SYNC (1 << 4)              /* Replica participates in sync replication (ISR member). */
+#define REPLICA_CAPA_LZ4 (1 << 4)               /* Accepts LZ4 streaming-compressed replication payloads. */
+#define REPLICA_CAPA_ZSTD (1 << 5)              /* Accepts Zstd streaming-compressed replication payloads. */
+#define REPLICA_CAPA_INBAND_REPL (1 << 6)       /* Supports RDB_OPCODE_UPDATE for inline replication. */
+#define REPLICA_CAPA_SYNC (1 << 7)              /* Replica participates in sync replication (ISR member). */
+#define REPLICA_CAPA_COMPRESSION_MASK (REPLICA_CAPA_LZ4 | REPLICA_CAPA_ZSTD)
 
 /* Replica capability strings */
 #define REPLICA_CAPA_SKIP_RDB_CHECKSUM_STR "skip-rdb-checksum" /* Supports skipping RDB checksum for sync requests. */
+#define REPLICA_CAPA_LZ4_STR "lz4"                             /* Accepts LZ4 streaming-compressed replication payloads. */
+#define REPLICA_CAPA_ZSTD_STR "zstd"                           /* Accepts Zstd streaming-compressed replication payloads. */
+#define REPLICA_CAPA_INBAND_REPL_STR "inband-repl"             /* Supports RDB_OPCODE_UPDATE for inline replication. */
 
 /* Replica requirements */
 #define REPLICA_REQ_NONE 0
@@ -542,14 +527,19 @@ typedef enum {
 #define SUPERVISED_SYSTEMD 2
 #define SUPERVISED_UPSTART 3
 
-#define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^64 elements */
-#define ZSKIPLIST_MAX_SEARCH 10
 
 /* Append only defines */
 #define REPL_MAX_WRITTEN_BEFORE_FSYNC (1024 * 1024 * 8) /* 8 MB */
 #define AOF_FSYNC_NO 0
 #define AOF_FSYNC_ALWAYS 1
 #define AOF_FSYNC_EVERYSEC 2
+
+enum {
+    AOF_BIO_FLUSH_IDLE = 0,
+    AOF_BIO_FLUSH_PENDING,
+    AOF_BIO_FLUSH_DONE,
+    AOF_BIO_FLUSH_ERR,
+};
 
 /* Replication diskless load defines */
 #define REPL_DISKLESS_LOAD_DISABLED 0
@@ -566,11 +556,6 @@ typedef enum {
 #define TLS_CLIENT_FIELD_OFF 0
 #define TLS_CLIENT_FIELD_CN 1
 #define TLS_CLIENT_FIELD_URI 2
-
-/* Sanitize dump payload */
-#define SANITIZE_DUMP_NO 0
-#define SANITIZE_DUMP_YES 1
-#define SANITIZE_DUMP_CLIENTS 2
 
 /* Enable protected config/command */
 #define PROTECTED_ACTION_ALLOWED_NO 0
@@ -637,17 +622,40 @@ typedef enum {
 #define PAUSE_ACTION_REPLICA (1 << 4) /* pause replica traffic */
 
 /* Sets log format */
-typedef enum { LOG_FORMAT_LEGACY = 0,
-               LOG_FORMAT_LOGFMT,
-               LOG_FORMAT_JSON } log_format_type;
+typedef enum {
+    LOG_FORMAT_LEGACY = 0,
+    LOG_FORMAT_LOGFMT,
+    LOG_FORMAT_JSON
+} log_format_type;
 
 /* Sets log timestamp format */
-typedef enum { LOG_TIMESTAMP_LEGACY = 0,
-               LOG_TIMESTAMP_ISO8601,
-               LOG_TIMESTAMP_MILLISECONDS } log_timestamp_type;
+typedef enum {
+    LOG_TIMESTAMP_LEGACY = 0,
+    LOG_TIMESTAMP_ISO8601,
+    LOG_TIMESTAMP_MILLISECONDS
+} log_timestamp_type;
 
-typedef enum { RDB_VERSION_CHECK_STRICT = 0,
-               RDB_VERSION_CHECK_RELAXED } rdb_version_check_type;
+typedef enum {
+    RDB_VERSION_CHECK_STRICT = 0,
+    RDB_VERSION_CHECK_RELAXED
+} rdb_version_check_type;
+
+typedef enum {
+    RDB_COMPRESSION_NO = 0, /* Disable RDB compression. */
+    RDB_COMPRESSION_YES,    /* Use the default compression algorithm. */
+    RDB_COMPRESSION_LZF,    /* Pin legacy per-string LZF compression. */
+    RDB_COMPRESSION_LZ4,    /* Pin whole-stream LZ4 compression. */
+    RDB_COMPRESSION_ZSTD    /* Pin whole-stream Zstandard compression. */
+} rdb_compression_mode;
+
+typedef enum {
+    REPL_COMPRESSION_NO = 0, /* Disable replication compression. */
+    REPL_COMPRESSION_YES,    /* Use the default compression algorithm (currently LZ4). */
+    REPL_COMPRESSION_LZ4,    /* Pin whole-stream LZ4 compression. */
+    REPL_COMPRESSION_ZSTD    /* Pin whole-stream Zstandard compression. */
+} repl_compression_mode;
+
+#define REPL_COMPRESSION_CAPA_UNKNOWN -1
 
 /* Structure representing a non-owning view of a buffer.
  * A stringRef struct does not manage the underlying memory, so its destruction
@@ -684,31 +692,60 @@ typedef enum {
     CLUSTER_ENDPOINT_TYPE_UNKNOWN_ENDPOINT /* Show NULL or empty */
 } cluster_endpoint_type;
 
-/* RDB active child save type. */
-#define RDB_CHILD_TYPE_NONE 0
-#define RDB_CHILD_TYPE_DISK 1   /* RDB is written to disk. */
-#define RDB_CHILD_TYPE_SOCKET 2 /* RDB is written to replica socket. */
+/* Cluster persist config mode. */
+typedef enum {
+    CLUSTER_CONFIGFILE_SAVE_BEHAVIOR_SYNC = 0,    /* Perform a synchronous save, exit the process if it fails. */
+    CLUSTER_CONFIGFILE_SAVE_BEHAVIOR_BEST_EFFORT, /* Save asynchronously via BIO thread on a "best-effort" basis, process will not exit if it fails. */
+} cluster_persist_config_mode;
+
+/* RDB write target type. */
+typedef enum {
+    RDB_WRITE_TARGET_NONE = 0,
+    RDB_WRITE_TARGET_DISK = 1,  /* RDB is written to disk. */
+    RDB_WRITE_TARGET_SOCKET = 2 /* RDB is written to replica socket. */
+} rdbWriteTarget;
+
+/* RDB bgsave type. */
+typedef enum {
+    RDB_BGSAVE_TYPE_NONE = 0,
+    RDB_BGSAVE_TYPE_FORK = 1,    /* Fork-based bgsave. */
+    RDB_BGSAVE_TYPE_FORKLESS = 2 /* Forkless bgsave. */
+} rdbBgsaveType;
+
+/* Policy for server.forkless_policy */
+typedef enum {
+    FORKLESS_POLICY_REQUIRE_FORK,   /* Always fork; never use forkless. */
+    FORKLESS_POLICY_PREFER_FORKLESS /* Forkless, falling back to fork when it cannot be served. */
+} forklessPolicy;
+
+/* Replica failover policy for server.cluster_replica_no_failover. */
+typedef enum {
+    CLUSTER_REPLICA_NO_FAILOVER_NO = 0,   /* Allow automatic failover (default). */
+    CLUSTER_REPLICA_NO_FAILOVER_YES,      /* Never start a failover; sets CLUSTER_NODE_NOFAILOVER. */
+    CLUSTER_REPLICA_NO_FAILOVER_IF_EMPTY, /* Refuse automatic failover only while the replica is empty. */
+} cluster_replica_no_failover_policy;
 
 /* Keyspace changes notification classes. Every class is associated with a
  * character for configuration purposes. */
-#define NOTIFY_KEYSPACE (1 << 0)  /* K */
-#define NOTIFY_KEYEVENT (1 << 1)  /* E */
-#define NOTIFY_GENERIC (1 << 2)   /* g */
-#define NOTIFY_STRING (1 << 3)    /* $ */
-#define NOTIFY_LIST (1 << 4)      /* l */
-#define NOTIFY_SET (1 << 5)       /* s */
-#define NOTIFY_HASH (1 << 6)      /* h */
-#define NOTIFY_ZSET (1 << 7)      /* z */
-#define NOTIFY_EXPIRED (1 << 8)   /* x */
-#define NOTIFY_EVICTED (1 << 9)   /* e */
-#define NOTIFY_STREAM (1 << 10)   /* t */
-#define NOTIFY_KEY_MISS (1 << 11) /* m (Note: This one is excluded from NOTIFY_ALL on purpose) */
-#define NOTIFY_LOADED (1 << 12)   /* module only key space notification, indicate a key loaded from rdb */
-#define NOTIFY_MODULE (1 << 13)   /* d, module key space notification */
-#define NOTIFY_NEW (1 << 14)      /* n, new key notification */
+#define NOTIFY_KEYSPACE (1 << 0)   /* K */
+#define NOTIFY_KEYEVENT (1 << 1)   /* E */
+#define NOTIFY_GENERIC (1 << 2)    /* g */
+#define NOTIFY_STRING (1 << 3)     /* $ */
+#define NOTIFY_LIST (1 << 4)       /* l */
+#define NOTIFY_SET (1 << 5)        /* s */
+#define NOTIFY_HASH (1 << 6)       /* h */
+#define NOTIFY_ZSET (1 << 7)       /* z */
+#define NOTIFY_EXPIRED (1 << 8)    /* x */
+#define NOTIFY_EVICTED (1 << 9)    /* e */
+#define NOTIFY_STREAM (1 << 10)    /* t */
+#define NOTIFY_KEY_MISS (1 << 11)  /* m (Note: This one is excluded from NOTIFY_ALL on purpose) */
+#define NOTIFY_LOADED (1 << 12)    /* module only key space notification, indicate a key loaded from rdb */
+#define NOTIFY_MODULE (1 << 13)    /* d, module key space notification */
+#define NOTIFY_NEW (1 << 14)       /* n, new key notification */
+#define NOTIFY_PATH_HASH (1 << 15) /* p */
 #define NOTIFY_ALL                                                                                            \
     (NOTIFY_GENERIC | NOTIFY_STRING | NOTIFY_LIST | NOTIFY_SET | NOTIFY_HASH | NOTIFY_ZSET | NOTIFY_EXPIRED | \
-     NOTIFY_EVICTED | NOTIFY_STREAM | NOTIFY_MODULE) /* A flag */
+     NOTIFY_EVICTED | NOTIFY_STREAM | NOTIFY_MODULE | NOTIFY_PATH_HASH) /* A flag */
 
 /* Period in milliseconds between successive clusterCron() executions */
 #define CLUSTER_CRON_PERIOD_MS 100
@@ -756,20 +793,30 @@ typedef enum {
 
 /* Generic set command string object set flags */
 #define ARGS_NO_FLAGS 0
-#define ARGS_SET_NX (1 << 0)   /* Set if key not exists. */
-#define ARGS_SET_XX (1 << 1)   /* Set if key exists. */
-#define ARGS_EX (1 << 2)       /* Set if time in seconds is given */
-#define ARGS_PX (1 << 3)       /* Set if time in ms in given */
-#define ARGS_KEEPTTL (1 << 4)  /* Set and keep the ttl */
-#define ARGS_SET_GET (1 << 5)  /* Set if want to get key before set */
-#define ARGS_EXAT (1 << 6)     /* Set if timestamp in second is given */
-#define ARGS_PXAT (1 << 7)     /* Set if timestamp in ms is given */
-#define ARGS_PERSIST (1 << 8)  /* Set if we need to remove the ttl */
-#define ARGS_SET_IFEQ (1 << 9) /* Set if we need compare and set */
-#define ARGS_ARGV3 (1 << 10)   /* Set if the value is at argv[3]; otherwise it's \
-                                * at argv[2]. */
-#define ARGS_SET_FNX (1 << 11) /* Set if key item not exists. */
-#define ARGS_SET_FXX (1 << 12) /* Set if key item exists. */
+#define ARGS_SET_NX (1 << 0)    /* Set if key not exists. */
+#define ARGS_SET_XX (1 << 1)    /* Set if key exists. */
+#define ARGS_EX (1 << 2)        /* Set if time in seconds is given */
+#define ARGS_PX (1 << 3)        /* Set if time in ms in given */
+#define ARGS_KEEPTTL (1 << 4)   /* Set and keep the ttl */
+#define ARGS_SET_GET (1 << 5)   /* Set if want to get key before set */
+#define ARGS_EXAT (1 << 6)      /* Set if timestamp in second is given */
+#define ARGS_PXAT (1 << 7)      /* Set if timestamp in ms is given */
+#define ARGS_PERSIST (1 << 8)   /* Set if we need to remove the ttl */
+#define ARGS_SET_IFEQ (1 << 9)  /* Set if we need compare and set */
+#define ARGS_ARGV3 (1 << 10)    /* Set if the value is at argv[3]; otherwise it's \
+                                 * at argv[2]. */
+#define ARGS_SET_FNX (1 << 11)  /* Set if key item not exists. */
+#define ARGS_SET_FXX (1 << 12)  /* Set if key item exists. */
+#define ARGS_SET_IFNE (1 << 13) /* Set only if values are not equal */
+#define ARGS_BYINT (1 << 14)    /* Set if the value needs to be incremented by an integer. */
+#define ARGS_BYFLOAT (1 << 15)  /* Set if the value needs to be incremented by a float. */
+#define ARGS_LBOUND (1 << 16)   /* Set if lower bound is specified. */
+#define ARGS_UBOUND (1 << 17)   /* Set if upper bound is specified. */
+#define ARGS_SATURATE (1 << 18) /* Set if saturation is enabled. */
+#define ARGS_ENX (1 << 19)      /* Set if expire only when no ttl exists. */
+
+#define ARGS_SET_CONDITIONAL \
+    (ARGS_SET_NX | ARGS_SET_XX | ARGS_SET_IFEQ | ARGS_SET_IFNE)
 
 /* An Object, that is a type able to hold a string / list / set */
 
@@ -791,9 +838,10 @@ typedef enum {
  * by a 64 bit module type ID, which has a 54 bits module-specific signature
  * in order to dispatch the loading to the right module, plus a 10 bits
  * encoding version. */
-#define OBJ_MODULE 5   /* Module object. */
-#define OBJ_STREAM 6   /* Stream object. */
-#define OBJ_TYPE_MAX 7 /* Maximum number of object types */
+#define OBJ_MODULE 5    /* Module object. */
+#define OBJ_STREAM 6    /* Stream object. */
+#define OBJ_PATH_HASH 7 /* Path hash object. */
+#define OBJ_TYPE_MAX 8  /* Maximum number of object types */
 
 typedef struct ValkeyModuleType moduleType;
 
@@ -810,11 +858,13 @@ typedef struct ValkeyModuleType moduleType;
 #define OBJ_ENCODING_LINKEDLIST 4 /* No longer used: old list encoding. */
 #define OBJ_ENCODING_ZIPLIST 5    /* No longer used: old list/hash/zset encoding. */
 #define OBJ_ENCODING_INTSET 6     /* Encoded as intset */
-#define OBJ_ENCODING_SKIPLIST 7   /* Encoded as skiplist */
+#define OBJ_ENCODING_BTREE 7      /* Encoded as B+tree (fbtree) */
 #define OBJ_ENCODING_EMBSTR 8     /* Embedded sds string encoding */
 #define OBJ_ENCODING_QUICKLIST 9  /* Encoded as linked list of listpacks */
 #define OBJ_ENCODING_STREAM 10    /* Encoded as a radix tree of listpacks */
 #define OBJ_ENCODING_LISTPACK 11  /* Encoded as a listpack */
+#define OBJ_ENCODING_LISTPACK2 12 /* Encoded as a listpack with metadata tag */
+#define OBJ_ENCODING_PATH_HASH 13 /* Path hash backed by a radix tree */
 
 #define OBJ_REFCOUNT_BITS 29
 #define OBJ_SHARED_REFCOUNT ((1 << OBJ_REFCOUNT_BITS) - 1) /* Global object never destroyed. */
@@ -832,25 +882,27 @@ typedef struct ValkeyModuleType moduleType;
  * The optional variable-sized embedded data has 2 possible layouts. If value is embedded (hasembval == 1)
  *  the `val_ptr` pointer is not used - instead the val data is embedded:
  *
- *    +------+----------+-----+------------+----------+--------+-----------------+---------+------------+
- *    | type | encoding | lru | has* flags | refcount | expire | key_header_size | key sds | value data |
- *    +------+----------+-----+------------+----------+--------+-----------------+---------+------------+
- *                                                      ^        ^                 ^         ^
- *                                                      |        |                 |         |
- *                                                      |        |                 |         +--- present because hasembval == 1
- *                                                      |        |                 |
- *                                                      |        +-----------------+--- present if hasembkey == 1
+ *    +------+----------+-----+------------+----------+--------+----------+-----------------+---------+------------+
+ *    | type | encoding | lru | has* flags | refcount | expire | metadata | key_header_size | key sds | value data |
+ *    +------+----------+-----+------------+----------+--------+----------+-----------------+---------+------------+
+ *                                                      ^        ^          ^                 ^         ^
+ *                                                      |        |          |                 |         |
+ *                                                      |        |          |                 |         +--- present because hasembval == 1
+ *                                                      |        |          |                 |
+ *                                                      |        +----------+-----------------+--- present if hasembkey == 1
+ *                                                      |
  *                                                      |
  *                                                      +--- present if hasexpire == 1
  *
  * Otherwise value is not embedded and we use the `val_ptr` pointer:
  *
- *    +------+----------+-----+------------+----------+---------+--------+-----------------+---------+
- *    | type | encoding | lru | has* flags | refcount | val_ptr | expire | key_header_size | key sds |
- *    +------+----------+-----+------------+----------+---------+--------+-----------------+---------+
- *                                                      ^         ^        ^                 ^
- *                                                      |         |        |                 |
- *                                                      |         |        +-----------------+--- present if hasembkey == 1
+ *    +------+----------+-----+------------+----------+---------+--------+----------+-----------------+---------+
+ *    | type | encoding | lru | has* flags | refcount | val_ptr | expire | metadata | key_header_size | key sds |
+ *    +------+----------+-----+------------+----------+---------+--------+----------+-----------------+---------+
+ *                                                      ^         ^        ^          ^                 ^
+ *                                                      |         |        |          |                 |
+ *                                                      |         |        +----------+-----------------+--- present if hasembkey == 1
+ *                                                      |         |
  *                                                      |         |
  *                                                      |         +--- present if hasexpire == 1
  *                                                      |
@@ -955,10 +1007,9 @@ typedef struct serverDb {
     } expiry[ACTIVE_EXPIRY_TYPE_COUNT];
 
     /* fields related to dirty key tracking
-     * for consistent writes with durability */
-    hashtable *uncommitted_keys;    /* Map of dirty keys to the offset required by replica acknowledgement */
-    long long dirty_repl_offset;    /* Replication offset for a dirty DB */
-    rax *reply_duration;            /* Radix tree tracking reply durations for durable blocked clients */
+     * for consistent writes with reply-blocking */
+    hashtable *uncommitted_keys; /* Map of dirty keys to the offset that must be durably committed */
+    long long dirty_repl_offset; /* Replication offset for a dirty DB */
 } serverDb;
 
 /* forward declaration for functions ctx */
@@ -972,6 +1023,7 @@ typedef struct functionsLibCtx functionsLibCtx;
 typedef struct rdbLoadingCtx {
     serverDb **dbarray;
     functionsLibCtx *functions_lib_ctx;
+    client *update_client; /* Fake client for executing inline replication commands during RDB load. */
 } rdbLoadingCtx;
 
 typedef sds (*rdbAuxFieldEncoder)(int flags);
@@ -998,6 +1050,7 @@ typedef struct multiState {
     size_t argv_len_sums;           /* mem used by all commands arguments */
     int alloc_count;                /* total number of multiCmd struct memory reserved. */
     list watched_keys;              /* List of watchedKey for iteration and cleanup. */
+    size_t watched_keys_mem;        /* Memory used by watched key robj objects. */
     hashtable **watched_keys_by_db; /* Per-db hashtable for O(1) watched key lookup.
                                        Array of size server.dbnum, lazily allocated.
                                        Each hashtable stores watchedKey* directly. */
@@ -1059,23 +1112,21 @@ typedef struct readyList {
 /* This structure represents a user. This is useful for ACLs, the
  * user is associated to the connection after the connection is authenticated.
  * If there is no associated user, the connection uses the default user. */
-#define USER_COMMAND_BITS_COUNT 1024             /* The total number of command bits     \
-                                                   in the user structure. The last valid \
-                                                   command ID we can set in the user     \
-                                                   is USER_COMMAND_BITS_COUNT-1. */
-#define USER_FLAG_ENABLED (1 << 0)               /* The user is active. */
-#define USER_FLAG_DISABLED (1 << 1)              /* The user is disabled. */
-#define USER_FLAG_NOPASS (1 << 2)                /* The user requires no password, any   \
-                                                    provided password will work. For the \
-                                                    default user, this also means that   \
-                                                    no AUTH is needed, and every         \
-                                                    connection is immediately            \
-                                                    authenticated. */
-#define USER_FLAG_SANITIZE_PAYLOAD (1 << 3)      /* The user require a deep RESTORE \
-                                                  * payload sanitization. */
-#define USER_FLAG_SANITIZE_PAYLOAD_SKIP (1 << 4) /* The user should skip the     \
-                                                  * deep sanitization of RESTORE \
-                                                  * payload. */
+#define USER_COMMAND_BITS_COUNT 1024 /* The total number of command bits     \
+                                       in the user structure. The last valid \
+                                       command ID we can set in the user     \
+                                       is USER_COMMAND_BITS_COUNT-1. */
+#define USER_FLAG_ENABLED (1 << 0)   /* The user is active. */
+#define USER_FLAG_DISABLED (1 << 1)  /* The user is disabled. */
+#define USER_FLAG_NOPASS (1 << 2)    /* The user requires no password, any   \
+                                        provided password will work. For the \
+                                        default user, this also means that   \
+                                        no AUTH is needed, and every         \
+                                        connection is immediately            \
+                                        authenticated. */
+#define USER_FLAG_ROLE (1 << 3)      /* This user entry represents a role, \
+                                        not a regular user. Stored in the  \
+                                        Roles rax instead of Users. */
 
 #define SELECTOR_FLAG_ROOT (1 << 0)        /* This is the root user permission \
                                             * selector. */
@@ -1089,10 +1140,15 @@ typedef struct readyList {
 typedef struct user {
     sds name;         /* The username as an SDS string. */
     uint32_t flags;   /* See USER_FLAG_* */
-    list *passwords;  /* A list of SDS valid passwords for this user. */
+    list *passwords;  /* A list of SDS valid passwords for this user (NULL for roles). */
     list *selectors;  /* A list of selectors this user validates commands
                          against. This list will always contain at least
                          one selector for backwards compatibility. */
+    list *roles;      /* For users: the roles held by the user, kept in the
+                         order they were assigned. Elements are `user *`
+                         pointers owned by the Roles rax (NULL for roles). */
+    dict *members;    /* For roles: the users holding this role, keyed by their
+                         `user *` pointer (NULL for users). */
     robj *acl_string; /* cached string represent of ACLs */
 } user;
 
@@ -1248,14 +1304,23 @@ typedef struct ClientFlags {
                                               or client::buf. */
     uint64_t keyspace_notified : 1;        /* Indicates that a keyspace notification was triggered during the execution of the
                                               current command. */
-    uint64_t durable_blocked_client : 1;   /* This is a durable blocked client that is waiting for the server to
-                                            * acknowledge the write of the command that caused it to be blocked. */
+    uint64_t argv_borrowed : 1;            /* The argv array and its elements are borrowed from the caller (VM_CallArgv) and must not be freed. */
+    uint64_t throttled : 1;                /* Currently queued in a throttler */
+    uint64_t throttle_checked : 1;         /* Already passed throttle check for this command */
+    uint64_t throttle_multi : 1;           /* Matches multiple throttlers */
+    uint64_t forkless_managed : 1;         /* Client is owned by forkless save. Written only on the
+                                            * main thread. The save thread only reads it */
 } ClientFlags;
+/* Ensure ClientFlags never silently grows beyond two uint64_t words.
+ * If this fires, move a flag to a separate field or widen the limit. */
+static_assert(sizeof(ClientFlags) <= sizeof(uint64_t) * 2,
+              "ClientFlags exceeds 128 bits; add a new word or remove a flag");
 
 typedef struct ClientPubSubData {
     hashtable *pubsub_channels;      /* channels a client is interested in (SUBSCRIBE) */
     hashtable *pubsub_patterns;      /* patterns a client is interested in (PSUBSCRIBE) */
     hashtable *pubsubshard_channels; /* shard level channels a client is interested in (SSUBSCRIBE) */
+    size_t pubsub_object_mem;        /* Memory used by channel/pattern name robj objects. */
     /* If this client is in tracking mode and this field is non zero,
      * invalidation messages for keys fetched by this client will be sent to
      * the specified client ID. */
@@ -1264,6 +1329,26 @@ typedef struct ClientPubSubData {
                                       subscribed to in BCAST mode, in the
                                       context of client side caching. */
 } ClientPubSubData;
+
+/* Max decoded bytes processed before yielding to the event loop. This is
+ * shared by steady-state and dual-channel replication paths. */
+#define REPL_DECODE_EVENT_BUDGET (1024 * 1024)
+
+/* Bound compression work and staging memory for one write dispatch. */
+#define REPL_COMPRESSION_BATCH_SIZE (1024 * 1024)
+
+/* Primary-side compression state for one replica link. */
+typedef struct replicaCompressionState {
+    streamCompressor compressor;     /* Codec state retained across replication write batches. */
+    bool envelope_written;           /* The VCS envelope is emitted once per link. */
+    sds out_buf;                     /* Compressed bytes waiting for the socket. */
+    size_t out_buf_pos;              /* Next byte to send from out_buf. */
+    size_t batch_uncompressed_bytes; /* Backlog bytes represented by out_buf. */
+    size_t frame_uncompressed_bytes; /* Raw bytes accumulated in the current codec frame. */
+    size_t frame_max_bytes;          /* Close a frame at this raw-byte threshold, or 0 to keep it open. */
+    long long compressed_bytes;      /* Completed batches, for INFO replication. */
+    long long uncompressed_bytes;    /* Completed batches, for INFO replication. */
+} replicaCompressionState;
 
 typedef struct ClientReplicationData {
     int repl_state;                      /* Replication state if this is a replica. */
@@ -1275,6 +1360,7 @@ typedef struct ClientReplicationData {
     long long read_reploff;              /* Read replication offset if this is a primary. */
     long long reploff;                   /* Applied replication offset if this is a primary. */
     long long repl_applied;              /* Applied replication data count in querybuf, if this is a replica. */
+    int repl_applied_dbid;               /* DB selected at repl_applied in the stream, if this is a slot import. */
     long long repl_ack_off;              /* Replication ack offset, if this is a replica. */
     long long repl_aof_off;              /* Replication AOF fsync ack offset, if this is a replica. */
     long long repl_ack_time;             /* Replication ack time, if this is a replica. */
@@ -1288,6 +1374,8 @@ typedef struct ClientReplicationData {
     char *replica_addr;                  /* Optionally given by REPLCONF ip-address */
     int replica_version;                 /* Version on the form 0xMMmmpp. */
     short replica_capa;                  /* Replica capabilities: REPLICA_CAPA_* bitwise OR. */
+    _Atomic(int) forkless_pending_close; /* Main thread asks the forkless save to hand this replica
+                                          * back for closing. Atomic (relaxed) since both threads access it without a lock. */
     short replica_req;                   /* Replica requirements: REPLICA_REQ_* */
     int is_in_sync;                      /* Runtime flag: 1 if this replica is in the ISR
                                             (in-sync replica group). Set by primary when
@@ -1300,6 +1388,8 @@ typedef struct ClientReplicationData {
     size_t ref_block_pos;                /* Access position of referenced buffer block,
                                            i.e. the next offset to send. */
     sds replica_nodeid;                  /* Node id in cluster mode. */
+
+    replicaCompressionState *repl_compression; /* Primary-side compression state for this link, or NULL for plaintext. */
 } ClientReplicationData;
 
 typedef struct ClientModuleData {
@@ -1358,6 +1448,10 @@ typedef struct client {
     /* Input buffer and command parsing fields */
     sds querybuf;        /* Buffer we use to accumulate client queries. */
     size_t qb_pos;       /* The position we have read in querybuf. */
+    size_t qb_applied;   /* Right boundary of the *current* command in querybuf.
+                          * qb_pos may run ahead due to multi-command parsing, so
+                          * we use qb_applied (replicated clients only) to advance
+                          * reploff by exactly this command's bytes. */
     robj **argv;         /* Arguments of current command. */
     int argc;            /* Num of arguments of current command. */
     int argv_len;        /* Size of argv array (may be more than argc) */
@@ -1394,9 +1488,13 @@ typedef struct client {
     payloadHeader *last_header; /* Pointer to the last header in a buffer when using copy avoidance */
     int original_argc;          /* Num of arguments of original command if arguments were rewritten. */
     robj **original_argv;       /* Arguments of original command if arguments were rewritten. */
+    uint32_t redact_arg_bitmap; /* Bitmap of argument indexes that should be redacted in logs. */
     /* Client flags and state indicators */
     union {
-        uint64_t raw_flag;
+        struct {
+            uint64_t raw_flag1;
+            uint64_t raw_flag2;
+        };
         struct ClientFlags flag;
     };
     /* Cache Locality: Grouped with 'flag' for getClientType() hot path. */
@@ -1412,14 +1510,14 @@ typedef struct client {
      * client, and in which category the client was, in order to remove it
      * before adding it the new value. */
     uint8_t last_memory_type;
-    uint8_t capa;                    /* Client capabilities: CLIENT_CAPA* macros. */
-    listNode pending_read_list_node; /* IO thread only ?*/
+    uint8_t capa; /* Client capabilities: CLIENT_CAPA* macros. */
     /* Statistics and metrics */
     unsigned long long net_input_bytes;           /* Total network input bytes read from this client. */
     unsigned long long net_input_bytes_curr_cmd;  /* Total network input bytes read for the* execution of this client's current command. */
     unsigned long long net_output_bytes;          /* Total network output bytes sent to this client. */
     unsigned long long commands_processed;        /* Total count of commands this client executed. */
     unsigned long long net_output_bytes_curr_cmd; /* Total network output bytes sent to this client, by the current command. */
+    _Atomic(size_t) io_tracked_reply_len;         /* Total size of BULK_STR_REF replies tracked by I/O threads. */
     size_t buf_peak;                              /* Peak used size of buffer in last 5 sec interval. */
     int nwritten;                                 /* Number of bytes of the last write. */
     int nread;                                    /* Number of bytes of the last read. */
@@ -1450,14 +1548,28 @@ typedef struct client {
     list *deferred_reply;                    /* List of reply objects to be sent to the client, typically after
                                                 the client has been unblocked. */
     unsigned long long deferred_reply_bytes; /* Total bytes of objects in the blocked client pending list.*/
+    /* Throttling */
+    struct throttler *throttler;       /* Current throttler this client is queued in, or NULL */
+    listNode *throttle_node;           /* Node in throttler's client_queue */
+    monotime throttle_start;           /* When this client was queued for throttling */
+    struct trendCalculator *cob_trend; /* Per-replica COB size trend (NULL if not replica) */
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
-    struct clientDurabilityInfo clientDurabilityInfo;
+    struct clientReplyBlockingState reply_blocking_state;
 } client;
 
 /* Forward declaration */
 bool isImportSlotMigrationJob(slotMigrationJob *job);
+
+/* Absolute postpone mask from client IO offload state and forkless ownership (not artificial READ hold). */
+static inline int clientConnPostponeMaskFromIOState(client *c) {
+    int mask = 0;
+    if (c->io_read_state != CLIENT_IDLE) mask |= CONN_POSTPONE_READ;
+    if (c->io_write_state != CLIENT_IDLE) mask |= CONN_POSTPONE_WRITE;
+    if (c->flag.forkless_managed) mask |= CONN_POSTPONE_WRITE;
+    return mask;
+}
 
 /* Get the class of a client, used in order to enforce limits to different
  * classes of clients.
@@ -1522,7 +1634,7 @@ struct sharedObjectsStruct {
         *execaborterr, *noautherr, *noreplicaserr, *nosyncreplicas, *busykeyerr, *oomerr, *plus, *messagebulk, *pmessagebulk,
         *subscribebulk, *unsubscribebulk, *psubscribebulk, *punsubscribebulk, *del, *unlink, *rpop, *lpop, *lpush, *zadd,
         *rpoplpush, *lmove, *blmove, *zpopmin, *zpopmax, *emptyscan, *multi, *exec, *left, *right, *hset, *hsetex, *hdel, *hpexpireat, *hpersist, *srem,
-        *xgroup, *xclaim, *script, *replconf, *eval, *cluster, *syncslots, *persist, *set, *pexpireat, *pexpire, *time, *pxat, *absttl,
+        *xgroup, *xclaim, *xdel, *xack, *script, *replconf, *eval, *cluster, *syncslots, *persist, *set, *pexpireat, *pexpire, *time, *pxat, *absttl,
         *retrycount, *force, *justid, *entriesread, *lastid, *ping, *setid, *keepttl, *load, *createconsumer, *commit, *getack,
         *special_asterisk, *special_equals, *default_username, *redacted, *ssubscribebulk, *sunsubscribebulk, *fields,
         *finish, *state, *success, *failed, *name, *message,
@@ -1534,42 +1646,36 @@ struct sharedObjectsStruct {
     sds minstring, maxstring;
 };
 
-/* ZSETs use a specialized version of Skiplists */
-typedef struct zskiplistNode {
-    union {
-        double score;         /* Sorting score for node ordering. */
-        unsigned long length; /* Number of elements in the skiplist. */
-    };
-    union {
-        struct zskiplistNode *backward; /* Pointer to previous node for reverse traversal. */
-        struct zskiplistNode *tail;     /* Tail element of the skiplist. */
-    };
-    struct zskiplistLevel {
-        struct zskiplistNode *forward;
-        /* At each level we keep the span, which is the number of elements which are on the "subtree"
-         * from this node at this level to the next node at the same level.
-         * One exception is the value at level 0. In level 0 the span can only be 1 or 0 (in case the last elements in the list)
-         * So we use it in order to hold the height of the node, which is the number of levels. */
-        unsigned long span;
-    } level[1]; /* Flexible array member - actual levels determined at node creation. */
-    /* For non-header nodes, after the level[], sds header length (1 byte) and an embedded sds element are stored. */
-} zskiplistNode;
-
-/* The header node does not store actual data (no score, no backward pointer,
- * and its node height is fixed at ZSKIPLIST_MAXLEVEL).
- * To save memory, we reuse the memory space of these fields in the header node to store:
- *   - skiplist length (number of elements)
- *   - tail pointer to the last element
- *   - maximum current level of the skiplist
- * For detailed memory layout, refer to the zskiplistNode struct definition. */
-typedef struct zskiplist {
-    zskiplistNode header;
-} zskiplist;
+/* OrderedIndex - full definition in ordered_index.h */
+typedef struct OrderedIndex OrderedIndex;
 
 typedef struct zset {
     hashtable *ht;
-    zskiplist *zsl;
+    OrderedIndex *oi;
 } zset;
+
+/* Lookup-key marking for fbtree hashtable disambiguation.
+ * Packed fbtree items ([score][ele]) are stored in the hashtable. When doing
+ * a lookup with a plain sds key, we mark it so the hash/compare callbacks
+ * can distinguish it from a packed stored item. */
+#define ZSET_LOOKUP_TYPE5_MARKER 6
+static inline void zsetMarkLookupKey(sds s) {
+    if (sdsType(s) == SDS_TYPE_5)
+        s[-1] = (s[-1] & ~SDS_TYPE_MASK) | ZSET_LOOKUP_TYPE5_MARKER;
+    else
+        sdsSetAuxBit(s, 0, 1);
+}
+static inline void zsetUnmarkLookupKey(sds s) {
+    unsigned char type = s[-1] & SDS_TYPE_MASK;
+    if (type == ZSET_LOOKUP_TYPE5_MARKER)
+        s[-1] = (s[-1] & ~SDS_TYPE_MASK) | SDS_TYPE_5;
+    else
+        sdsSetAuxBit(s, 0, 0);
+}
+static inline int zsetIsLookupKey(const_sds s) {
+    unsigned char type = s[-1] & SDS_TYPE_MASK;
+    return type == ZSET_LOOKUP_TYPE5_MARKER || sdsGetAuxBit(s, 0);
+}
 
 typedef struct clientBufferLimitsConfig {
     unsigned long long hard_limit_bytes;
@@ -1705,6 +1811,9 @@ typedef struct serverTLSContextConfig {
     char *client_cert_file;     /* Certificate to use as a client; if none, use cert_file */
     char *client_key_file;      /* Private key filename for client_cert_file */
     char *client_key_file_pass; /* Optional password for client_key_file */
+    char *alt_cert_file;        /* Alternate server side cert file name */
+    char *alt_key_file;         /* Private key filename for alt_cert_file */
+    char *alt_key_file_pass;    /* Optional password for alt_key_file */
     int client_auth_user;       /* Field to be used for automatic TLS authentication based on client TLS certificate */
     char *dh_params_file;
     char *ca_cert_file;
@@ -1793,7 +1902,6 @@ typedef enum childInfoType {
 } childInfoType;
 
 struct valkeyServer {
-    durable_t durability;
     /* General */
     pid_t pid;                                        /* Main process pid. */
     pthread_t main_thread_id;                         /* Main thread id */
@@ -1808,31 +1916,32 @@ struct valkeyServer {
     hashtable *commands;                              /* Command table */
     hashtable *orig_commands;                         /* Command table before command renaming. */
     sds command_response_cache[RESP_CACHE_INDEX_MAX]; /* Cached COMMAND response: [0]=RESP2, [1]=RESP3 */
-    aeEventLoop *el;
-    _Atomic(AeIoState) io_poll_state;    /* Indicates the state of the IO polling. */
-    int io_ae_fired_events;              /* Number of poll events received by the IO thread. */
-    rax *errors;                         /* Errors table */
-    volatile sig_atomic_t shutdown_asap; /* Shutdown ordered by signal handler. */
-    mstime_t shutdown_mstime;            /* Timestamp to limit graceful shutdown. */
-    int last_sig_received;               /* Indicates the last SIGNAL received, if any (e.g., SIGINT or SIGTERM). */
-    int shutdown_flags;                  /* Flags passed to prepareForShutdown(). */
-    int activerehashing;                 /* Incremental rehash in serverCron() */
-    int active_defrag_cpu_percent;       /* Current desired CPU percentage for active defrag */
-    char *pidfile;                       /* PID file path */
-    int arch_bits;                       /* 32 or 64 depending on sizeof(long) */
-    int cronloops;                       /* Number of times the cron function run */
-    char runid[CONFIG_RUN_ID_SIZE + 1];  /* ID always different at every exec. */
-    int sentinel_mode;                   /* True if this instance is a Sentinel. */
-    size_t initial_memory_usage;         /* Bytes used after initialization. */
-    int always_show_logo;                /* Show logo even for non-stdout logging. */
-    int in_exec;                         /* Are we inside EXEC? */
-    int busy_module_yield_flags;         /* Are we inside a busy module? (triggered by RM_Yield). see BUSY_MODULE_YIELD_ flags. */
-    const char *busy_module_yield_reply; /* When non-null, we are inside RM_Yield. */
-    char *ignore_warnings;               /* Config: warnings that should be ignored. */
-    int client_pause_in_transaction;     /* Was a client pause executed during this Exec? */
-    int server_del_keys_in_slot;         /* The server is deleting the keys in the dirty slot. */
-    int thp_enabled;                     /* If true, THP is enabled. */
-    size_t page_size;                    /* The page size of OS. */
+    aeEventLoop *el;                                  /* Main event loop */
+    _Atomic(AeIoState) io_poll_state;                 /* Indicates the state of the IO polling. */
+    int io_ae_fired_events;                           /* Number of poll events received by the IO thread. */
+    rax *errors;                                      /* Errors table */
+    volatile sig_atomic_t shutdown_asap;              /* Shutdown ordered by signal handler. */
+    mstime_t shutdown_mstime;                         /* Timestamp to limit graceful shutdown. */
+    int last_sig_received;                            /* Indicates the last SIGNAL received, if any (e.g., SIGINT or SIGTERM). */
+    int shutdown_flags;                               /* Flags passed to prepareForShutdown(). */
+    int activerehashing;                              /* Incremental rehash in serverCron() */
+    int active_defrag_cpu_percent;                    /* Current desired CPU percentage for active defrag */
+    char *pidfile;                                    /* PID file path */
+    int arch_bits;                                    /* 32 or 64 depending on sizeof(long) */
+    int cronloops;                                    /* Number of times the cron function run */
+    char runid[CONFIG_RUN_ID_SIZE + 1];               /* ID always different at every exec. */
+    int sentinel_mode;                                /* True if this instance is a Sentinel. */
+    size_t initial_memory_usage;                      /* Bytes used after initialization. */
+    int always_show_logo;                             /* Show logo even for non-stdout logging. */
+    int in_exec;                                      /* Are we inside EXEC? */
+    int in_call;                                      /* Nesting level within the call() function. */
+    int busy_module_yield_flags;                      /* Are we inside a busy module? (triggered by RM_Yield). see BUSY_MODULE_YIELD_ flags. */
+    const char *busy_module_yield_reply;              /* When non-null, we are inside RM_Yield. */
+    char *ignore_warnings;                            /* Config: warnings that should be ignored. */
+    int client_pause_in_transaction;                  /* Was a client pause executed during this Exec? */
+    int server_del_keys_in_slot;                      /* The server is deleting the keys in the dirty slot. */
+    int thp_enabled;                                  /* If true, THP is enabled. */
+    size_t page_size;                                 /* The page size of OS. */
     /* Modules */
     dict *moduleapi;                   /* Exported core APIs dictionary for modules. */
     dict *sharedapi;                   /* Like moduleapi but containing the APIs that
@@ -1841,9 +1950,11 @@ struct valkeyServer {
                                           during startup or arguments to loadex. */
     list *loadmodule_queue;            /* List of modules to load at startup. */
     int module_pipe[2];                /* Pipe used to awake the event loop by module threads. */
+    int aof_pipe[2];                   /* Pipe used by BIO to wake event loop after AOF flush. */
     pid_t child_pid;                   /* PID of current child */
     int child_type;                    /* Type of current child */
     _Atomic(int) module_gil_acquiring; /* Indicates whether the GIL is being acquiring by the main thread. */
+    _Atomic(int) module_gil_acquired;  /* Indicates if the main thread has the GIL acquired. */
     /* Networking */
     int port;                              /* TCP listening port */
     int tls_port;                          /* TLS listening port */
@@ -1859,8 +1970,6 @@ struct valkeyServer {
     list *clients;                         /* List of active clients */
     list *clients_to_close;                /* Clients to close asynchronously */
     list *clients_pending_write;           /* There is to write or install handler. */
-    list *clients_pending_io_read;         /* List of clients with pending read to be process by I/O threads. */
-    list *clients_pending_io_write;        /* List of clients with pending write to be process by I/O threads. */
     list *replicas, *monitors;             /* List of replicas and MONITORs */
     rax *replicas_waiting_psync;           /* Radix tree for tracking replicas awaiting partial synchronization.
                                             * Key: RDB client ID
@@ -1893,7 +2002,7 @@ struct valkeyServer {
     int protected_mode;                       /* Don't accept external connections. */
     int io_threads_num;                       /* Number of IO threads to use. */
     int active_io_threads_num;                /* Current number of active IO threads, includes main thread. */
-    int events_per_io_thread;                 /* Number of events on the event loop to trigger IO threads activation. */
+    int io_threads_always_active;             /* Activate all IO threads regardless of load size. */
     int prefetch_batch_max_size;              /* Maximum number of keys to prefetch in a single batch */
     long long events_processed_while_blocked; /* processEventsWhileBlocked() */
     int enable_protected_configs;             /* Enable the modification of protected configs, see PROTECTED_ACTION_ALLOWED_* */
@@ -1901,6 +2010,7 @@ struct valkeyServer {
     int enable_module_cmd;                    /* Enable MODULE commands, see PROTECTED_ACTION_ALLOWED_* */
     int enable_debug_assert;                  /* Enable debug asserts */
     int debug_client_enforce_reply_list;      /* Force client to always use the reply list */
+    int debug_force_free_primary_async;       /* Force freeClient on primary to use async path */
     /* Reply construction copy avoidance */
     int min_io_threads_copy_avoid;           /* Minimum number of IO threads for copy avoidance in reply construction */
     int min_string_size_copy_avoid_threaded; /* Minimum bulk string size for copy avoidance in reply construction when IO threads enabled */
@@ -1915,45 +2025,53 @@ struct valkeyServer {
     off_t loading_process_events_interval_bytes;
     time_t loading_process_events_interval_ms;
     /* Fields used only for stats */
-    time_t stat_starttime;                         /* Server start time */
-    long long stat_numcommands;                    /* Number of processed commands */
-    long long stat_numconnections;                 /* Number of connections received */
-    long long stat_expiredkeys;                    /* Number of expired keys */
-    long long stat_expiredfields;                  /* Number of expired hash fields */
-    double stat_expired_keys_stale_perc;           /* Percentage of keys probably expired */
-    double stat_expired_keys_with_vola_stale_perc; /* Percentage of keys probably expired */
-    long long stat_expired_time_cap_reached_count; /* Early expire cycle stops.*/
-    long long stat_expire_cycle_time_used;         /* Cumulative microseconds used. */
-    long long stat_evictedkeys;                    /* Number of evicted keys (maxmemory) */
-    long long stat_evictedclients;                 /* Number of evicted clients */
-    long long stat_evictedscripts;                 /* Number of evicted lua scripts. */
-    long long stat_total_eviction_exceeded_time;   /* Total time over the memory limit, unit us */
-    monotime stat_last_eviction_exceeded_time;     /* Timestamp of current eviction start, unit us */
-    long long stat_keyspace_hits;                  /* Number of successful lookups of keys */
-    long long stat_keyspace_misses;                /* Number of failed lookups of keys */
-    long long stat_active_defrag_hits;             /* number of allocations moved */
-    long long stat_active_defrag_misses;           /* number of allocations scanned but not moved */
-    long long stat_active_defrag_key_hits;         /* number of keys with moved allocations */
-    long long stat_active_defrag_key_misses;       /* number of keys scanned and not moved */
-    long long stat_active_defrag_scanned;          /* number of dictEntries scanned */
-    long long stat_total_active_defrag_time;       /* Total time memory fragmentation over the limit, unit us */
-    monotime stat_last_active_defrag_time;         /* Timestamp of current active defrag start */
-    size_t stat_peak_memory;                       /* Max used memory record */
-    long long stat_aof_rewrites;                   /* number of aof file rewrites performed */
-    long long stat_aofrw_consecutive_failures;     /* The number of consecutive failures of aofrw */
-    long long stat_rdb_saves;                      /* number of rdb saves performed */
-    long long stat_fork_time;                      /* Time needed to perform latest fork() */
-    double stat_fork_rate;                         /* Fork rate in GB/sec. */
-    long long stat_total_forks;                    /* Total count of fork. */
-    long long stat_rejected_conn;                  /* Clients rejected because of maxclients */
-    long long stat_sync_full;                      /* Number of full resyncs with replicas. */
-    long long stat_sync_partial_ok;                /* Number of accepted PSYNC requests. */
-    long long stat_sync_partial_err;               /* Number of unaccepted PSYNC requests. */
-    commandlog commandlog[COMMANDLOG_TYPE_NUM];    /* Logs of commands. */
-    struct malloc_stats cron_malloc_stats;         /* sampled in serverCron(). */
-    long long stat_net_input_bytes;                /* Bytes read from network. */
-    long long stat_net_output_bytes;               /* Bytes written to network. */
-    long long stat_net_repl_input_bytes;           /* Bytes read during replication, added to stat_net_input_bytes in 'info'. */
+    time_t stat_starttime;                                 /* Server start time */
+    long long stat_numcommands;                            /* Number of processed commands */
+    long long stat_numconnections;                         /* Number of connections received */
+    long long stat_expiredkeys;                            /* Number of expired keys */
+    long long stat_expiredfields;                          /* Number of expired hash fields */
+    double stat_expired_keys_stale_perc;                   /* Percentage of keys probably expired */
+    double stat_expired_keys_with_vola_stale_perc;         /* Percentage of keys probably expired */
+    long long stat_expired_time_cap_reached_count;         /* Early expire cycle stops.*/
+    long long stat_expire_cycle_time_used;                 /* Cumulative microseconds used. */
+    long long stat_evictedkeys;                            /* Number of evicted keys (maxmemory) */
+    long long stat_evictedclients;                         /* Number of evicted clients */
+    long long stat_evictedscripts;                         /* Number of evicted lua scripts. */
+    long long stat_total_eviction_exceeded_time;           /* Total time over the memory limit, unit us */
+    monotime stat_last_eviction_exceeded_time;             /* Timestamp of current eviction start, unit us */
+    long long stat_keyspace_hits;                          /* Number of successful lookups of keys */
+    long long stat_keyspace_misses;                        /* Number of failed lookups of keys */
+    long long stat_active_defrag_hits;                     /* number of allocations moved */
+    long long stat_active_defrag_misses;                   /* number of allocations scanned but not moved */
+    long long stat_active_defrag_key_hits;                 /* number of keys with moved allocations */
+    long long stat_active_defrag_key_misses;               /* number of keys scanned and not moved */
+    long long stat_active_defrag_scanned;                  /* number of dictEntries scanned */
+    long long stat_total_active_defrag_time;               /* Total time memory fragmentation over the limit, unit us */
+    monotime stat_last_active_defrag_time;                 /* Timestamp of current active defrag start */
+    size_t stat_peak_memory;                               /* Max used memory record */
+    long long stat_aof_rewrites;                           /* number of aof file rewrites performed */
+    long long stat_aofrw_consecutive_failures;             /* The number of consecutive failures of aofrw */
+    long long stat_rdb_saves;                              /* number of rdb saves performed */
+    long long stat_fork_time;                              /* Time needed to perform latest fork() */
+    double stat_fork_rate;                                 /* Fork rate in GB/sec. */
+    long long stat_total_forks;                            /* Total count of fork. */
+    long long stat_forkless_fallbacks_module;              /* Forkless fallbacks caused by loaded modules. */
+    long long stat_forkless_fallbacks_slot_import;         /* Forkless fallbacks caused by slot imports. */
+    long long stat_forkless_fallbacks_exclude_data;        /* Forkless fallbacks caused by data-excluding RDB requests. */
+    long long stat_forkless_fallbacks_missing_inband_repl; /* Forkless fallbacks caused by missing inline replication support. */
+    long long stat_forkless_fallbacks_compression;         /* Forkless fallbacks caused by stream compression. */
+    long long stat_forkless_fallbacks_old_rdb_version;     /* Forkless fallbacks caused by an old RDB version. */
+    long long stat_rejected_conn;                          /* Clients rejected because of maxclients */
+    long long stat_rejected_priority_conn;                 /* Prioritized clients rejected because of maxclients */
+    long long stat_num_active_priority_clients;            /* Number of active prioritized clients */
+    long long stat_sync_full;                              /* Number of full resyncs with replicas. */
+    long long stat_sync_partial_ok;                        /* Number of accepted PSYNC requests. */
+    long long stat_sync_partial_err;                       /* Number of unaccepted PSYNC requests. */
+    commandlog commandlog[COMMANDLOG_TYPE_NUM];            /* Logs of commands. */
+    struct malloc_stats cron_malloc_stats;                 /* sampled in serverCron(). */
+    long long stat_net_input_bytes;                        /* Bytes read from network. */
+    long long stat_net_output_bytes;                       /* Bytes written to network. */
+    long long stat_net_repl_input_bytes;                   /* Bytes read during replication, added to stat_net_input_bytes in 'info'. */
     /* Bytes written during replication, added to stat_net_output_bytes in 'info'. */
     long long stat_net_repl_output_bytes;
     long long stat_net_cluster_slot_import_bytes;       /* Bytes read from slot import sources. */
@@ -1961,8 +2079,8 @@ struct valkeyServer {
     size_t stat_current_cow_peak;                       /* Peak size of copy on write bytes. */
     size_t stat_current_cow_bytes;                      /* Copy on write bytes while child is active. */
     monotime stat_current_cow_updated;                  /* Last update time of stat_current_cow_bytes */
-    size_t stat_current_save_keys_processed;            /* Processed keys while child is active. */
-    size_t stat_current_save_keys_total;                /* Number of keys when child started. */
+    _Atomic(size_t) stat_current_save_keys_processed;   /* Processed keys while save is active. */
+    _Atomic(size_t) stat_current_save_keys_total;       /* Number of keys when save started. */
     size_t stat_rdb_cow_bytes;                          /* Copy on write bytes during RDB saving. */
     size_t stat_aof_cow_bytes;                          /* Copy on write bytes during AOF rewrite. */
     size_t stat_module_cow_bytes;                       /* Copy on write bytes during module fork. */
@@ -1970,12 +2088,18 @@ struct valkeyServer {
     double stat_module_progress;                        /* Module save progress. */
     size_t stat_clients_type_memory[CLIENT_TYPE_COUNT]; /* Mem usage by type */
     size_t stat_cluster_links_memory;                   /* Mem usage by cluster links */
+    long long stat_cluster_threaded_reads_processed;    /* Cluster reads completed by I/O threads */
+    long long stat_cluster_threaded_writes_processed;   /* Cluster writes completed by I/O threads */
+    long long stat_cluster_threaded_accepts_processed;  /* Cluster accepts completed by I/O threads */
+    long long stat_cluster_io_main_thread_fallbacks;    /* Cluster I/O ops handled on the main thread because dispatch failed */
     long long
         stat_unexpected_error_replies;                 /* Number of unexpected (aof-loading, replica to primary, etc.) error replies */
     long long stat_total_error_replies;                /* Total number of issued error replies ( command + rejected errors ) */
     long long stat_dump_payload_sanitizations;         /* Number deep dump payloads integrity validations. */
     long long stat_io_reads_processed;                 /* Number of read events processed by IO threads */
+    long long stat_io_reads_pending;                   /* Number of read events pending in IO threads */
     long long stat_io_writes_processed;                /* Number of write events processed by IO threads */
+    long long stat_io_writes_pending;                  /* Number of write events pending in IO threads */
     long long stat_io_freed_objects;                   /* Number of objects freed by IO threads */
     long long stat_io_accept_offloaded;                /* Number of offloaded accepts */
     long long stat_poll_processed_by_io_threads;       /* Total number of poll jobs processed by IO */
@@ -2003,6 +2127,9 @@ struct valkeyServer {
      * Note that commands in transactions are also counted. */
     long long el_cmd_cnt_start;
     long long el_cmd_cnt_max;
+    /* Record the previous baseline and peak number of priority commands executed in one priority cycle. */
+    long long priority_el_cmd_cnt_prev;
+    long long priority_el_cmd_cnt_max;
     /* The sum of active-expire, active-defrag and all other tasks done by cron and beforeSleep,
        but excluding read, write and AOF, which are counted by other sets of metrics. */
     monotime el_cron_duration;
@@ -2017,7 +2144,6 @@ struct valkeyServer {
     int active_expire_effort;    /* From 1 (default) to 10, active effort. */
     int lazy_expire_disabled;    /* If > 0, don't trigger lazy expire */
     int active_defrag_enabled;
-    int sanitize_dump_payload;                   /* Enables deep sanitization for ziplist and listpack in RDB and RESTORE. */
     int skip_checksum_validation;                /* Disable checksum validation for RDB and RESTORE payload. */
     int rdb_version_check;                       /* Try to load RDB produced by a future version. */
     int jemalloc_bg_thread;                      /* Enable jemalloc background thread */
@@ -2047,9 +2173,10 @@ struct valkeyServer {
     double *latency_tracking_info_percentiles; /* Extended latency tracking info output percentile list configuration. */
     int latency_tracking_info_percentiles_len;
     unsigned int max_new_tls_conns_per_cycle; /* The maximum number of tls connections that will be accepted during each
-                                                 invocation of the event loop. */
+                                                    invocation of the event loop. */
     unsigned int max_new_conns_per_cycle;     /* The maximum number of tcp connections that will be accepted during each
-                                                 invocation of the event loop. */
+                                                    invocation of the event loop. */
+    int priority_preemptive_poll_interval_us; /* Priority event loop preemptive poll interval in microseconds */
     /* AOF persistence */
     int aof_enabled;                    /* AOF configuration */
     int aof_state;                      /* AOF_(ON|OFF|WAIT_REWRITE) */
@@ -2084,14 +2211,17 @@ struct valkeyServer {
     int aof_load_truncated;             /* Don't stop on unexpected AOF EOF. */
     int aof_use_rdb_preamble;           /* Specify base AOF to use RDB encoding on AOF rewrites. */
     int aof_rewrite_use_rdb_preamble;   /* Base AOF to use RDB encoding on AOF rewrites start. */
-    _Atomic(int) aof_io_flush_state;     /* AOF always-fsync IO-thread flush state. */
-    _Atomic(int) aof_io_flush_errno;     /* Errno of AOF always-fsync IO-thread flush. */
-    _Atomic(off_t) aof_io_flush_size;    /* Bytes written by the last IO-thread flush. */
+    _Atomic(int) aof_bio_flush_state;   /* AOF always-fsync BIO-thread flush state. */
+    _Atomic(int) aof_bio_flush_errno;   /* Errno of AOF always-fsync BIO-thread flush. */
+    _Atomic(off_t) aof_bio_flush_size;  /* Bytes written by the last BIO-thread flush. */
     _Atomic(int) aof_bio_fsync_status;  /* Status of AOF fsync in bio job. */
     _Atomic(int) aof_bio_fsync_errno;   /* Errno of AOF fsync in bio job. */
     aofManifest *aof_manifest;          /* Used to track AOFs. */
     int aof_disable_auto_gc;            /* If disable automatically deleting HISTORY type AOFs?
                                            default no. (for testings). */
+    int bio_aof_offload_enabled;        /* Hidden feature flag to enable/disable BIO AOF offload
+                                         * and dirty key tracking. */
+    reply_blocking_t reply_blocking;    /* Reply-blocking state container. */
 
     /* RDB persistence */
     long long dirty;                      /* Changes to DB from the last save */
@@ -2101,16 +2231,21 @@ struct valkeyServer {
     struct saveparam *saveparams;         /* Save points array for RDB */
     int saveparamslen;                    /* Number of saving points */
     char *rdb_filename;                   /* Name of RDB file */
-    int rdb_compression;                  /* Use compression in RDB? */
+    int rdb_compression;                  /* RDB compression mode */
+    int repl_compression;                 /* Replication compression mode */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */
+    int forkless_infrastructure_enabled;  /* Enable forkless options support. */
     time_t lastsave;                      /* Unix time of last successful save */
     time_t lastbgsave_try;                /* Unix time of last attempted bgsave */
     time_t rdb_save_time_last;            /* Time used by last RDB save run. */
     time_t rdb_save_time_start;           /* Current RDB save start time. */
     int rdb_bgsave_scheduled;             /* BGSAVE when possible if true. */
-    int rdb_child_type;                   /* Type of save by active child. */
+    rdbWriteTarget rdb_write_target;      /* Type of save by active child. */
+    rdbBgsaveType cur_bgsave_type;        /* Current bgsave type. */
+    rdbBgsaveType lastbgsave_type;        /* Last completed bgsave type. */
+    compressionAlgo rdb_child_sync_algo;  /* Streaming compression used by the active replication disk child. */
     int lastbgsave_status;                /* C_OK or C_ERR */
     int stop_writes_on_bgsave_err;        /* Don't allow writes if can't BGSAVE */
     int rdb_pipe_read;                    /* RDB pipe used to transfer the rdb data */
@@ -2124,6 +2259,7 @@ struct valkeyServer {
     int rdb_key_save_delay;               /* Delay in microseconds between keys while
                                            * writing aof or rdb. (for testings). negative
                                            * value means fractions of microseconds (on average). */
+    int forkless_policy;                  /* Fork vs forkless policy: FORKLESS_POLICY_REQUIRE_FORK or _PREFER_FORKLESS */
     int key_load_delay;                   /* Delay in microseconds between keys while
                                            * loading aof or rdb. (for testings). negative
                                            * value means fractions of microseconds (on average). */
@@ -2140,7 +2276,7 @@ struct valkeyServer {
     int syslog_facility;      /* Syslog facility */
     int crashlog_enabled;     /* Enable signal handler for crashlog.
                                * disable for clean core dumps. */
-    int crashed;              /* True if the server has crashed, used in catClientInfoString
+    volatile int crashed;     /* True if the server has crashed, used in catClientInfoString
                                * to indicate that no wait for IO threads is needed. */
     int memcheck_enabled;     /* Enable memory check on crash. */
     int use_exit_on_panic;    /* Use exit() on panic and assert rather than
@@ -2200,6 +2336,8 @@ struct valkeyServer {
                                                  * to establish psync. */
     int debug_pause_after_fork;                 /* Debug param that pauses the main process
                                                  * after a replication fork() (for bgsave). */
+    int debug_pause_before_psync;               /* Replica pauses (SIGSTOP) right before
+                                                 * sending PSYNC to its primary. */
     size_t repl_buffer_mem;                     /* The memory of replication buffer. */
     list *repl_buffer_blocks;                   /* Replication buffers blocks list
                                                  * (serving replica clients and repl backlog) */
@@ -2246,12 +2384,20 @@ struct valkeyServer {
     int repl_ignore_disk_write_error;     /* Configures whether replicas panic when unable to
                                            * persist writes to AOF. */
 
+    int repl_compression_advertised;             /* Compression algorithm advertised in the current upstream
+                                                  * handshake, or REPL_COMPRESSION_CAPA_UNKNOWN before REPLCONF capa. */
+    struct streamPushReader *repl_stream_reader; /* Decoder for the upstream command stream, or NULL for plaintext. */
+
     /* The following two fields is where we store primary PSYNC replid/offset
      * while the PSYNC is in progress. At the end we'll copy the fields into
      * the server->primary client structure. */
-    char primary_replid[CONFIG_RUN_ID_SIZE + 1]; /* Primary PSYNC runid. */
-    long long primary_initial_offset;            /* Primary PSYNC offset. */
-    int repl_replica_lazy_flush;                 /* Lazy FLUSHALL before loading DB? */
+    char primary_replid[CONFIG_RUN_ID_SIZE + 1];   /* Primary PSYNC runid. */
+    long long primary_initial_offset;              /* Primary PSYNC offset. */
+    bool primary_initial_offset_in_rdb;            /* Set on +FULLRESYNC <replid> -1: start offset
+                                                    * comes from the RDB repl-offset aux field. */
+    int repl_replica_lazy_flush;                   /* Lazy FLUSHALL before loading DB? */
+    monotime repl_full_sync_start_time;            /* Monotonic time when full sync started. */
+    long long repl_full_sync_complete_duration_ms; /* Duration of the last successful full sync in ms. */
     /* Import Mode */
     int import_mode; /* If true, server is in import mode and forbid expiration and eviction. */
     /* Synchronous replication. */
@@ -2259,8 +2405,13 @@ struct valkeyServer {
     int get_ack_from_replicas;  /* If true we send REPLCONF GETACK. */
     /* Limits */
     unsigned int maxclients;                    /* Max number of simultaneous clients */
+    unsigned int maxclients_reserved;           /* Client connection slots reserved for priority subnets */
+    char *priority_subnets;                     /* Raw priority-subnets string config */
+    anetSubnet *priority_subnets_array;         /* Compiled priority subnets array */
+    int priority_subnets_count;                 /* Count of compiled priority subnets */
     unsigned long long maxmemory;               /* Max number of memory bytes to use */
     ssize_t maxmemory_clients;                  /* Memory limit for total client buffers */
+    ssize_t maxmemory_scripts;                  /* Memory limit for cached EVAL scripts */
     int maxmemory_policy;                       /* Policy for key eviction */
     int maxmemory_samples;                      /* Precision of random sampling */
     int maxmemory_eviction_tenacity;            /* Aggressiveness of eviction processing */
@@ -2322,14 +2473,16 @@ struct valkeyServer {
     mstime_t cluster_ping_interval;                        /* A debug configuration for setting how often cluster nodes send ping messages. */
     int cluster_message_gossip_perc;                       /* A configuration for setting the percentage of peer nodes to be gossiped in ping/pong messages. */
     char *cluster_configfile;                              /* Cluster auto-generated config file name. */
+    int cluster_configfile_save_behavior;                  /* Cluster config file save behavior. */
+    _Atomic(int) cluster_config_save_status;               /* Status of cluster config save. */
+    _Atomic(time_t) cluster_config_last_save_time;         /* Unix time of last successful cluster config save. */
     struct clusterState *cluster;                          /* State of the cluster */
     int cluster_migration_barrier;                         /* Cluster replicas migration barrier. */
     int cluster_allow_replica_migration;                   /* Automatic replica migrations to orphaned primaries and from empty primaries */
     int cluster_replica_validity_factor;                   /* Replica max data age for failover. */
     int cluster_require_full_coverage;                     /* If true, put the cluster down if
                                                               there is at least an uncovered slot.*/
-    int cluster_replica_no_failover;                       /* Prevent replica from starting a failover
-                                                            if the primary is in failure state. */
+    int cluster_replica_no_failover;                       /* Replica failover policy (NO/YES/IF_EMPTY). */
     char *cluster_announce_ip;                             /* IP address to announce on cluster bus. */
     char *cluster_announce_client_ipv4;                    /* IPv4 for clients, to announce on cluster bus. */
     char *cluster_announce_client_ipv6;                    /* IPv6 for clients, to announce on cluster bus. */
@@ -2356,6 +2509,7 @@ struct valkeyServer {
     sds hash_seed;                                         /* Configurable DB hash seed */
     int cluster_slot_stats_enabled;                        /* Cluster slot usage statistics tracking enabled. */
     mstime_t cluster_mf_timeout;                           /* Milliseconds to do a manual failover. */
+    unsigned int cluster_replica_priority;                 /* Replica priority from cluster-replica-priority. */
     unsigned long cluster_slot_migration_log_max_len;      /* Maximum count of migrations to display in the
                                                             * migration log, after which we will clear finished
                                                             * migrations. */
@@ -2363,9 +2517,10 @@ struct valkeyServer {
                                                             * failover to be attempted. */
     int slot_migration_pipe_read;                          /* Slot migration pipe used to transfer the slots data */
     int slot_migration_child_exit_pipe;                    /* Used by the slot migration parent allow child exit. */
-    connection *slot_migration_pipe_conn;                  /* xxxx */
+    connection *slot_migration_pipe_conn;                  /* Connection of the slot migration target client. The slot
+                                                            * snapshot data read from the pipe is written to it. */
     char *slot_migration_pipe_buff;                        /* In slot migration, this buffer holds slot snapshot data. */
-    ssize_t slot_migration_pipe_bufflen;                   /* that was read from the rdb pipe. */
+    ssize_t slot_migration_pipe_bufflen;                   /* that was read from the slot migration pipe. */
     /* Debug config that goes along with cluster_drop_packet_filter. When set, the link is closed on packet drop. */
     uint32_t debug_cluster_close_link_on_packet_drop : 1;
     /* Debug config to control the random ping. When set, we will disable the random ping in clusterCron. */
@@ -2375,6 +2530,11 @@ struct valkeyServer {
     /* Debug config to expose intermediary slot migration states. */
     uint32_t debug_slot_migration_prevent_pause : 1;
     uint32_t debug_slot_migration_prevent_failover : 1;
+    /* Debug config to override the failover delay (in ms). */
+    int debug_cluster_failover_delay;
+    /* Debug config to force the next failover election to run in a specific
+     * epoch (testing only). -1 means don't override; consumed once. */
+    long long debug_cluster_failover_epoch;
     sds cached_cluster_slot_info[CACHE_CONN_TYPE_MAX]; /* Index in array is a bitwise or of CACHE_CONN_TYPE_* */
     /* Scripting */
     mstime_t busy_reply_threshold;  /* Script / module timeout in milliseconds */
@@ -2409,9 +2569,11 @@ struct valkeyServer {
     int tls_auth_clients;
     serverTLSContextConfig tls_ctx_config;
     long long tls_server_cert_expire_time;
+    long long tls_server_alt_cert_expire_time;
     long long tls_client_cert_expire_time;
     long long tls_ca_cert_expire_time;
     sds tls_server_cert_serial;
+    sds tls_server_alt_cert_serial;
     sds tls_client_cert_serial;
     sds tls_ca_cert_serial;
     serverUnixContextConfig unix_ctx_config;
@@ -2427,7 +2589,7 @@ struct valkeyServer {
     /* Coordinate failover info */
     mstime_t failover_end_time;              /* Deadline for failover command. */
     int force_failover;                      /* If true then failover will be forced at the
-                                              * deadline, otherwise failover is aborted. */
+                                              * deadline; otherwise, failover is aborted. */
     char *target_replica_host;               /* Failover target host. If null during a
                                               * failover then any replica can be used. */
     int target_replica_port;                 /* Failover target port */
@@ -2440,6 +2602,12 @@ struct valkeyServer {
     /* Local environment */
     char *locale_collate;
     char *debug_context; /* A free-form string that has no impact on server except being included in a crash report. */
+    int debug_force_tls_write_error;
+    /* Hot key detection parameters */
+    int hotkeys_sampling_percentage; /* Percentage (1-100) of key accesses sampled for hot-key detection. */
+    int hotkeys_top_k;               /* Number of top keys to track (Space-Saving K); 0 disables detection. */
+    int hotkeys_window_seconds;      /* Length of the QPS accounting window in seconds. */
+    struct spaceSavingManager *hotkeys_manager;
 };
 
 #define MAX_KEYS_BUFFER 256
@@ -2607,11 +2775,22 @@ typedef enum {
     COMMAND_GROUP_GEO,
     COMMAND_GROUP_STREAM,
     COMMAND_GROUP_BITMAP,
+    COMMAND_GROUP_PATH_HASH,
     COMMAND_GROUP_MODULE,
 } serverCommandGroup;
 
 typedef void serverCommandProc(client *c);
 typedef int serverGetKeysProc(struct serverCommand *cmd, robj **argv, int argc, getKeysResult *result);
+
+/* Returns a heap-allocated array of argv indices that hold a database id
+ * argument to be validated by db-level ACL. The caller dereferences each
+ * argv[positions[i]] (via getLongLongFromObject) to obtain the dbid value.
+ * On success, *count is set to the array length.
+ *
+ * Returns NULL on syntax error or if the command has no dbid arguments;
+ * *count is unspecified in that case.
+ *
+ * Caller should free the returned array. */
 typedef int *commandDbIdArgs(robj **argv, int argc, int *count);
 
 /* Command structure.
@@ -2621,6 +2800,13 @@ typedef int *commandDbIdArgs(robj **argv, int argc, int *count);
  * This is the meaning of the flags:
  *
  * CMD_WRITE:       Write command (may modify the key space).
+ *                  WARNING: a command marked CMD_WRITE (or CMD_MAY_REPLICATE)
+ *                  is accepted by the RDB inline-replication opcode
+ *                  (RDB_OPCODE_UPDATE) and will be executed through a fake
+ *                  client, with ACL checks bypassed, when such an RDB is
+ *                  loaded - including a persisted dump.rdb or AOF preamble, not
+ *                  only a live replication stream. Only mark a command with
+ *                  these flags if it is safe to run unconditionally on load.
  *
  * CMD_READONLY:    Commands just reading from keys without changing the content.
  *                  Note that commands that don't read from the keyspace such as
@@ -2669,8 +2855,13 @@ typedef int *commandDbIdArgs(robj **argv, int argc, int *count);
  *                      allowed under circumstances where write commands are disallowed.
  *                      Examples include PUBLISH, which replicates pubsub messages,and
  *                      EVAL, which may execute write commands, which are replicated,
- *                      or may just execute read commands. A command can not be marked
+ *                      or may just execute read commands. A command cannot be marked
  *                      both CMD_WRITE and CMD_MAY_REPLICATE
+ *                      WARNING: like CMD_WRITE, a command marked CMD_MAY_REPLICATE
+ *                      is accepted by the RDB inline-replication opcode and runs
+ *                      on load through a fake client with ACL checks bypassed. Only
+ *                      mark a command with it if it is safe to run unconditionally
+ *                      on load.
  *
  * CMD_SENTINEL:    This command is present in sentinel mode.
  *
@@ -2691,7 +2882,7 @@ typedef int *commandDbIdArgs(robj **argv, int argc, int *count);
  *                   populateCommandLegacyRangeSpec.
  *
  * CMD_ALLOW_BUSY: The command can run while another command is running for
- *                 a long time (timedout script, module command that yields)
+ *                 a long time (timed out script, module command that yields)
  *
  * CMD_MODULE_GETCHANNELS: Use the modules getchannels interface.
  *
@@ -2700,12 +2891,15 @@ typedef int *commandDbIdArgs(robj **argv, int argc, int *count);
  *
  * CMD_ALL_DBS: The command works with all databases.
  *
+ * CMD_WRITE_FIRSTKEY_ONLY: The command must be CMD_WRITE.  It only modifies the first key.
+ *                          Other keys are read-only.  Example: SUNIONSTORE
+ *
  * The following additional flags are only used in order to put commands
  * in a specific ACL category. Commands can have multiple ACL categories.
  * See valkey.conf for the exact meaning of each.
  *
  * @keyspace, @read, @write, @set, @sortedset, @list, @hash, @string, @bitmap,
- * @hyperloglog, @stream, @admin, @fast, @slow, @pubsub, @blocking, @dangerous,
+ * @hyperloglog, @stream, @pathhash, @admin, @fast, @slow, @pubsub, @blocking, @dangerous,
  * @connection, @transaction, @scripting, @geo.
  *
  * Note that:
@@ -2747,6 +2941,9 @@ struct serverCommand {
      * Used for Cluster redirect (may be NULL) */
     serverGetKeysProc *getkeys_proc;
     int num_args; /* Length of args array. */
+    /* Nested prefetch: argv index of the field/member used for the inner hashtable
+     * lookup. 0 means disabled. Used by the prefetch system to find the lookup key. */
+    int member_arg_index;
     /* Array of subcommands (may be NULL) */
     struct serverCommand *subcommands;
     /* Array of arguments (may be NULL) */
@@ -2826,6 +3023,13 @@ typedef struct {
     unsigned char *lpi; /* listpack iterator */
 } setTypeIterator;
 
+/* Enum for the available hashTypeIterator's */
+typedef enum {
+    HASH_ITER_ALL = 0,    /* Iterate all fields */
+    HASH_ITER_VOLATILE,   /* Iterate only fields which carry a ttl */
+    HASH_ITER_PERSISTENT, /* Iterate only fields which do not carry a ttl */
+} hashIteratorType;
+
 /* Structure to hold hash iteration abstraction. Note that iteration over
  * hashes involves both fields and values. Because it is possible that
  * not both are required, store pointers in the iterator to avoid
@@ -2833,7 +3037,7 @@ typedef struct {
 typedef struct {
     robj *subject;
     int encoding;
-    bool volatile_items_iter;
+    hashIteratorType iterator_type;
     unsigned char *fptr, *vptr;
 
     hashtableIterator iter;
@@ -2841,6 +3045,24 @@ typedef struct {
     void *next;
 
 } hashTypeIterator;
+
+typedef struct scanOptions {
+    long count;      /* COUNT option. */
+    sds pat;         /* MATCH pattern. */
+    long long type;  /* TYPE filter. */
+    int patlen;      /* MATCH pattern length. */
+    int use_pattern; /* MATCH is active. */
+    int only_keys;   /* NOVALUES/NOSCORES option. */
+    int input_slot;  /* SLOT option, or -1. */
+    int match_slot;  /* MATCH hashtag slot, or -1. */
+} scanOptions;
+
+typedef struct clusterScanCtx {
+    int slot;
+    int final_slot;
+    bool advance_to_next_slot;
+    const char *fp;
+} clusterScanCtx;
 
 #include "stream.h" /* Stream data type header file. */
 
@@ -2852,6 +3074,11 @@ typedef struct {
  *----------------------------------------------------------------------------*/
 
 extern struct valkeyServer server;
+
+static inline bool onServerMainThread(void) {
+    return pthread_equal(server.main_thread_id, pthread_self()) != 0;
+}
+
 extern struct sharedObjectsStruct shared;
 extern dictType objectKeyPointerValueDictType;
 extern hashtableType objectHashtableType;
@@ -2868,10 +3095,9 @@ extern dictType externalStringType;
 extern dictType sdsHashDictType;
 extern hashtableType clientHashtableType;
 extern hashtableType kvstoreChannelHashtableType;
-extern dictType modulesDictType;
 extern hashtableType sdsReplyHashtableType;
 extern dictType keylistDictType;
-extern dict *modules;
+extern list *modules;
 
 /*-----------------------------------------------------------------------------
  * Functions prototypes
@@ -2879,6 +3105,7 @@ extern dict *modules;
 
 /* Command metadata */
 void populateCommandLegacyRangeSpec(struct serverCommand *c);
+void detectWriteFirstkeyOnlyCommand(struct serverCommand *c);
 
 /* Utils */
 mstime_t commandTimeSnapshot(void);
@@ -2931,13 +3158,17 @@ void dictVanillaFree(void *val);
 #define READ_FLAGS_CROSSSLOT (1 << 20)
 #define READ_FLAGS_PREFETCHED (1 << 21)
 #define READ_FLAGS_ERROR_INVALID_CRLF (1 << 22)
+#define READ_FLAGS_ERROR_NUL_IN_INLINE_PROTOCOL (1 << 23)
 
 /* Write flags for various write errors and states */
 #define WRITE_FLAGS_WRITE_ERROR (1 << 0)
 #define WRITE_FLAGS_IS_REPLICA (1 << 1)
+/* Unlike a retryable socket write error, a compression error is fatal. The IO
+ * thread reports it here for the main thread to disconnect the replica. */
+#define WRITE_FLAGS_COMPRESSION_ERROR (1 << 2)
 
 client *createClient(connection *conn);
-void freeClient(client *c);
+int freeClient(client *c);
 void freeClientAsync(client *c);
 void freeClientOrCloseLater(client *c, int async);
 void logInvalidUseAndFreeClientAsync(client *c, const char *fmt, ...);
@@ -2959,6 +3190,8 @@ void setDeferredAttributeLen(client *c, void *node, long length);
 void setDeferredPushLen(client *c, void *node, long length);
 int processInputBuffer(client *c);
 void acceptCommonHandler(connection *conn, struct ClientFlags flags, char *ip);
+int validatePrioritySubnets(const char *subnets_str, const char **err);
+int updatePrioritySubnets(const char *subnets_str);
 void readQueryFromClient(connection *conn);
 int prepareClientToWrite(client *c);
 writePreparedClient *prepareClientForFutureWrites(client *c);
@@ -3012,6 +3245,7 @@ void copyReplicaOutputBuffer(client *dst, client *src);
 void addListRangeReply(client *c, robj *o, long start, long end, int reverse);
 void deferredAfterErrorReply(client *c, list *errors);
 size_t getStringObjectSdsUsedMemory(robj *o);
+size_t getStringObjectMemory(robj *o);
 void freeClientReplyValue(void *o);
 void *dupClientReplyValue(void *o);
 char *getClientPeerId(client *c);
@@ -3021,6 +3255,7 @@ sds catClientInfoString(sds s, client *client, int hide_user_data);
 sds catClientInfoShortString(sds s, client *client, int hide_user_data);
 sds getAllClientsInfoString(int type, int hide_user_data);
 int clientSetName(client *c, robj *name, const char **err);
+bool clientCommandArgShouldBeRedacted(client *c, int arg_index);
 void rewriteClientCommandVector(client *c, int argc, ...);
 void rewriteClientCommandArgument(client *c, int i, robj *newval);
 void replaceClientCommandVector(client *c, int argc, robj **argv);
@@ -3051,6 +3286,7 @@ void blockingOperationEnds(void);
 int handleClientsWithPendingWrites(void);
 void adjustThreadedIOIfNeeded(void);
 int clientHasPendingReplies(client *c);
+int clientHasUnsentOutput(client *c);
 int updateClientMemUsageAndBucket(client *c);
 void removeClientFromMemUsageBucket(client *c, int allow_eviction);
 void unlinkClient(client *c);
@@ -3060,7 +3296,8 @@ void linkClient(client *c);
 void protectClient(client *c);
 void unprotectClient(client *c);
 void initSharedQueryBuf(void);
-void freeSharedQueryBuf(void *dummy);
+void freeSharedQueryBuf(void);
+int isSharedQueryBufRegistered(int tid);
 client *lookupClientByID(uint64_t id);
 int authRequired(client *c);
 void clientSetUser(client *c, user *u, int authenticated);
@@ -3068,17 +3305,18 @@ void putClientInPendingWriteQueue(client *c);
 client *createCachedResponseClient(int resp);
 void deleteCachedResponseClient(client *recording_client);
 void waitForClientIO(client *c);
-void ioThreadReadQueryFromClient(void *data);
-void ioThreadWriteToClient(void *data);
+void ioThreadReadQueryFromClient(client *c);
+void ioThreadWriteToClient(client *c);
 int canParseCommand(client *c);
-int processIOThreadsReadDone(void);
-int processIOThreadsWriteDone(void);
+int processClientIOReadsDone(client *c);
+void processClientIOWriteDone(client *c);
 void releaseReplyReferences(client *c);
 void resetLastWrittenBuf(client *c);
+int clientConnPostponeMask(client *c);
 
 int getIntFromObject(robj *o, int *target);
 
-int parseExtendedCommandArgumentsOrReply(client *c, int command_type, int start_idx, int max_args, int *flags, int *unit, int *expire_idx, robj **expire, robj **compare_val);
+int parseExtendedCommandArgumentsOrReply(client *c, int command_type, int start_idx, int max_args, int *flags, int *unit, int *expire_idx, robj **expire, robj **compare_val, robj **incrby_val, robj **lbound_val, robj **ubound_val);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);
@@ -3103,11 +3341,15 @@ void trackingRememberKeys(client *tracking, client *executing);
 void trackingInvalidateKey(client *c, robj *keyobj, int bcast);
 void trackingScheduleKeyInvalidation(uint64_t client_id, robj *keyobj);
 void trackingHandlePendingKeyInvalidations(void);
+bool trackingHasPendingKeyInvalidations(void);
 void trackingInvalidateKeysOnFlush(int async);
 void freeTrackingRadixTree(rax *rt);
 void freeTrackingRadixTreeAsync(rax *rt);
 void freeErrorsRadixTreeAsync(rax *errors);
 void trackingLimitUsedSlots(void);
+void trackingSweepDeadClients(void);
+void trackingSweepFull(void);
+int defragTrackingTable(monotime endtime);
 uint64_t trackingGetTotalItems(void);
 uint64_t trackingGetTotalKeys(void);
 uint64_t trackingGetTotalPrefixes(void);
@@ -3153,6 +3395,7 @@ void touchAllWatchedKeysInDb(serverDb *emptied, serverDb *replaced_with);
 void discardTransaction(client *c);
 void flagTransaction(client *c);
 void execCommandAbort(client *c, sds error);
+int execGetKeys(struct serverCommand *cmd, robj **argv, int argc, getKeysResult *result);
 
 /* Object implementation */
 void decrRefCount(robj *o);
@@ -3164,6 +3407,7 @@ void freeSetObject(robj *o);
 void freeZsetObject(robj *o);
 void freeHashObject(robj *o);
 void dismissObject(robj *o, size_t dump_size);
+size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid);
 robj *createObject(int type, void *ptr);
 void initObjectLRUOrLFU(robj *o);
 robj *createStringObject(const char *ptr, size_t len);
@@ -3178,6 +3422,7 @@ robj *tryObjectEncoding(robj *o);
 robj *tryObjectEncodingEx(robj *o, int try_trim);
 robj *getDecodedObject(robj *o);
 size_t stringObjectLen(robj *o);
+size_t getStringObjectLen(robj *o);
 robj *createStringObjectFromLongLong(long long value);
 robj *createStringObjectFromLongLongForValue(long long value);
 robj *createStringObjectFromLongLongWithSds(long long value);
@@ -3188,6 +3433,7 @@ robj *createSetObject(void);
 robj *createIntsetObject(void);
 robj *createSetListpackObject(void);
 robj *createHashObject(void);
+robj *createPathHashObject(void);
 robj *createZsetObject(void);
 robj *createZsetListpackObject(void);
 robj *createStreamObject(void);
@@ -3208,7 +3454,7 @@ int compareStringObjects(const robj *a, const robj *b);
 int collateStringObjects(const robj *a, const robj *b);
 int equalStringObjects(robj *a, robj *b);
 void trimStringObjectIfNeeded(robj *o, int trim_small_values);
-#define sdsEncodedObject(objptr) (objptr->encoding == OBJ_ENCODING_RAW || objptr->encoding == OBJ_ENCODING_EMBSTR)
+#define sdsEncodedObject(objptr) (objectGetEncoding(objptr) == OBJ_ENCODING_RAW || objectGetEncoding(objptr) == OBJ_ENCODING_EMBSTR)
 
 /* Objects with val and/or key embedded */
 robj *objectSetKeyAndExpire(robj *o, const_sds key, long long expire);
@@ -3222,6 +3468,21 @@ uint8_t objectGetLFUFrequency(robj *o);
 uint32_t objectGetLRUIdleSecs(robj *o);
 uint32_t objectGetIdleness(robj *o);
 
+/* Accessor functions for serverObject fields.
+ * Use these instead of direct field access for encapsulation. */
+int objectGetType(const robj *o);
+void objectSetType(robj *o, int type);
+int objectGetEncoding(const robj *o);
+void objectSetEncoding(robj *o, int encoding);
+unsigned int objectGetRefcount(const robj *o);
+unsigned int objectGetLRU(const robj *o);
+void objectSetLRU(robj *o, unsigned int lru);
+/* Object metadata management */
+void objectSetMetadataSize(size_t size);
+size_t objectGetMetadataSize(const robj *o);
+void *objectGetMetadata(const robj *o);
+void objectCopyMetadata(robj *dst, const robj *src);
+
 /* Synchronous I/O with timeout */
 ssize_t syncWrite(int fd, char *ptr, ssize_t size, long long timeout);
 ssize_t syncRead(int fd, char *ptr, ssize_t size, long long timeout);
@@ -3229,8 +3490,12 @@ ssize_t syncReadLine(int fd, char *ptr, ssize_t size, long long timeout);
 
 /* Replication */
 int prepareReplicasToWrite(void);
+int getReplicationSendLimit(listNode **last_node, size_t *last_pos);
+int replicaCursorBeforeSendLimit(client *c, listNode *limit_node, size_t limit_pos);
+void wakeReplicasForDurableProgress(void);
 void replicationFeedReplicas(int dictid, robj **argv, int argc);
 void replicationFeedStreamFromPrimaryStream(char *buf, size_t buflen);
+void replicationFeedStreamFromSlotImport(int start_dbid, int end_dbid, char *buf, size_t buflen);
 void resetReplicationBuffer(void);
 void feedReplicationBuffer(char *buf, size_t len);
 void freeReplicaReferencedReplBuffer(client *replica);
@@ -3277,11 +3542,16 @@ const char *getFailoverStateString(void);
 sds getReplicaPortString(void);
 int sendCurrentOffsetToReplica(client *replica);
 int replicaRdbVersion(client *replica);
+/* Full-sync compression policy: select the codec and gate replica eligibility on capability. */
+compressionAlgo replSelectFullSyncCompression(int replica_capa);
+bool isReplicaInCohort(client *replica, int req, int rdbver, compressionAlgo compr);
 void addRdbReplicaToPsyncWait(client *replica);
 void initClientReplicationData(client *c);
 void freeClientReplicationData(client *c);
-void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel);
-sds replicationSendAuth(connection *conn);
+ssize_t replDecodeToQueryBuf(client *primary, const void *wire_buf, size_t wire_len, size_t output_budget);
+bool replStreamHasPendingDecode(void);
+void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel, compressionAlgo target_algo);
+sds replicationSendAuth(connection *conn, const char *user, size_t user_len, const char *pass, size_t pass_len);
 sds receiveSynchronousResponse(connection *conn);
 ConnectionType *connTypeOfReplication(void);
 robj *generateSelectCommand(int dictid);
@@ -3311,6 +3581,7 @@ int bg_unlink(const char *filename);
 /* AOF persistence */
 void flushAppendOnlyFile(int force);
 void feedAppendOnlyFile(int dictid, robj **argv, int argc);
+sds catAppendOnlyGenericCommand(sds dst, int argc, robj **argv);
 void aofRemoveTempFile(pid_t childpid, int from_signal);
 int rewriteAppendOnlyFileBackground(void);
 int loadAppendOnlyFiles(aofManifest *am);
@@ -3327,6 +3598,8 @@ int aofDelHistoryFiles(void);
 int aofRewriteLimited(void);
 int rewriteSlotToAppendOnlyFileRio(rio *aof, int db_num, int hashslot, size_t *key_count);
 int aofIOFlushInProgress(void);
+void aofPipeReadable(aeEventLoop *el, int fd, void *privdata, int mask);
+int rewriteSelectDbRio(rio *aof, int db_num);
 
 /* Child info */
 void openChildInfoPipe(void);
@@ -3339,11 +3612,15 @@ void receiveChildInfo(void);
 /* Fork helpers */
 int serverFork(int purpose);
 int hasActiveChildProcess(void);
+int isSaveInProgress(void);
+int hasActiveSaveOrChild(void);
+int isForkBgsaveInProgress(void);
 void resetChildState(void);
 int isMutuallyExclusiveChildType(int type);
 
 /* acl.c -- Authentication related prototypes. */
 extern rax *Users;
+extern rax *Roles;
 extern user *DefaultUser;
 void ACLInit(void);
 int ACLModuleHasCommandRules(const struct ValkeyModule *module, sds *rule_out);
@@ -3392,7 +3669,7 @@ uint64_t ACLGetCommandCategoryFlagByName(const char *name);
 int ACLAddCommandCategory(const char *name, uint64_t flag);
 void ACLCleanupCategoriesOnFailure(size_t num_acl_categories_added);
 int ACLAppendUserForLoading(sds *argv, int argc, int *argc_err);
-const char *ACLSetUserStringError(void);
+const char *ACLSetStringError(void);
 robj *ACLDescribeUser(user *u);
 void ACLLoadUsersAtStartup(void);
 void addReplyCommandCategories(client *c, struct serverCommand *cmd);
@@ -3403,6 +3680,8 @@ sds getAclErrorMessage(int acl_res, user *user, struct serverCommand *cmd, sds e
 void ACLUpdateDefaultUserPassword(sds password);
 sds genValkeyInfoStringACLStats(sds info);
 void ACLRecomputeCommandBitsFromCommandRulesAllUsers(void);
+user *ACLGetRoleByName(const char *name, size_t namelen);
+int ACLAppendRoleForLoading(sds *argv, int argc, int *argc_err);
 
 /* Sorted sets data type */
 
@@ -3432,22 +3711,19 @@ typedef struct {
     int minex, maxex; /* are min or max exclusive? */
 } zlexrangespec;
 
+/* Zset range comparison utilities (used by both listpack and ordered index encodings) */
+int zsetScoreGteMin(double value, zrangespec *spec);
+int zsetScoreLteMax(double value, zrangespec *spec);
+int zsetLexCompare(const char *a, size_t alen, sds b);
+int zsetLexGteMin(const char *value, size_t len, zlexrangespec *spec);
+int zsetLexLteMax(const char *value, size_t len, zlexrangespec *spec);
+
 /* flags for incrCommandFailedCalls */
 #define ERROR_COMMAND_REJECTED (1 << 0) /* Indicate to update the command rejected stats */
 #define ERROR_COMMAND_FAILED (1 << 1)   /* Indicate to update the command failed stats */
 
-zskiplist *zslCreate(void);
-int zslGetHeight(const zskiplist *zsl);
-zskiplistNode *zslGetTail(const zskiplist *zsl);
-void zslSetTail(zskiplist *zsl, zskiplistNode *tail);
-unsigned long zslGetLength(const zskiplist *zsl);
-zskiplistNode *zslGetHeader(zskiplist *zsl);
-size_t zslGetAllocSize(void);
-void zslFree(zskiplist *zsl);
-zskiplistNode *zslInsert(zskiplist *zsl, double score, const_sds ele);
-zskiplistNode *zslNthInRange(zskiplist *zsl, zrangespec *range, long n, long *rank);
-sds zslGetNodeElement(const zskiplistNode *x);
 double zzlGetScore(unsigned char *sptr);
+int zzlValidateScores(unsigned char *zl);
 void zzlNext(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
 void zzlPrev(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
 unsigned char *zzlFirstInRange(unsigned char *zl, zrangespec *range);
@@ -3469,17 +3745,12 @@ void genericZpopCommand(client *c,
                         int reply_nil_when_empty,
                         int *deleted);
 sds lpGetObject(unsigned char *sptr);
-int zslValueGteMin(double value, zrangespec *spec);
-int zslValueLteMax(double value, zrangespec *spec);
 void zsetFreeLexRange(zlexrangespec *spec);
 int zsetParseLexRange(robj *min, robj *max, zlexrangespec *spec);
 unsigned char *zzlFirstInLexRange(unsigned char *zl, zlexrangespec *range);
 unsigned char *zzlLastInLexRange(unsigned char *zl, zlexrangespec *range);
-zskiplistNode *zslNthInLexRange(zskiplist *zsl, zlexrangespec *range, long n);
 int zzlLexValueGteMin(unsigned char *p, zlexrangespec *spec);
 int zzlLexValueLteMax(unsigned char *p, zlexrangespec *spec);
-int zslLexValueGteMin(sds value, zlexrangespec *spec);
-int zslLexValueLteMax(sds value, zlexrangespec *spec);
 
 /* Core functions */
 int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *level);
@@ -3493,6 +3764,9 @@ int processCommand(client *c);
 int processPendingCommandAndInputBuffer(client *c);
 int processCommandAndResetClient(client *c);
 void setupSignalHandlers(void);
+#ifdef USE_LIBBACKTRACE
+void initLibbacktraceFrameState(void);
+#endif
 int createSocketAcceptHandler(connListener *sfd, aeFileProc *accept_handler);
 connListener *listenerByType(int type);
 int changeListener(connListener *listener);
@@ -3549,27 +3823,32 @@ void resetServerStats(void);
 void monitorActiveDefrag(void);
 void defragWhileBlocked(void);
 const char *evictPolicyToString(void);
+size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid);
+robj *createStringObjectWithKeyAndExpire(const char *ptr, size_t len, const_sds key, long long expire);
 struct serverMemOverhead *getMemoryOverheadData(void);
 void freeMemoryOverheadData(struct serverMemOverhead *mh);
 void checkChildrenDone(void);
 int setOOMScoreAdj(int process_class);
-void rejectCommandFormat(client *c, const char *fmt, ...);
+void rejectCommandFormat(client *c, int notify_modules, const char *fmt, ...);
 void *activeDefragAlloc(void *ptr);
 sds activeDefragSds(sds sdsptr);
 robj *activeDefragStringOb(robj *ob);
 void dismissSds(sds s);
 void dismissMemoryInChild(void);
 void tlsResetCertInfo(void);
+void trackInstantaneousMetric(int metric, long long current_value, long long current_base, long long factor);
+long long getInstantaneousMetric(int metric);
 
 #define RESTART_SERVER_NONE 0
 #define RESTART_SERVER_GRACEFULLY (1 << 0)     /* Do proper shutdown. */
 #define RESTART_SERVER_CONFIG_REWRITE (1 << 1) /* CONFIG REWRITE before restart.*/
 int restartServer(client *c, int flags, mstime_t delay);
-int getKeySlot(sds key);
+int getCachedKeySlot(sds key);
 int calculateKeySlot(sds key);
 
 /* kvstore wrappers */
 int getKVStoreIndexForKey(sds key);
+int getKVStoreIndexUsingCachedSlot(sds key);
 int dbExpand(serverDb *db, uint64_t db_size, int try_expand);
 int dbExpandExpires(serverDb *db, uint64_t db_size, int try_expand);
 robj *dbFind(serverDb *db, sds key);
@@ -3603,8 +3882,12 @@ robj *setTypeDup(robj *o);
 #define HASH_SET_COPY 0
 
 
-void hashTypeFreeVolatileSet(robj *o);          /* needed only for freeHashObject */
-void hashTypeTrackEntry(robj *o, entry *entry); /* needed only for rdbLoadObject */
+long long hashTypeVolatileCount(robj *o);                                    /* total volatile fields, incl. expired-unreaped */
+long long hashTypeListpackGetExpiry(unsigned char *zl, unsigned char *vptr); /* expiry of the pair whose value entry is vptr, or EXPIRY_NONE */
+bool hashTypeListpackFieldIsValid(long long expiry);                         /* listpack mirror of validateEntry: is a field with this expiry visible now */
+void hashTypeFreeVolatileSet(robj *o);                                       /* needed only for freeHashObject */
+void hashTypeTrackEntry(robj *o, entry *entry);                              /* needed only for rdbLoadObject */
+void hashTypeUpdateVolatileCount(robj *o, long delta);                       /* exported only for rdbLoadObject's HASH_2-to-listpack path */
 size_t hashTypeScanDefrag(robj *ob, size_t cursor, void *(*defragAlloc)(void *));
 size_t hashTypeDeleteExpiredFields(robj *o, mstime_t now, unsigned long max_fields, robj **out_fields);
 
@@ -3615,6 +3898,7 @@ bool hashTypeDelete(robj *o, sds key);
 unsigned long hashTypeLength(const robj *o);
 void hashTypeInitIterator(robj *subject, hashTypeIterator *hi);
 void hashTypeInitVolatileIterator(robj *subject, hashTypeIterator *hi);
+void hashTypeInitPersistentIterator(robj *subject, hashTypeIterator *hi);
 void hashTypeResetIterator(hashTypeIterator *hi);
 int hashTypeNext(hashTypeIterator *hi);
 void hashTypeCurrentFromListpack(hashTypeIterator *hi,
@@ -3624,6 +3908,7 @@ void hashTypeCurrentFromListpack(hashTypeIterator *hi,
                                  long long *vll);
 char *hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, size_t *len);
 sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
+long long hashTypeCurrentExpiry(robj *o, hashTypeIterator *hi);
 robj *hashTypeLookupWriteOrCreate(client *c, robj *key);
 robj *hashTypeGetValueObject(robj *o, sds field);
 int hashTypeSet(robj *o, sds field, sds value, mstime_t expiry, int flags, bool *expired_overwritten);
@@ -3631,6 +3916,31 @@ robj *hashTypeDup(robj *o);
 bool hashTypeHasVolatileFields(robj *o);
 int hashTypeUpdateAsStringRef(robj *o, sds field, const char *buf, size_t len);
 bool hashTypeHasStringRef(robj *o, sds field);
+
+/* Path hash data type */
+typedef struct pathHashObject {
+    rax *index;
+    uint64_t num_fields;
+} pathHashObject;
+
+void freePathHashObject(robj *o);
+robj *pathHashTypeDup(robj *o);
+size_t pathHashTypeMemUsage(robj *o, size_t sample_size);
+void pathHashTypeDigest(unsigned char *digest, robj *o);
+size_t pathHashTypeCount(robj *o, const unsigned char *prefix, size_t prefix_len);
+int rewritePathHashObject(rio *r, robj *key, robj *o);
+void phsetCommand(client *c);
+void phmsetCommand(client *c);
+void phgetCommand(client *c);
+void phmgetCommand(client *c);
+void phgetallCommand(client *c);
+void phpathexistsCommand(client *c);
+void phdelCommand(client *c);
+void phprefixesCommand(client *c);
+void phpathdelCommand(client *c);
+void phscanCommand(client *c);
+void phpathscanCommand(client *c);
+void phpathcountCommand(client *c);
 
 /* Pub / Sub */
 int pubsubUnsubscribeAllChannels(client *c, int notify);
@@ -3673,11 +3983,13 @@ sds keyspaceEventsFlagsToString(int flags);
                                          * to apply the configuration change even if the new config value is the same as    \
                                          * the old. */
 
-#define INTEGER_CONFIG 0         /* No flags means a simple integer configuration */
-#define MEMORY_CONFIG (1 << 0)   /* Indicates if this value can be loaded as a memory value */
-#define PERCENT_CONFIG (1 << 1)  /* Indicates if this value can be loaded as a percent (and stored as a negative int) */
-#define OCTAL_CONFIG (1 << 2)    /* This value uses octal representation */
-#define UNSIGNED_CONFIG (1 << 3) /* This value uses unsigned representation */
+/* Numeric Flags */
+#define INTEGER_CONFIG 0              /* No flags means a simple integer configuration */
+#define MEMORY_CONFIG (1 << 0)        /* Indicates if this value can be loaded as a memory value */
+#define PERCENT_CONFIG (1 << 1)       /* Indicates if this value can be loaded as a percent (and stored as a negative int) */
+#define OCTAL_CONFIG (1 << 2)         /* This value uses octal representation */
+#define UNSIGNED_CONFIG (1 << 3)      /* This value uses unsigned representation */
+#define SIGNED_MEMORY_CONFIG (1 << 4) /* A MEMORY_CONFIG that also accepts plain negative integers */
 
 /* Enum Configs contain an array of configEnum objects that match a string with an integer. */
 typedef struct configEnum {
@@ -3753,7 +4065,6 @@ int setModuleUnsignedNumericConfig(ModuleConfig *config, unsigned long long val,
 
 /* db.c -- Keyspace access API */
 int removeExpire(serverDb *db, robj *key);
-void deleteExpiredKeyAndPropagate(serverDb *db, robj *keyobj);
 void deleteExpiredKeyAndPropagateWithDictIndex(serverDb *db, robj *keyobj, int dict_index);
 void deleteExpiredKeyFromOverwriteAndPropagate(client *c, robj *keyobj);
 void propagateDeletion(serverDb *db, robj *key, int lazy, int slot);
@@ -3773,13 +4084,14 @@ robj *objectCommandLookup(client *c, robj *key);
 robj *objectCommandLookupOrReply(client *c, robj *key, robj *reply);
 int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle_secs);
 #define LOOKUP_NONE 0
-#define LOOKUP_NOTOUCH (1 << 0)  /* Don't update LRU. */
-#define LOOKUP_NONOTIFY (1 << 1) /* Don't trigger keyspace event on key misses. */
-#define LOOKUP_NOSTATS (1 << 2)  /* Don't update keyspace hits/misses counters. */
-#define LOOKUP_WRITE (1 << 3)    /* Delete expired keys even in replicas. */
-#define LOOKUP_NOEXPIRE (1 << 4) /* Avoid deleting lazy expired keys. */
+#define LOOKUP_NOTOUCH (1 << 0)   /* Don't update LRU. */
+#define LOOKUP_NONOTIFY (1 << 1)  /* Don't trigger keyspace event on key misses. */
+#define LOOKUP_NOSTATS (1 << 2)   /* Don't update keyspace hits/misses counters. */
+#define LOOKUP_WRITE (1 << 3)     /* Delete expired keys even in replicas. */
+#define LOOKUP_NOEXPIRE (1 << 4)  /* Avoid deleting lazy expired keys. */
+#define LOOKUP_NOHOTKEYS (1 << 5) /* Don't feed hot-key detection (introspection). */
 #define LOOKUP_NOEFFECTS \
-    (LOOKUP_NONOTIFY | LOOKUP_NOSTATS | LOOKUP_NOTOUCH | LOOKUP_NOEXPIRE) /* Avoid any effects from fetching the key */
+    (LOOKUP_NONOTIFY | LOOKUP_NOSTATS | LOOKUP_NOTOUCH | LOOKUP_NOEXPIRE | LOOKUP_NOHOTKEYS) /* Avoid any effects from fetching the key */
 
 void dbAdd(serverDb *db, robj *key, robj **valref);
 int dbAddRDBLoad(serverDb *db, sds key, robj **valref);
@@ -3804,6 +4116,8 @@ typedef int(emptyDataHashtableFilter)(int didx);
 long long emptyData(int dbnum, int flags, void(callback)(hashtable *));
 long long emptyDbStructure(serverDb **dbarray, int dbnum, int async, void(callback)(hashtable *));
 void resetDbExpiryState(serverDb *db);
+int parseFlushCommandFlags(client *c, int *flags);
+int parseFlushCommandFlagsOrReply(client *c, int *flags);
 void flushAllDataAndResetRDB(int flags);
 long long dbTotalServerKeyCount(void);
 serverDb *initTempDb(int id);
@@ -3811,7 +4125,9 @@ void discardTempDb(serverDb **tempDb);
 int selectDb(client *c, int id);
 void signalModifiedKey(client *c, serverDb *db, robj *key);
 void signalFlushedDb(int dbid, int async);
-void scanGenericCommand(client *c, robj *o, unsigned long long cursor, int slot, sds cursor_prefix, sds finished_cursor_prefix);
+int parseScanOptionsOrReply(client *c, robj *o, int start_idx, bool allow_slot, scanOptions *opts);
+void scanGenericCommand(client *c, robj *o, unsigned long long cursor);
+void scanGenericCommandWithOptions(client *c, robj *o, unsigned long long cursor, const scanOptions *opts, const clusterScanCtx *cluster_ctx);
 int parseScanCursorOrReply(client *c, sds buf, unsigned long long *cursor);
 int dbAsyncDelete(serverDb *db, robj *key);
 void emptyDbAsync(serverDb *db);
@@ -3886,8 +4202,10 @@ void freeEvalScriptsAsync(dict *scripts, list *scripts_lru_list, list *engine_ca
 void freeFunctionsAsync(functionsLibCtx *lib_ctx, list *engine_callbacks);
 void sha1hex(char *digest, char *script, size_t len);
 unsigned long evalMemory(void);
-dict *evalScriptsDict(void);
-unsigned long evalScriptsMemory(void);
+dict *evalCtxScriptsDict(void);
+unsigned long scriptsMemoryOverhead(void);
+unsigned long evalScriptsMemoryOverhead(void);
+void startScriptsEvictionTimeProc(void);
 uint64_t evalGetCommandFlags(client *c, uint64_t orig_flags);
 uint64_t fcallGetCommandFlags(client *c, uint64_t orig_flags);
 int isInsideYieldingLongCommand(void);
@@ -3915,7 +4233,10 @@ void signalKeyAsReady(serverDb *db, robj *key, int type);
 void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeout, int unblock_on_nokey);
 void blockClientShutdown(client *c);
 void blockPostponeClient(client *c);
-void blockClientForReplicaAck(client *c, mstime_t timeout, long long offset, long numreplicas, int numlocal);
+void blockClientInUseOnKeys(client *c, int num_keys, robj *keys[]);
+void unblockClientsInUseOnKey(robj *key);
+void unblockClientsInUseOnAllKeys(void);
+void blockClientForReplicaAck(client *c, mstime_t timeout, long long offset, int numreplicas, int numlocal);
 void replicationRequestAckFromReplicas(void);
 void signalDeletedKeyAsReady(serverDb *db, robj *key, int type);
 void updateStatsOnUnblock(client *c, long blocked_us, long reply_us, int failed_or_rejected);
@@ -3929,6 +4250,8 @@ void blockedBeforeSleep(void);
 void addClientToTimeoutTable(client *c);
 void removeClientFromTimeoutTable(client *c);
 void handleBlockedClientsTimeout(void);
+void encodeTimeoutKey(client *c, uint64_t timeout, unsigned char *buf_out);
+void decodeTimeoutKey(unsigned char *buf, uint64_t *timeout_ptr, client **client_ptr);
 int clientsCronHandleTimeout(client *c, mstime_t now_ms);
 
 /* evict.c -- maxmemory handling and LRU eviction. */
@@ -3940,16 +4263,24 @@ int performEvictions(void);
 void startEvictionTimeProc(void);
 
 /* Keys hashing/comparison functions for dict.c and hashtable.c hash tables. */
+uint8_t *getConfigurableHashSeed(void);
 uint64_t dictSdsHash(const void *key);
 uint64_t dictSdsCaseHash(const void *key);
+uint64_t dictObjHash(const void *key);
+uint64_t dictCStrHash(const void *key);
+uint64_t dictCStrCaseHash(const void *key);
 uint64_t dictEncObjHash(const void *key);
 int dictSdsKeyCompare(const void *key1, const void *key2);
-int hashtableSdsKeyCompare(const void *key1, const void *key2);
-int hashtableEncObjKeyCompare(const void *key1, const void *key2);
 int dictSdsKeyCaseCompare(const void *key1, const void *key2);
+int dictObjKeyCompare(const void *key1, const void *key2);
+int dictCStrKeyCompare(const void *key1, const void *key2);
+int dictCStrKeyCaseCompare(const void *key1, const void *key2);
+int dictEncObjKeyCompare(const void *key1, const void *key2);
 void dictSdsDestructor(void *val);
 void dictListDestructor(void *val);
-void *dictSdsDup(const void *key);
+void dictEntryDestructorSdsKey(void *entry);
+void dictEntryDestructorSdsKeyValue(void *entry);
+void dictEntryDestructorSdsKeyListValue(void *entry);
 
 /* Git SHA1 */
 char *serverGitSHA1(void);
@@ -3975,6 +4306,9 @@ void setCommand(client *c);
 void setnxCommand(client *c);
 void setexCommand(client *c);
 void psetexCommand(client *c);
+
+void delexGenericCommand(client *c, int flag, robj *compare_value);
+void delexCommand(client *c);
 void delifeqCommand(client *c);
 void getCommand(client *c);
 void getexCommand(client *c);
@@ -3993,6 +4327,7 @@ void decrCommand(client *c);
 void incrbyCommand(client *c);
 void decrbyCommand(client *c);
 void incrbyfloatCommand(client *c);
+void increxCommand(client *c);
 void selectCommand(client *c);
 void swapdbCommand(client *c);
 void randomkeyCommand(client *c);
@@ -4144,6 +4479,7 @@ void configGetCommand(client *c);
 void configResetStatCommand(client *c);
 void configRewriteCommand(client *c);
 void configHelpCommand(client *c);
+void configInfoCommand(client *c);
 void hincrbyCommand(client *c);
 void hincrbyfloatCommand(client *c);
 void subscribeCommand(client *c);
@@ -4159,7 +4495,6 @@ void watchCommand(client *c);
 void unwatchCommand(client *c);
 void clusterCommand(client *c);
 void clusterKeySlotCommand(client *c);
-void clusterFlushslotCommand(client *c);
 void clusterSlotStatsCommand(client *c);
 void clusterscanCommand(client *c);
 void restoreCommand(client *c);
@@ -4247,6 +4582,8 @@ void xclaimCommand(client *c);
 void xautoclaimCommand(client *c);
 void xinfoCommand(client *c);
 void xdelCommand(client *c);
+void xackdelCommand(client *c);
+void xdelexCommand(client *c);
 void xtrimCommand(client *c);
 void lolwutCommand(client *c);
 void aclCommand(client *c);
@@ -4254,6 +4591,9 @@ void lcsCommand(client *c);
 void quitCommand(client *c);
 void resetCommand(client *c);
 void failoverCommand(client *c);
+void hotkeysGetCommand(client *c);
+void hotkeysResetCommand(client *c);
+void hotkeysHelpCommand(client *c);
 
 /* Helper functions for getting database id args from argv, argc */
 int *selectDbIdArgs(robj **argv, int argc, int *count);
@@ -4322,6 +4662,7 @@ void debugPauseProcess(void);
 #define serverDebug(fmt, ...) printf("DEBUG %s:%d > " fmt "\n", __FILE__, __LINE__, __VA_ARGS__)
 #define serverDebugMark() printf("-- MARK %s:%d --\n", __FILE__, __LINE__)
 
+void serverInitThreadAttribute(pthread_attr_t *attr);
 int iAmPrimary(void);
 
 #define STRINGIFY_(x) #x

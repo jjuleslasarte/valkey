@@ -68,10 +68,13 @@
 
 #include "server.h"
 #include "connection.h"
+#include "cluster.h"
 #include "bio.h"
 #include "mutexqueue.h"
 #include "tls.h"
 #include <stdatomic.h>
+
+ssize_t aofWrite(int fd, const char *buf, size_t len);
 
 static unsigned int bio_job_to_worker[] = {
     [BIO_CLOSE_FILE] = 0,
@@ -80,6 +83,7 @@ static unsigned int bio_job_to_worker[] = {
     [BIO_LAZY_FREE] = 2,
     [BIO_RDB_SAVE] = 3,
     [BIO_TLS_RELOAD] = 4, /* only used when BUILD_TLS=yes */
+    [BIO_CLUSTER_SAVE] = 5,
 };
 
 typedef struct {
@@ -94,6 +98,7 @@ static bio_worker_data bio_workers[] = {
     {"bio_lazy_free"},
     {"bio_rdb_save"},
     {"bio_tls_reload"}, /* only used when BUILD_TLS=yes */
+    {"bio_cluster_config_save"},
 };
 static const bio_worker_data *const bio_worker_end = bio_workers + (sizeof bio_workers / sizeof *bio_workers);
 
@@ -118,7 +123,14 @@ typedef union bio_job {
     struct {
         int type;
         int fd;                          /* Fd for file based background jobs */
-        long long offset;                /* A job-specific offset, if applicable */
+        long long offset;                /* A job-specific offset, if applicable. For AOF fsync
+                                          * jobs this is the replication offset to publish via
+                                          * fsynced_reploff_pending once the fsync completes. */
+        sds buf;                         /* If non-NULL, the worker writes this buffer before
+                                          * fsyncing and notifies the main thread via
+                                          * server.aof_pipe[1] when done. Used for the
+                                          * appendfsync=always offload path. The worker owns
+                                          * the buffer and frees it. */
         unsigned need_fsync : 1;         /* A flag to indicate that a fsync is required before
                                           * the file is closed. */
         unsigned need_reclaim_cache : 1; /* A flag to indicate that reclaim cache is required before
@@ -133,13 +145,20 @@ typedef union bio_job {
 
     struct {
         int type;
-        connection *conn;    /* Connection to download the RDB from */
-        int is_dual_channel; /* Single vs dual channel */
+        connection *conn;            /* Connection to download the RDB from */
+        int is_dual_channel;         /* Single vs dual channel */
+        compressionAlgo target_algo; /* Target on-disk codec, resolved when the job was created */
     } save_to_disk_args;
 
     struct {
         int type;
     } tls_reload_args;
+
+    struct {
+        int type;
+        sds content;   /* Cluster config file content. */
+        bool do_fsync; /* A flag to indicate that a fsync is required. */
+    } cluster_save_args;
 } bio_job;
 
 void *bioProcessBackgroundJobs(void *arg);
@@ -150,14 +169,10 @@ __attribute__((noinline)) static bio_job *allocBioJob(size_t extra) {
     return zmalloc(sizeof(bio_job) + extra);
 }
 
-/* Make sure we have enough stack to perform all the things we do in the
- * main thread. */
-#define VALKEY_THREAD_STACK_SIZE (1024 * 1024 * 4)
 
 /* Initialize the background system, spawning the thread. */
 void bioInit(void) {
     pthread_attr_t attr;
-    size_t stacksize;
 
     /* Initialization of state vars and objects */
     for (bio_worker_data *bwd = bio_workers; bwd != bio_worker_end; ++bwd) {
@@ -165,11 +180,7 @@ void bioInit(void) {
     }
 
     /* Set the stack size as by default it may be small in some system */
-    pthread_attr_init(&attr);
-    pthread_attr_getstacksize(&attr, &stacksize);
-    if (!stacksize) stacksize = 1; /* The world is full of Solaris Fixes */
-    while (stacksize < VALKEY_THREAD_STACK_SIZE) stacksize *= 2;
-    pthread_attr_setstacksize(&attr, stacksize);
+    serverInitThreadAttribute(&attr);
 
     /* Ready to spawn our threads. We use the single argument the thread
      * function accepts in order to pass a pointer to the data that the
@@ -181,6 +192,7 @@ void bioInit(void) {
             exit(1);
         }
     }
+    pthread_attr_destroy(&attr);
 }
 
 void bioSubmitJob(int type, bio_job *job) {
@@ -208,6 +220,7 @@ void bioCreateLazyFreeJob(lazy_free_fn free_fn, int arg_count, ...) {
 void bioCreateCloseJob(int fd, int need_fsync, int need_reclaim_cache) {
     bio_job *job = allocBioJob(0);
     job->fd_args.fd = fd;
+    job->fd_args.buf = NULL;
     job->fd_args.need_fsync = need_fsync;
     job->fd_args.need_reclaim_cache = need_reclaim_cache;
 
@@ -218,6 +231,7 @@ void bioCreateCloseAofJob(int fd, long long offset, int need_reclaim_cache) {
     bio_job *job = allocBioJob(0);
     job->fd_args.fd = fd;
     job->fd_args.offset = offset;
+    job->fd_args.buf = NULL;
     job->fd_args.need_fsync = 1;
     job->fd_args.need_reclaim_cache = need_reclaim_cache;
 
@@ -228,15 +242,17 @@ void bioCreateFsyncJob(int fd, long long offset, int need_reclaim_cache) {
     bio_job *job = allocBioJob(0);
     job->fd_args.fd = fd;
     job->fd_args.offset = offset;
+    job->fd_args.buf = NULL;
     job->fd_args.need_reclaim_cache = need_reclaim_cache;
 
     bioSubmitJob(BIO_AOF_FSYNC, job);
 }
 
-void bioCreateSaveRDBToDiskJob(connection *conn, int is_dual_channel) {
+void bioCreateSaveRDBToDiskJob(connection *conn, int is_dual_channel, compressionAlgo target_algo) {
     bio_job *job = allocBioJob(0);
     job->save_to_disk_args.conn = conn;
     job->save_to_disk_args.is_dual_channel = is_dual_channel;
+    job->save_to_disk_args.target_algo = target_algo;
     bioSubmitJob(BIO_RDB_SAVE, job);
 }
 
@@ -245,6 +261,56 @@ void bioCreateTlsReloadJob(void) {
     bioSubmitJob(BIO_TLS_RELOAD, job);
 }
 
+/* Submit an AOF fsync job that also writes the provided buffer and notifies
+ * the main thread through server.aof_pipe[1] when complete. Used by the
+ * appendfsync=always offload path. The worker takes ownership of `buf` and
+ * frees it after writing. The reploff is the replication offset to publish
+ * via server.fsynced_reploff_pending once write+fsync succeeds. */
+void bioCreateAofFsyncNotifyJob(int fd, sds buf, long long reploff) {
+    bio_job *job = allocBioJob(0);
+    job->fd_args.fd = fd;
+    job->fd_args.offset = reploff;
+    job->fd_args.buf = buf;
+    job->fd_args.need_reclaim_cache = 0;
+    bioSubmitJob(BIO_AOF_FSYNC, job);
+}
+
+/* appendfsync=always offload path: the main thread handed us an AOF buffer to
+ * write and fsync as one bio job (via bioCreateAofFsyncNotifyJob) and asked to
+ * be notified via server.aof_pipe[1] when done. Publishes the result through
+ * server.aof_bio_flush_state for the main thread to reap. */
+static void bioProcessAofFlushOffload(bio_job *job) {
+    sds buf = job->fd_args.buf;
+    int err = 0;
+    size_t len = sdslen(buf);
+    ssize_t nwritten = aofWrite(job->fd_args.fd, buf, len);
+    if (nwritten != (ssize_t)len) {
+        err = (nwritten == -1) ? errno : ENOSPC;
+    } else if (valkey_fsync(job->fd_args.fd) == -1) {
+        err = errno;
+    }
+
+    if (err) {
+        atomic_store_explicit(&server.aof_bio_flush_errno, err, memory_order_relaxed);
+        atomic_store_explicit(&server.aof_bio_flush_state, AOF_BIO_FLUSH_ERR, memory_order_release);
+    } else {
+        atomic_store_explicit(&server.fsynced_reploff_pending, job->fd_args.offset, memory_order_relaxed);
+        atomic_store_explicit(&server.aof_bio_flush_size, len, memory_order_relaxed);
+        atomic_store_explicit(&server.aof_bio_flush_state, AOF_BIO_FLUSH_DONE, memory_order_release);
+    }
+    sdsfree(buf);
+    if (write(server.aof_pipe[1], "x", 1) == -1) { /* best-effort wakeup */
+    }
+}
+
+void bioCreateClusterConfigSaveJob(sds content, bool do_fsync) {
+    bio_job *job = allocBioJob(0);
+    job->cluster_save_args.content = content;
+    job->cluster_save_args.do_fsync = do_fsync;
+    bioSubmitJob(BIO_CLUSTER_SAVE, job);
+}
+
+#define CONFIG_SAVE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
 void *bioProcessBackgroundJobs(void *arg) {
     bio_worker_data *const bwd = arg;
     sigset_t sigset;
@@ -282,38 +348,62 @@ void *bioProcessBackgroundJobs(void *arg) {
             }
             close(job->fd_args.fd);
         } else if (job_type == BIO_AOF_FSYNC || job_type == BIO_CLOSE_AOF) {
-            /* The fd may be closed by main thread and reused for another
-             * socket, pipe, or file. We just ignore these errno because
-             * aof fsync did not really fail. */
-            if (valkey_fsync(job->fd_args.fd) == -1 && errno != EBADF && errno != EINVAL) {
-                int last_status = atomic_load_explicit(&server.aof_bio_fsync_status, memory_order_relaxed);
-
-                atomic_store_explicit(&server.aof_bio_fsync_errno, errno, memory_order_relaxed);
-                atomic_store_explicit(&server.aof_bio_fsync_status, C_ERR, memory_order_release);
-                if (last_status == C_OK) {
-                    serverLog(LL_WARNING, "Fail to fsync the AOF file: %s", strerror(errno));
-                }
+            if (job->fd_args.buf != NULL) {
+                /* Only bioCreateAofFsyncNotifyJob attaches a buf, and it always
+                 * submits as BIO_AOF_FSYNC (never BIO_CLOSE_AOF); the buf pointer
+                 * is what distinguishes the offload job from a regular fsync. */
+                serverAssert(job_type == BIO_AOF_FSYNC);
+                bioProcessAofFlushOffload(job);
             } else {
-                atomic_store_explicit(&server.aof_bio_fsync_status, C_OK, memory_order_relaxed);
-                atomic_store_explicit(&server.fsynced_reploff_pending, job->fd_args.offset, memory_order_relaxed);
-            }
+                /* The fd may be closed by main thread and reused for another
+                 * socket, pipe, or file. We just ignore these errno because
+                 * aof fsync did not really fail. */
+                if (valkey_fsync(job->fd_args.fd) == -1 && errno != EBADF && errno != EINVAL) {
+                    int last_status = atomic_load_explicit(&server.aof_bio_fsync_status, memory_order_relaxed);
 
-            if (job->fd_args.need_reclaim_cache) {
-                if (reclaimFilePageCache(job->fd_args.fd, 0, 0) == -1) {
-                    serverLog(LL_NOTICE, "Unable to reclaim page cache: %s", strerror(errno));
+                    atomic_store_explicit(&server.aof_bio_fsync_errno, errno, memory_order_relaxed);
+                    atomic_store_explicit(&server.aof_bio_fsync_status, C_ERR, memory_order_release);
+                    if (last_status == C_OK) {
+                        serverLog(LL_WARNING, "Fail to fsync the AOF file: %s", strerror(errno));
+                    }
+                } else {
+                    atomic_store_explicit(&server.aof_bio_fsync_status, C_OK, memory_order_relaxed);
+                    atomic_store_explicit(&server.fsynced_reploff_pending, job->fd_args.offset, memory_order_relaxed);
                 }
+
+                if (job->fd_args.need_reclaim_cache) {
+                    if (reclaimFilePageCache(job->fd_args.fd, 0, 0) == -1) {
+                        serverLog(LL_NOTICE, "Unable to reclaim page cache: %s", strerror(errno));
+                    }
+                }
+                if (job_type == BIO_CLOSE_AOF) close(job->fd_args.fd);
             }
-            if (job_type == BIO_CLOSE_AOF) close(job->fd_args.fd);
         } else if (job_type == BIO_LAZY_FREE) {
             job->free_args.free_fn(job->free_args.free_args);
         } else if (job_type == BIO_RDB_SAVE) {
-            replicaReceiveRDBFromPrimaryToDisk(job->save_to_disk_args.conn, job->save_to_disk_args.is_dual_channel);
+            replicaReceiveRDBFromPrimaryToDisk(job->save_to_disk_args.conn, job->save_to_disk_args.is_dual_channel,
+                                               job->save_to_disk_args.target_algo);
         } else if (job_type == BIO_TLS_RELOAD) {
 #if defined(USE_OPENSSL) && USE_OPENSSL == 1 /* BUILD_YES */
             tlsConfigureAsync();
 #else
             serverPanic("BIO_TLS_RELOAD job type requires built-in TLS (BUILD_TLS=yes).");
 #endif
+        } else if (job_type == BIO_CLUSTER_SAVE) {
+            static time_t last_save_error_log = 0;
+            if (clusterSaveConfigFromBio(job->cluster_save_args.content, job->cluster_save_args.do_fsync) == C_ERR) {
+                /* Limit logging rate to 1 line per CONFIG_SAVE_LOG_ERROR_RATE seconds. */
+                if ((server.unixtime - last_save_error_log) > CONFIG_SAVE_LOG_ERROR_RATE) {
+                    serverLog(LL_WARNING, "Failed to save the cluster config file in background. Cluster config "
+                                          "updated even though writing the cluster config file to disk failed.");
+                    last_save_error_log = server.unixtime;
+                }
+                atomic_store_explicit(&server.cluster_config_save_status, C_ERR, memory_order_relaxed);
+            } else {
+                atomic_store_explicit(&server.cluster_config_save_status, C_OK, memory_order_relaxed);
+                atomic_store_explicit(&server.cluster_config_last_save_time, time(NULL), memory_order_relaxed);
+                last_save_error_log = 0;
+            }
         } else {
             serverPanic("Wrong job type in bioProcessBackgroundJobs().");
         }
@@ -345,7 +435,7 @@ void bioKillThreads(void) {
         if (pthread_equal(bwd->bio_thread_id, pthread_self())) continue;
         if (bwd->bio_thread_id && pthread_cancel(bwd->bio_thread_id) == 0) {
             if ((err = pthread_join(bwd->bio_thread_id, NULL)) != 0) {
-                serverLog(LL_WARNING, "Bio worker thread #%zu can not be joined: %s", bioWorkerNum(bwd), strerror(err));
+                serverLog(LL_WARNING, "Bio worker thread #%zu cannot be joined: %s", bioWorkerNum(bwd), strerror(err));
             } else {
                 serverLog(LL_WARNING, "Bio worker thread #%zu terminated", bioWorkerNum(bwd));
             }

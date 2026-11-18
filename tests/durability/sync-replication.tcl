@@ -9,18 +9,18 @@
 # is enabled when min-sync-replicas > 0.
 
 # Helper: wait until the primary reports at least N sync replicas in the ISR
-# by polling INFO durability for durability_sync_replicas.
+# by polling INFO debug for reply_blocking_sync_replicas.
 proc wait_for_isr_count {primary count} {
     wait_for_condition 100 100 {
-        [getInfoProperty [$primary info durability] durability_sync_replicas] >= $count
+        [getInfoProperty [$primary info debug] reply_blocking_sync_replicas] >= $count
     } else {
-        fail "Expected $count sync replicas in ISR but got [getInfoProperty [$primary info durability] durability_sync_replicas]"
+        fail "Expected $count sync replicas in ISR but got [getInfoProperty [$primary info debug] reply_blocking_sync_replicas]"
     }
 }
 
-# Helper: return the current write_blocked_count from INFO durability.
+# Helper: return the current write_blocked_count from INFO debug.
 proc get_write_blocked_count {primary} {
-    getInfoProperty [$primary info durability] durability_write_blocked_count
+    getInfoProperty [$primary info debug] reply_blocking_write_blocked_count
 }
 
 # ==========================================================================
@@ -28,17 +28,17 @@ proc get_write_blocked_count {primary} {
 #         writes with CLUSTERDOWN.
 # ==========================================================================
 
-start_server {tags {"repl durability external:skip"} overrides {appendonly yes appendfsync everysec min-sync-replicas 2}} {
+start_server {tags {"repl durability external:skip"} overrides {bio-aof-offload-enabled yes appendonly yes appendfsync everysec min-sync-replicas 2}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+    start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
         set replica1 [srv 0 client]
         set replica1_host [srv 0 host]
         set replica1_port [srv 0 port]
 
-        start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+        start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
             set replica2 [srv 0 client]
             set replica2_host [srv 0 host]
             set replica2_port [srv 0 port]
@@ -70,17 +70,17 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 #         only when both sync replicas ack back.
 # ==========================================================================
 
-start_server {tags {"repl durability external:skip"} overrides {appendonly yes appendfsync everysec min-sync-replicas 2}} {
+start_server {tags {"repl durability external:skip"} overrides {bio-aof-offload-enabled yes appendonly yes appendfsync everysec min-sync-replicas 2}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+    start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
         set replica1 [srv 0 client]
         set replica1_host [srv 0 host]
         set replica1_port [srv 0 port]
 
-        start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+        start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
             set replica2 [srv 0 client]
             set replica2_host [srv 0 host]
             set replica2_port [srv 0 port]
@@ -93,7 +93,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
                 wait_for_isr_count $primary 2
 
                 # Pause the replication provider so acks don't advance consensus
-                $primary DEBUG durability-provider-pause replication
+                $primary DEBUG reply-blocking-pause replication
 
                 set blocked_before [get_write_blocked_count $primary]
 
@@ -110,7 +110,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 
                 # Resume the replication provider — replicas have already acked,
                 # so consensus advances and the reply is released
-                $primary DEBUG durability-provider-resume replication
+                $primary DEBUG reply-blocking-resume replication
                 $primary ping ;# force a beforeSleep cycle
 
                 assert_equal "OK" [$rd read]
@@ -125,17 +125,17 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 #         replica lags behind (paused with SIGSTOP).
 # ==========================================================================
 
-start_server {tags {"repl durability external:skip"} overrides {appendonly yes appendfsync everysec min-sync-replicas 2}} {
+start_server {tags {"repl durability external:skip"} overrides {bio-aof-offload-enabled yes appendonly yes appendfsync everysec min-sync-replicas 2}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+    start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
         set replica1 [srv 0 client]
         set replica1_host [srv 0 host]
         set replica1_port [srv 0 port]
 
-        start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+        start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
             set replica2 [srv 0 client]
             set replica2_host [srv 0 host]
             set replica2_port [srv 0 port]
@@ -202,12 +202,12 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 # are accepted again.
 # ==========================================================================
 
-start_server {tags {"repl durability external:skip"} overrides {appendonly yes appendfsync everysec min-sync-replicas 1}} {
+start_server {tags {"repl durability external:skip"} overrides {bio-aof-offload-enabled yes appendonly yes appendfsync everysec min-sync-replicas 1}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+    start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
         set replica [srv 0 client]
         set replica_host [srv 0 host]
         set replica_port [srv 0 port]
@@ -263,12 +263,12 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 # lets it catch up, rejoin the ISR, and writes succeed again.
 # ==========================================================================
 
-start_server {tags {"repl durability external:skip"} overrides {appendonly yes appendfsync everysec min-sync-replicas 1}} {
+start_server {tags {"repl durability external:skip"} overrides {bio-aof-offload-enabled yes appendonly yes appendfsync everysec min-sync-replicas 1}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+    start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
         set replica [srv 0 client]
         set replica_host [srv 0 host]
         set replica_port [srv 0 port]
@@ -292,7 +292,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 
             # Wait for the ISR timeout to remove the replica from ISR.
             wait_for_condition 150 200 {
-                [getInfoProperty [$primary info durability] durability_sync_replicas] == 0
+                [getInfoProperty [$primary info debug] reply_blocking_sync_replicas] == 0
             } else {
                 fail "Replica was not removed from ISR after timeout"
             }
@@ -328,19 +328,19 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 # advances, proving that consensus depends solely on the sync replica.
 # ==========================================================================
 
-start_server {tags {"repl durability external:skip"} overrides {appendonly yes appendfsync everysec min-sync-replicas 1}} {
+start_server {tags {"repl durability external:skip"} overrides {bio-aof-offload-enabled yes appendonly yes appendfsync everysec min-sync-replicas 1}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
     # Sync replica
-    start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+    start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
         set sync_replica [srv 0 client]
         set sync_replica_host [srv 0 host]
         set sync_replica_port [srv 0 port]
 
         # Regular (non-sync) replica
-        start_server {overrides {min-sync-replicas 1 sync-eligible no}} {
+        start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible no}} {
             set regular_replica [srv 0 client]
             set regular_replica_host [srv 0 host]
             set regular_replica_port [srv 0 port]
@@ -366,7 +366,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
                 assert_equal "OK" [$primary set key1 value1]
 
                 # Record the committed offset after the first write.
-                set offset_before [getInfoProperty [$primary info durability] durability_committed_offset]
+                set offset_before [getInfoProperty [$primary info debug] reply_blocking_previous_acked_offset]
                 assert {$offset_before > 0}
 
                 # Pause the regular (non-sync) replica
@@ -379,7 +379,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 
                 # Verify the committed offset has advanced, proving
                 # consensus is driven by the sync replica alone.
-                set offset_after [getInfoProperty [$primary info durability] durability_committed_offset]
+                set offset_after [getInfoProperty [$primary info debug] reply_blocking_previous_acked_offset]
                 assert {$offset_after > $offset_before}
 
                 # Verify the primary still sees 2 connected replicas
@@ -392,7 +392,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
                 # One more write to confirm everything is still healthy
                 assert_equal "OK" [$primary set key4 value4]
 
-                set offset_final [getInfoProperty [$primary info durability] durability_committed_offset]
+                set offset_final [getInfoProperty [$primary info debug] reply_blocking_previous_acked_offset]
                 assert {$offset_final > $offset_after}
             }
         }
@@ -411,17 +411,17 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 # REPLCONF COMMIT with the new offset, the replica unblocks the read.
 # ==========================================================================
 
-start_server {tags {"repl durability external:skip"} overrides {appendonly yes appendfsync everysec min-sync-replicas 2}} {
+start_server {tags {"repl durability external:skip"} overrides {bio-aof-offload-enabled yes appendonly yes appendfsync everysec min-sync-replicas 2}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+    start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
         set replica1 [srv 0 client]
         set replica1_host [srv 0 host]
         set replica1_port [srv 0 port]
 
-        start_server {overrides {min-sync-replicas 1 sync-eligible yes}} {
+        start_server {overrides {bio-aof-offload-enabled yes min-sync-replicas 1 sync-eligible yes}} {
             set replica2 [srv 0 client]
             set replica2_host [srv 0 host]
             set replica2_port [srv 0 port]
@@ -446,7 +446,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
                 # Pause the replication provider on the primary.
                 # This freezes the committed offset — new writes will
                 # replicate to replicas but REPLCONF COMMIT won't advance.
-                $primary DEBUG durability-provider-pause replication
+                $primary DEBUG reply-blocking-pause replication
 
                 # Write a key on the primary via a deferring client.
                 # We don't read the reply — it will be blocked by the
@@ -457,7 +457,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
 
                 # Wait for the write to replicate to the replica
                 wait_for_condition 50 100 {
-                    [getInfoProperty [$replica1 info durability] durability_uncommitted_keys] > 0
+                    [getInfoProperty [$replica1 info debug] reply_blocking_uncommitted_keys] > 0
                 } else {
                     fail "Key was not tracked as uncommitted on replica"
                 }
@@ -466,14 +466,14 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
                 # The key exists on the replica (it was replicated) but
                 # is uncommitted (committed offset hasn't advanced).
                 # The read should be blocked.
-                set replica_blocked_before [getInfoProperty [$replica1 info durability] durability_clients_waiting_ack]
+                set replica_blocked_before [getInfoProperty [$replica1 info debug] reply_blocking_clients_waiting_ack]
 
                 set reader [valkey_deferring_client -1]
                 $reader get uncommitted-key
 
                 # Verify the read is blocked on the replica
                 wait_for_condition 50 100 {
-                    [getInfoProperty [$replica1 info durability] durability_clients_waiting_ack] > $replica_blocked_before
+                    [getInfoProperty [$replica1 info debug] reply_blocking_clients_waiting_ack] > $replica_blocked_before
                 } else {
                     fail "Read on uncommitted key was not blocked on replica"
                 }
@@ -481,7 +481,7 @@ start_server {tags {"repl durability external:skip"} overrides {appendonly yes a
                 # Resume the replication provider on the primary.
                 # The committed offset advances, the primary sends
                 # REPLCONF COMMIT, and the replica unblocks the read.
-                $primary DEBUG durability-provider-resume replication
+                $primary DEBUG reply-blocking-resume replication
                 $primary ping ;# force beforeSleep cycle
 
                 # The reader should now get the value
