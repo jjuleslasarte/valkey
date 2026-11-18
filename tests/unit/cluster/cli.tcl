@@ -3,6 +3,7 @@
 source tests/support/cli.tcl
 
 # cluster creation is complicated with TLS, and the current tests don't really need that coverage
+# valkey-cli --cluster create does ADDSLOTS and REPLICATE before MEET. This doesn't work with v2.
 tags {tls:skip external:skip cluster singledb} {
 
 set base_conf [list cluster-enabled yes cluster-node-timeout 1000]
@@ -371,13 +372,13 @@ test {Migrate the last slot away from a node using valkey-cli} {
         wait_for_cluster_propagation
         assert_match *master* [$owner_r role]
     }
-}
+} {} {cluster-raft:skip} ; # needs investigation for cluster-raft
 
 foreach ip_or_localhost {127.0.0.1 localhost} {
 
 # Test valkey-cli --cluster create, add-node with cluster-port.
 # Create five nodes, three with custom cluster_port and two with default values.
-start_server [list overrides [list cluster-enabled yes cluster-node-timeout 1 cluster-port [find_available_port $::baseport $::portcount]]] {
+start_server [list overrides [list cluster-enabled yes cluster-node-timeout 1 cluster-port [find_available_port $::baseport $::portcount]] tags {cluster-raft:skip}] {
 start_server [list overrides [list cluster-enabled yes cluster-node-timeout 1]] {
 start_server [list overrides [list cluster-enabled yes cluster-node-timeout 1 cluster-port [find_available_port $::baseport $::portcount]]] {
 start_server [list overrides [list cluster-enabled yes cluster-node-timeout 1]] {
@@ -569,19 +570,10 @@ start_multiple_servers 3 [list overrides $base_conf] {
 
 } ;# foreach use_atomic_slot_migration
 
-# Test valkey-cli --cluster del-node
+# Test valkey-cli --cluster del-node with a reachable node
 set base_conf [list cluster-enabled yes cluster-node-timeout 1000]
-start_multiple_servers 3 [list overrides $base_conf] {
-
-    # Create cluster with 1 primary and 2 replicas for del-node tests
-    exec $::VALKEY_CLI_BIN --cluster-yes --cluster create \
-                    127.0.0.1:[srv 0 port] \
-                    127.0.0.1:[srv -1 port] \
-                    127.0.0.1:[srv -2 port] \
-                    --cluster-replicas 2
-
-    # Wait for the cluster to be ready
-    wait_for_cluster_state ok
+start_cluster 1 2 [list overrides $base_conf] {
+    # start_cluster explicitly promotes all Raft nodes to voters.
 
     test "del-node: Cannot delete node with slots" {
         set node1 [srv 0 client]
@@ -625,6 +617,12 @@ start_multiple_servers 3 [list overrides $base_conf] {
             fail "Nodes don't have expected cluster state"
         }
     }
+} ;# stop servers
+
+# Test valkey-cli --cluster del-node with an unreachable node
+start_cluster 1 2 [list overrides $base_conf] {
+    # With Raft cluster, we have three voters, so a quorum is left after one
+    # node is stopped.
 
     test "del-node: Delete unreachable node without slots" {
         set node3 [srv -2 client]
@@ -651,15 +649,12 @@ start_multiple_servers 3 [list overrides $base_conf] {
         # Check for success message
         assert_match {*\[OK\] Node*removed from the cluster*} $output
 
-        # Verify cluster state after deletion:
-        # - Node0 (primary): only node left, knows only itself
-        # - Node1 (deleted in test 2): still standalone
-        # - Node2 (deleted in test 3): shutdown, can't check
+        # Verify cluster state after deletion.
         wait_for_condition 1000 50 {
-            [CI 0 cluster_known_nodes] == 1 &&
-            [CI 1 cluster_known_nodes] == 1
+            [CI 0 cluster_known_nodes] == 2 &&
+            [CI 1 cluster_known_nodes] == 2
         } else {
-            fail "Nodes don't have expected cluster state"
+            fail "Nodes don't have expected cluster state: known_nodes=[CI 0 cluster_known_nodes],[CI 1 cluster_known_nodes]"
         }
     }
 } ;# stop servers

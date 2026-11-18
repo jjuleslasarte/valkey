@@ -21,8 +21,6 @@ test "Instance #5 synced with the master" {
     }
 }
 
-set current_epoch [CI 1 cluster_current_epoch]
-
 set numkeys 50000
 set numops 10000
 set cluster [valkey_cluster 127.0.0.1:[srv 0 port]]
@@ -56,7 +54,7 @@ test "Send CLUSTER FAILOVER to #5, during load" {
 
 test "Wait for failover" {
     wait_for_condition 1000 50 {
-        [CI 1 cluster_current_epoch] > $current_epoch
+        [s -5 role] eq {master}
     } else {
         fail "No failover detected"
     }
@@ -122,7 +120,9 @@ test "Make instance #0 unreachable without killing it" {
 }
 
 test "Send CLUSTER FAILOVER to instance #5" {
-    R 5 cluster failover
+    # With Raft, the reply only comes when the failover is done, so don't wait for it.
+    set rd [valkey_deferring_client -5]
+    $rd cluster failover
 }
 
 test "Instance #5 is still a slave after some time (no failover)" {
@@ -133,6 +133,8 @@ test "Instance #5 is still a slave after some time (no failover)" {
 test "Wait for instance #0 to return back alive" {
     R 0 deferred 0
     assert {[R 0 read] eq {OK}}
+    catch {$rd read}
+    $rd close
 }
 
 } ;# start_cluster
@@ -184,7 +186,111 @@ test "Wait for instance #0 to return back alive" {
 
 } ;# start_cluster
 
-start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval 1000 cluster-node-timeout 2000}} {
+# Pick a primary that is not the Raft leader (any primary with legacy cluster),
+# so that a failover can be committed while that primary is unreachable.
+# Assumes 5 primaries (nodes 0-4), each with at least one replica, so that
+# node N+5 is a replica of node N.
+# Returns the primary, its replica, and a key the primary owns.
+proc manual_failover_pick_shard {} {
+    set leader [CI 0 cluster_raft_leader]
+    for {set p 0} {$p < 5} {incr p} {
+        if {[R $p cluster myid] ne $leader} break
+    }
+    set r [expr {$p + 5}]
+    assert_equal [srv -$p port] [s -$r master_port]
+    wait_for_condition 1000 50 {
+        [s -$r master_link_status] eq {up}
+    } else {
+        fail "Replica link status is not up"
+    }
+    for {set i 0} {$i < 1000} {incr i} {
+        if {![catch {R $p exists "key$i"}]} break
+    }
+    set key "key$i"
+    R $p set $key 0
+    wait_for_ofs_sync [srv -$p client] [srv -$r client]
+    return [list $p $r $key]
+}
+
+## Check that a manual failover waits for the primary to pause writes, and that
+## no acknowledged write is lost.
+start_cluster 5 5 {tags {external:skip cluster}} {
+    test "Manual failover does not lose acknowledged writes when the primary is slow" {
+        wait_for_cluster_state ok
+        lassign [manual_failover_pick_shard] p r key
+
+        # Create the clients first: their initial SELECT would block on a stopped server.
+        set writer [valkey_deferring_client -$p]
+        set failover [valkey_deferring_client -$r]
+
+        # Make the primary unreachable, queue writes to it, and start a failover.
+        pause_process [srv -$p pid]
+        set numops 100
+        for {set i 0} {$i < $numops} {incr i} {
+            $writer incr $key
+        }
+        $failover cluster failover
+
+        # No failover while the primary can't pause writes. The primary stays
+        # stopped until resume_process, so this runs inside that window.
+        after 1000
+        set role [s -$r role]
+        resume_process [srv -$p pid]
+        assert_equal slave $role
+
+        set acked 0
+        for {set i 0} {$i < $numops} {incr i} {
+            if {![catch {$writer read} reply]} {
+                set acked $reply
+            }
+        }
+        catch {$failover read}
+        wait_for_condition 1000 50 {
+            [s -$r role] eq {master} && [s -$p role] eq {slave}
+        } else {
+            fail "No failover"
+        }
+        assert_equal $acked [R $r get $key]
+
+        $writer close
+        $failover close
+    }
+} ;# start_cluster
+
+## Check that the primary pauses writes during a manual failover, so writes
+## sent while it is in progress are either replicated or rejected.
+start_cluster 5 5 {tags {external:skip cluster}} {
+    test "Manual failover does not lose acknowledged writes under continuous load" {
+        wait_for_cluster_state ok
+        lassign [manual_failover_pick_shard] p r key
+
+        set writer [valkey_client -$p]
+        set failover [valkey_deferring_client -$r]
+        $failover cluster failover
+
+        # Keep writing until the primary rejects a write after the failover.
+        set acked 0
+        set start [clock milliseconds]
+        while {[clock milliseconds] - $start < 10000} {
+            if {[catch {$writer incr $key} reply]} break
+            set acked $reply
+        }
+        # Writes are redirected once the failover is done, not held until the pause expires.
+        assert {[clock milliseconds] - $start < 5000}
+        assert_equal OK [$failover read]
+        wait_for_condition 1000 50 {
+            [s -$r role] eq {master} && [s -$p role] eq {slave}
+        } else {
+            fail "No failover"
+        }
+        assert_equal $acked [R $r get $key]
+
+        $writer close
+        $failover close
+    }
+} ;# start_cluster
+
+start_cluster 3 1 {tags {external:skip cluster cluster-raft:skip} overrides {cluster-ping-interval 1000 cluster-node-timeout 2000}} {
     test "Manual failover vote is not limited by two times the node timeout - drop the auth ack" {
         set CLUSTER_PACKET_TYPE_FAILOVER_AUTH_ACK 6
         set CLUSTER_PACKET_TYPE_NONE -1
@@ -213,7 +319,7 @@ start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval
     }
 } ;# start_cluster
 
-start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval 1000 cluster-node-timeout 2000 cluster-replica-validity-factor 0}} {
+start_cluster 3 1 {tags {external:skip cluster cluster-raft:skip} overrides {cluster-ping-interval 1000 cluster-node-timeout 2000 cluster-replica-validity-factor 0}} {
     test "Manual failover vote is not limited by two times the node timeout - mixed failover" {
         # Make sure the failover is triggered by us.
         R 1 config set cluster-replica-validity-factor 0
@@ -263,7 +369,7 @@ start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval
     }
 } ;# start_cluster
 
-start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval 1000 cluster-node-timeout 2000 cluster-replica-validity-factor 0}} {
+start_cluster 3 1 {tags {external:skip cluster cluster-raft:skip} overrides {cluster-ping-interval 1000 cluster-node-timeout 2000 cluster-replica-validity-factor 0}} {
     test "Automatic failover vote is not limited by two times the node timeout - mixed failover" {
         R 3 cluster failover
         wait_for_condition 1000 50 {
@@ -293,7 +399,7 @@ start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval
     }
 } ;# start_cluster
 
-start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval 1000 cluster-node-timeout 15000}} {
+start_cluster 3 1 {tags {external:skip cluster cluster-raft:skip} overrides {cluster-ping-interval 1000 cluster-node-timeout 15000}} {
     test "Manual failover will reset the on-going election" {
         set CLUSTER_PACKET_TYPE_FAILOVER_AUTH_REQUEST 5
         set CLUSTER_PACKET_TYPE_NONE -1
@@ -335,7 +441,7 @@ start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval
     }
 } ;# start_cluster
 
-start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval 1000 cluster-node-timeout 1000}} {
+start_cluster 3 1 {tags {external:skip cluster cluster-raft:skip} overrides {cluster-ping-interval 1000 cluster-node-timeout 1000}} {
     test "Broadcast PONG to the cluster when the node role changes" {
         # R0 is a primary and R3 is a replica, we will do multiple cluster failover
         # and then check their role and flags.
@@ -396,7 +502,7 @@ start_cluster 3 1 {tags {external:skip cluster} overrides {cluster-ping-interval
     }
 } ;# start_cluster
 
-start_cluster 3 1 {tags {external:skip cluster}} {
+start_cluster 3 1 {tags {external:skip cluster cluster-raft:skip}} {
     # In the R0/R3 shard, R0 is the primary node and R3 is the replica.
     #
     # We trigger a manual failover on R3.
@@ -503,7 +609,7 @@ start_cluster 3 1 {tags {external:skip cluster}} {
     }
 }
 
-start_cluster 3 2 {tags {external:skip cluster}} {
+start_cluster 3 2 {tags {external:skip cluster cluster-raft:skip}} {
     # In the R0/R3/R4 shard, R0 is the primary node, R3 and R4 are the replicas.
     #
     # We trigger a manual failover on R3.
@@ -586,7 +692,7 @@ start_cluster 3 2 {tags {external:skip cluster}} {
 
 # Disable this test case due to #2441.
 if {false} {
-start_cluster 3 2 {tags {external:skip cluster}} {
+start_cluster 3 2 {tags {external:skip cluster cluster-raft:skip}} {
     # This test consists of two phases.
     # The first phase, we will create a scenario where two primary are on the same shard. See #2279 for more details.
     # The second phase, we will test the behavior of the node when packets arrive out of order. See #2301 for more details.

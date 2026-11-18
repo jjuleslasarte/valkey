@@ -199,7 +199,7 @@ test "Verify the nodes configured with prefer hostname only show hostname for ne
             fail "hostname information for shard-$j didn't reach node 6"
         }
     }
-}
+} {} {cluster-raft:skip} ;# Uses DEBUG DROP-CLUSTER-PACKET-FILTER (gossip-specific)
 
 test "Test restart will keep hostname information" {
     # Set a new hostname, reboot and make sure it sticks

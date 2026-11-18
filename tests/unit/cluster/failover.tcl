@@ -31,11 +31,15 @@ test "Killing one master node" {
 
 test "Wait for failover" {
     wait_for_condition 1000 50 {
-        [CI 1 cluster_current_epoch] > $current_epoch
+        [s -5 role] eq {master}
     } else {
         fail "No failover detected"
     }
 }
+
+test "Epoch increased after failover" {
+    assert {[CI 1 cluster_current_epoch] > $current_epoch}
+} {} {cluster-raft:skip}
 
 test "Cluster should eventually be up again" {
     for {set j 0} {$j < [llength $::servers]} {incr j} {
@@ -90,11 +94,15 @@ start_cluster 3 6 {tags {external:skip cluster}} {
 
     test "Wait for failover" {
         wait_for_condition 1000 50 {
-            [CI 1 cluster_current_epoch] > $current_epoch
+            [s -3 role] eq {master} || [s -6 role] eq {master}
         } else {
             fail "No failover detected"
         }
     }
+
+    test "Epoch increased after failover" {
+        assert {[CI 1 cluster_current_epoch] > $current_epoch}
+    } {} {cluster-raft:skip}
 
     test "Cluster should eventually be up again" {
         for {set j 0} {$j < [llength $::servers]} {incr j} {
@@ -133,7 +141,7 @@ start_cluster 3 6 {tags {external:skip cluster}} {
         if {!(($srv3_has_rank0 && $srv6_has_rank1) || ($srv3_has_rank1 && $srv6_has_rank0))} {
             fail "Replicas should have different ranks: srv3_rank0=$srv3_has_rank0, srv3_rank1=$srv3_has_rank1, srv6_rank0=$srv6_has_rank0, srv6_rank1=$srv6_has_rank1"
         }
-    }
+    } {} {cluster-raft:skip} ;# Checks gossip election log messages
 
 } ;# start_cluster
 
@@ -209,11 +217,11 @@ start_cluster 5 5 {tags {external:skip cluster}} {
         }
 
         if {$role eq {master}} {
-            test "Wait failover by #$slave with old epoch $slave_config_epoch" {
+            test "Wait failover by #$slave" {
                 wait_for_condition 1000 50 {
-                    [CI $slave cluster_my_epoch] > $slave_config_epoch
+                    [s -$slave role] eq {master}
                 } else {
-                    fail "No failover detected, epoch is still [CI $slave cluster_my_epoch]"
+                    fail "No failover detected, slave #$slave is still a slave"
                 }
             }
         }
@@ -255,7 +263,7 @@ start_cluster 5 5 {tags {external:skip cluster}} {
         for {set id 0} {$id < [llength $::servers]} {incr id} {
             assert {[CI $id cluster_current_epoch] >= [CI $id cluster_my_epoch]}
         }
-    }
+    } {} {cluster-raft:skip} ;# Epochs are a gossip concept
 } ;# start_cluster
 
 proc test_small_timeout {timeout} {

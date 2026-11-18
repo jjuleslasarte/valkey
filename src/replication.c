@@ -1584,10 +1584,11 @@ void syncCommand(client *c) {
 
         if (!strcasecmp(objectGetVal(c->argv[1]), server.replid)) {
             if (server.cluster_enabled) {
-                clusterPromoteSelfToPrimary();
-            } else {
-                replicationUnsetPrimary();
+                addReplyError(c, "PSYNC FAILOVER not supported in cluster mode. "
+                                 "Use CLUSTER FAILOVER instead.");
+                return;
             }
+            replicationUnsetPrimary();
             sds client = catClientInfoShortString(sdsempty(), c, server.hide_user_data_from_log);
             serverLog(LL_NOTICE, "PRIMARY MODE enabled (failover request from '%s')", client);
             sdsfree(client);
@@ -5278,6 +5279,10 @@ void replicationSetPrimary(char *ip, int port, int full_sync_required, bool disc
 
     cancelReplicationHandshake(0);
 
+    /* A cached primary from before, e.g. if the link to the old primary was
+     * already down, is as unusable as the one dont_cache_primary prevents. */
+    if (full_sync_required) replicationDiscardCachedPrimary();
+
     /* Before destroying our primary state, create a cached primary using
      * our own parameters, to later PSYNC with the new primary. */
     if (was_primary && !full_sync_required) {
@@ -6188,7 +6193,7 @@ void replicationCron(void) {
          * alter the replication offsets of primary and replica, and will no longer
          * match the one stored into 'mf_primary_offset' state. */
         int manual_failover_in_progress =
-            ((server.cluster_enabled && clusterManualFailoverTimeLimit()) || server.failover_end_time) &&
+            getPausedActionsWithPurpose(PAUSE_DURING_FAILOVER) &&
             isPausedActionsWithUpdate(PAUSE_ACTION_REPLICA);
 
         if (!manual_failover_in_progress) {
