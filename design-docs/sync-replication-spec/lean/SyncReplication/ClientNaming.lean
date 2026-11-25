@@ -106,7 +106,8 @@ theorem writable0 (s : State N2) (p : N2) : Writable 0 s p := by unfold Writable
 
 def x0 : ClientState N2 := clientInit 0
 def x1 : ClientState N2 := x0.withLease (withCore x0.lease (addToSyncSet x0.lease.core 0 1))
-def x2 : ClientState N2 := x1.withLease (withCore x1.lease (makeEligible x1.lease.core 0 1))
+def x2p : ClientState N2 := x1.withLease (withCore x1.lease (proposeEligible x1.lease.core 0 1))
+def x2 : ClientState N2 := x2p.withLease (leaseLearn x2p.lease 0)
 def x3 : ClientState N2 := x2.withLease (leaseLearn x2.lease 1)
 def x4 : ClientState N2 :=
   { x3 with history := x3.history ++ [.inv x3.nextOp 0 (.write x3.nextOp)],
@@ -154,12 +155,14 @@ def x19 : ClientState N2 :=
              lin := x18.lin ++ [(⟨3, 1, .read, .log (logOps x18.written (x18.lease.core.log 1))⟩,
                                  x18.history.length)] }
 
-/-- n1 may serve a linearizable read: it is primary and knows no eligible replica. -/
+/-- n1 may serve a linearizable read: it is primary, knows no eligible replica and has no
+promotion in flight. -/
 theorem canRead (a : ClientState N2) (h1 : (a.lease.core.localCfg 1).primary = 1)
     (h2 : (a.lease.core.localCfg 1).incarnation 1 = a.lease.core.incarnation 1)
     (h3 : ∀ r, (a.lease.core.localCfg 1).eligible r = false)
-    (h4 : a.lease.core.commit 1 = (a.lease.core.log 1).length) : PrimCanRead wP a.lease 1 :=
-  ⟨⟨h1, h2⟩, fun r hr _ => by rw [h3 r] at hr; exact absurd hr (by decide), h4⟩
+    (h4 : a.lease.core.commit 1 = (a.lease.core.log 1).length) (h5 : a.lease.core.proposing 1 = none) :
+    PrimCanRead wP a.lease 1 :=
+  ⟨⟨h1, h2⟩, fun r hr _ => by rw [h3 r, h5] at hr; simp at hr, h4⟩
 
 theorem x19_reachable : NoFreshenReachable 0 wP (0 : N2) x19 := by
   have r0 : NoFreshenReachable 0 wP (0 : N2) x0 := LTS.CanReach.refl _ _
@@ -167,7 +170,9 @@ theorem x19_reachable : NoFreshenReachable 0 wP (0 : N2) x19 := by
     (LeaseStep.core _ _ _ (Step.addToSyncSet _ 0 1 (thinks2 _ _ rfl rfl) (by decide) rfl rfl (by decide)) rfl) rfl)
   have r2 := r1.stepR (ClientStepNoFreshen.lease x1 (.core (.makeEligible 0 1)) _
     (LeaseStep.core _ _ _ (Step.makeEligible _ 0 1 (thinks2 _ _ rfl rfl) rfl rfl rfl) rfl) rfl)
-  have r3 := r2.stepR (ClientStepNoFreshen.lease x2 (.learn 1) _
+  have r2b := r2.stepR (ClientStepNoFreshen.lease x2p (.learn 0) _
+    (LeaseStep.learn _ 0 (by unfold KnowsLatest; decide)) rfl)
+  have r3 := r2b.stepR (ClientStepNoFreshen.lease x2 (.learn 1) _
     (LeaseStep.learn _ 1 (by unfold KnowsLatest; decide)) rfl)
   have r4 := r3.stepR (ClientStepNoFreshen.invokeWrite x3 0)
   have r5 := r4.stepR (ClientStepNoFreshen.append x4 0 0 0 (by decide) (thinks2 _ _ rfl rfl) (writable0 _ _))
@@ -190,12 +195,12 @@ theorem x19_reachable : NoFreshenReachable 0 wP (0 : N2) x19 := by
       (fun r h => by revert r; decide)) rfl) rfl)
   have r14 := r13.stepR (ClientStepNoFreshen.invokeRead x13 1 1)
   have r15 := r14.stepR (ClientStepNoFreshen.respondRead x14 1 1 1 (by decide)
-    (Or.inl (canRead _ rfl rfl (by decide) (by decide))))
+    (Or.inl (canRead _ rfl rfl (by decide) (by decide) rfl)))
   have r16 := r15.stepR (ClientStepNoFreshen.invokeWrite x15 0)
   have r17 := r16.stepR (ClientStepNoFreshen.append x16 0 2 0 (by decide) (thinks2 _ _ rfl rfl) (writable0 _ _))
   have r18 := r17.stepR (ClientStepNoFreshen.invokeRead x17 1 1)
   exact r18.stepR (ClientStepNoFreshen.respondRead x18 3 1 1 (by decide)
-    (Or.inl (canRead _ rfl rfl (by decide) (by decide))))
+    (Or.inl (canRead _ rfl rfl (by decide) (by decide) rfl)))
 
 /-- Between the two reads, n1's log and the committed history are both `[1]`; only the
 lookup of the entry (offset 1, ID 1) in `written` changes, from operation 0 to

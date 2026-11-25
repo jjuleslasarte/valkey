@@ -70,7 +70,8 @@ def abort (a : ReplyState Node) (h : Held Node) : ReplyState Node :=
 `DEBUG change-repl-id`, and at a primary's restart). -/
 def newId (a : ReplyState Node) (p : Node) : ReplyState Node :=
   ⟨{ a.core with replId := update a.core.replId p (freshId a.core),
-                 usedIds := insert (freshId a.core) a.core.usedIds }, a.held, a.acknowledged⟩
+                 usedIds := insert (freshId a.core) a.core.usedIds,
+                 idHist := update a.core.idHist (freshId a.core) (a.core.log p) }, a.held, a.acknowledged⟩
 
 /-- The held replies left after `n` restarts. -/
 def dropHeld (held : List (Held Node)) (n : Node) : List (Held Node) :=
@@ -111,6 +112,28 @@ inductive ReplyStep (m : Nat) : ReplyState Node → ReplyAction Node → ReplySt
   | restartPartialFresh (a : ReplyState Node) (n : Node) (k : Nat) : (hKnowsLatest : KnowsLatest a.core n) →
       (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       ReplyStep m a (.restartPartial n k) ⟨restartPartialFresh a.core n k, dropHeld a.held n, a.acknowledged⟩
+/-- `ReplyStep` over `StepA`: the acknowledgement layer of the model with atomic promotion. -/
+inductive ReplyStepA (m : Nat) : ReplyState Node → ReplyAction Node → ReplyState Node → Prop
+  | core (a : ReplyState Node) (μ : Action Node) (c : State Node) : StepA m a.core μ c →
+      μ.isRestart = false → ReplyStepA m a (.core μ) ⟨c, a.held, a.acknowledged⟩
+  | write (a : ReplyState Node) (p : Node) : ThinksPrimary a.core p → Writable m a.core p →
+      ReplyStepA m a (.write p) (write a p)
+  | release (a : ReplyState Node) (h : Held Node) : h ∈ a.held → h.offset ≤ a.core.commit h.primary →
+      ReplyFenced a.core h → ReplyStepA m a (.release h) (release a h)
+  | abort (a : ReplyState Node) (h : Held Node) : h ∈ a.held → ¬ ReplyFenced a.core h →
+      ReplyStepA m a (.abort h) (abort a h)
+  | newId (a : ReplyState Node) (p : Node) : ReplyStepA m a (.newId p) (newId a p)
+  | restartEmpty (a : ReplyState Node) (n : Node) : (hKnowsLatest : KnowsLatest a.core n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      ReplyStepA m a (.restartEmpty n) ⟨restartEmpty a.core n, dropHeld a.held n, a.acknowledged⟩
+  | restartKeep (a : ReplyState Node) (n : Node) : (hKnowsLatest : KnowsLatest a.core n) →
+      ReplyStepA m a (.restartKeep n) ⟨restartKeep a.core n, dropHeld a.held n, a.acknowledged⟩
+  | restartPartialKeep (a : ReplyState Node) (n : Node) (k : Nat) : (hKnowsLatest : KnowsLatest a.core n) →
+      (hFileShorter : k < (a.core.log n).length) → (hCoversAcks : a.core.ackHigh n ≤ k) →
+      ReplyStepA m a (.restartPartial n k) ⟨restartPartialKeep a.core n k, dropHeld a.held n, a.acknowledged⟩
+  | restartPartialFresh (a : ReplyState Node) (n : Node) (k : Nat) : (hKnowsLatest : KnowsLatest a.core n) →
+      (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      ReplyStepA m a (.restartPartial n k) ⟨restartPartialFresh a.core n k, dropHeld a.held n, a.acknowledged⟩
+
 
 /-- The acknowledgement layer as a labelled transition system. -/
 def replyTransitionSystem (m : Nat) : LTS (ReplyState Node) (ReplyAction Node) where

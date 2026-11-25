@@ -343,6 +343,18 @@ theorem Invariant.ids_frame {s : State Node} (h : Invariant s) (t : Node → Nat
       ⟨hF.left, hF.fenceLeInheritedEnd, hF.primHolds, hF.primAck, hF.eligHolds⟩, h.authEx⟩
   eligibleHoldsCommitted := h.eligibleHoldsCommitted
 
+/-- The invariant does not read the ghost ID histories. -/
+theorem Invariant.idHist_frame {s : State Node} (h : Invariant s) (H : Nat → List Nat) :
+    Invariant { s with idHist := H } where
+  toConfigInvariant := ⟨h.localCfgLe, h.localCfgEq, h.primKnows, h.localCfgIncLe⟩
+  toReplInvariant := ⟨h.noSelfSync, h.ackedPrim, h.ackedLe, h.ackHolds, h.ackedHigh, h.syncCommit⟩
+  toMembershipInvariant := ⟨h.eligibleCounted, h.syncNew, h.eligibleInOldConfig⟩
+  toCommitInvariant := ⟨h.commitWithinLog, h.committedIsHistoryPrefix, h.inheritedEndWithinLog,
+    h.historyWithinCommitOrInherited, h.histAck⟩
+  toFailoverInvariant := ⟨fun p hp hv => let hF := h.stale p hp hv
+      ⟨hF.left, hF.fenceLeInheritedEnd, hF.primHolds, hF.primAck, hF.eligHolds⟩, h.authEx⟩
+  eligibleHoldsCommitted := h.eligibleHoldsCommitted
+
 theorem invariant_init (i : Node) : Invariant (init i) where
   eligibleHoldsCommitted := by intro n _; simp [init]
   commitWithinLog := by intro p; simp [init]

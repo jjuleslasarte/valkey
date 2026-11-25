@@ -4,6 +4,7 @@ import SyncReplication.Preserve.Config
 import SyncReplication.Preserve.Failover
 import SyncReplication.Preserve.Restart
 import SyncReplication.Preserve.Delayed
+import SyncReplication.Preserve.Promotion
 
 /-!
 # Every step preserves the invariant
@@ -26,7 +27,7 @@ namespace SyncReplication
 
 variable {Node : Type} [DecidableEq Node]
 
-theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Invariant s) (hs : InstantStep m s μ s') :
+theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Invariant s) (hs : InstantStepA m s μ s') :
     Invariant s' := by
   cases hs with
   | append p _ _ => exact invariant_append h p
@@ -45,20 +46,27 @@ theorem invariant_step {m : Nat} {s s' : State Node} {μ : Action Node} (h : Inv
   | restartPartialKeep n k hkl hk hkeep => exact invariant_restartPartialKeep h n k hkl hk hkeep
   | restartPartialFresh n k hkl hk hfresh hsurv => exact invariant_restartPartialFresh h n k hkl hsurv hk hfresh
 
-/-- `Invariant` together with `RInvariant` is a one-step invariant of the protocol with
-delayed replication, in CSLib's sense. -/
+/-- `Invariant` together with `RInvariant`, of the atomic model's view of the state
+(`PromSim`, `Preserve/Promotion.lean`), is a one-step invariant of the protocol with
+delayed replication and two-step promotion, in CSLib's sense. -/
 theorem invariant_trInv {m : Nat} :
-    (transitionSystem m (Node := Node)).TrInv (fun s => Invariant s ∧ RInvariant s) :=
-  fun _ _ _ hs h => invariants_step h.1 h.2 hs
+    (transitionSystem m (Node := Node)).TrInv
+      (fun s => ∃ L, PromSim s L ∧ Invariant (simState s L) ∧ RInvariant (simState s L)) := by
+  intro s μ s' hs ⟨L, hP, hi, hr⟩
+  obtain ⟨L', hP', hA | he⟩ := hP.step hi hs
+  · exact ⟨L', hP', invariants_step hi hr hA⟩
+  · exact ⟨L', hP', he.1 ▸ hi, he.1 ▸ hr⟩
 
 theorem invariants_reachable {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) :
-    Invariant s ∧ RInvariant s :=
+    ∃ L, PromSim s L ∧ Invariant (simState s L) ∧ RInvariant (simState s L) :=
   let ⟨_, run⟩ := h
-  LTS.mtrInv_of_trInv invariant_trInv _ _ _ run ⟨invariant_init i, rInvariant_init i⟩
+  LTS.mtrInv_of_trInv invariant_trInv _ _ _ run
+    ⟨(init i).localCfg, promSim_init i, invariant_init i, rInvariant_init i⟩
 
-/-- Hence `Invariant` holds in every reachable state: a one-step invariant is a run
-invariant (`LTS.mtrInv_of_trInv`), and `init i` satisfies it. -/
-theorem invariant_reachable {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) : Invariant s :=
-  (invariants_reachable h).1
+/-- Hence `Invariant` holds of the atomic model's view of every reachable state: a
+one-step invariant is a run invariant (`LTS.mtrInv_of_trInv`), and `init i` satisfies it. -/
+theorem invariant_reachable {m : Nat} {i : Node} {s : State Node} (h : Reachable m i s) :
+    ∃ L, PromSim s L ∧ Invariant (simState s L) :=
+  let ⟨L, hP, hi, _⟩ := invariants_reachable h; ⟨L, hP, hi⟩
 
 end SyncReplication

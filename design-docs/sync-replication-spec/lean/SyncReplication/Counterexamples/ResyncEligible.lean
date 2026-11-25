@@ -45,7 +45,7 @@ def re8 := resync re7 1                  -- n1, eligible, resyncs to n0's empty 
 
 /-- The run; the label list is its trace. Only `resync 1` is the weakened action. -/
 theorem resyncEligible_run : (transitionSystemResyncEligible 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+    [.addToSyncSet 0 1, .makeEligible 0 1, .learn 0, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
      .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
      .restartPartial 0 0, .resync 1] re8 :=
   LTS.MTr.comp (transitionSystemResyncEligible 1) (mtr_of_step StepResyncEligible.step committed_run) <|

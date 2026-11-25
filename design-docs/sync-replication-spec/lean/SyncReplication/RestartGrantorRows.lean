@@ -144,28 +144,69 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
     (fun _ _ ⟨m, hm, hc, hd, he⟩ => ⟨m, hm, (hcb m hm hc).1, hd, he⟩)
     (fun m hm hc => ⟨hm, (hcb m hm hc).1⟩) }
 
-/-- Every step of the variant preserves the lease invariant. -/
+/-- Every step of the variant preserves the lease invariant of the atomic model's view. -/
 theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}
-    {a a' : LeaseState Node} {μ : LeaseAction Node} (h : LeaseInvariant P a)
-    (hs : LeaseStepKeepGrantorRows m P a μ a') : LeaseInvariant P a' := by
+    {a a' : LeaseState Node} {μ : LeaseAction Node} {L : Node → Cfg Node} (hP : PromSim a.core L)
+    (h : LeaseInvariant P (leaseSim a L)) (hs : LeaseStepKeepGrantorRows m P a μ a') :
+    ∃ L', PromSim a'.core L' ∧ LeaseInvariant P (leaseSim a' L') := by
+  have hi : Invariant (simState a.core L) := h.core
   cases hs with
-  | step _ _ hs1 => exact leaseInvariant_step hM h hs1
+  | step _ _ hs1 => exact leaseInvariant_stepN hM hP h hs1
   | restartEmpty n hkl hsurv =>
-    exact leaseInvariant_restartKeepGrantorRows h (invariant_restartEmpty h.core n hkl hsurv) (h.rcore.restartEmpty n) hkl rfl rfl
-      (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e) rfl
-      (fun _ e => restartEmpty_commit_other e)
+    have hkl' := hP.knows hi hkl
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartEmpty (m := m) a.core n hkl hsurv)
+    · have e := hS.restartEmpty_inv
+      have := leaseInvariant_restartKeepGrantorRows h (invariant_restartEmpty h.core n hkl' hsurv)
+        (h.rcore.restartEmpty n) hkl' rfl rfl
+        (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e) rfl
+        (fun _ e => restartEmpty_commit_other e)
+      have heq : leaseRestartKeepGrantorRows (leaseSim a L) n (restartEmpty (leaseSim a L).core n) =
+          leaseSim (leaseRestartKeepGrantorRows a n (restartEmpty a.core n)) L' := by
+        simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]
+      exact ⟨L', hP', heq ▸ this⟩
+    · cases hμ
   | restartKeep n hkl =>
-    exact leaseInvariant_restartKeepGrantorRows h (invariant_restartKeep h.core n hkl) (h.rcore.restartKeep n) hkl rfl rfl
-      (fun _ _ => rfl) (fun _ _ => rfl) rfl (fun _ e => restartKeep_commit_other e)
+    have hkl' := hP.knows hi hkl
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartKeep (m := m) a.core n hkl)
+    · have e := hS.restartKeep_inv
+      have := leaseInvariant_restartKeepGrantorRows h (invariant_restartKeep h.core n hkl')
+        (h.rcore.restartKeep n) hkl' rfl rfl (fun _ _ => rfl) (fun _ _ => rfl) rfl
+        (fun _ e => restartKeep_commit_other e)
+      have heq : leaseRestartKeepGrantorRows (leaseSim a L) n (restartKeep (leaseSim a L).core n) =
+          leaseSim (leaseRestartKeepGrantorRows a n (restartKeep a.core n)) L' := by
+        simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]
+      exact ⟨L', hP', heq ▸ this⟩
+    · cases hμ
   | restartPartialKeep n k hkl hk hkeep =>
-    exact leaseInvariant_restartKeepGrantorRows h (invariant_restartPartialKeep h.core n k hkl hk hkeep)
-      (h.rcore.restartPartialKeep n hk) hkl rfl rfl (fun _ _ => rfl) (fun _ e => restartPartialKeep_log_other e) rfl
-      (fun _ e => restartKeep_commit_other e)
+    have hkl' := hP.knows hi hkl
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartPartialKeep (m := m) a.core n k hkl hk hkeep)
+    · rcases hS.restartPartial_inv with e | e
+      · have := leaseInvariant_restartKeepGrantorRows h (invariant_restartPartialKeep h.core n k hkl' hk hkeep)
+          (h.rcore.restartPartialKeep n hk) hkl' rfl rfl (fun _ _ => rfl)
+          (fun _ e => restartPartialKeep_log_other e) rfl (fun _ e => restartKeep_commit_other e)
+        have heq : leaseRestartKeepGrantorRows (leaseSim a L) n (restartPartialKeep (leaseSim a L).core n k) =
+            leaseSim (leaseRestartKeepGrantorRows a n (restartPartialKeep a.core n k)) L' := by
+          simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]
+        exact ⟨L', hP', heq ▸ this⟩
+      · have := congrArg (fun x => x.incarnation n) e
+        simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
+    · cases hμ
   | restartPartialFresh n k hkl hk hfresh hsurv =>
-    exact leaseInvariant_restartKeepGrantorRows h
-      (invariant_restartPartialFresh h.core n k hkl hsurv hk hfresh) (h.rcore.restartPartialFresh n hk) hkl rfl rfl
-      (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e) rfl
-      (fun _ e => restartEmpty_commit_other e)
+    have hkl' := hP.knows hi hkl
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ :=
+      hP.step hi (Step.restartPartialFresh (m := m) a.core n k hkl hk hfresh hsurv)
+    · rcases hS.restartPartial_inv with e | e
+      · have := congrArg (fun x => x.incarnation n) e
+        simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
+      · have := leaseInvariant_restartKeepGrantorRows h
+          (invariant_restartPartialFresh h.core n k hkl' hsurv hk hfresh) (h.rcore.restartPartialFresh n hk) hkl' rfl rfl
+          (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e) rfl
+          (fun _ e => restartEmpty_commit_other e)
+        have heq : leaseRestartKeepGrantorRows (leaseSim a L) n (restartPartialFresh (leaseSim a L).core n k) =
+            leaseSim (leaseRestartKeepGrantorRows a n (restartPartialFresh a.core n k)) L' := by
+          simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]
+        exact ⟨L', hP', heq ▸ this⟩
+    · cases hμ
 
 /-- **Clearing the grantor rows at a restart is not needed for `NoStaleRead`.** With
 `margin ≥ 2 · drift`, every state reachable when restarts keep the restarted node's
@@ -173,11 +214,12 @@ primary leases, acknowledgement times and echoes satisfies `NoStaleRead`. -/
 theorem noStaleRead_keepGrantorRows {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m : Nat}
     {i : Node} {a : LeaseState Node}
     (hReachable : (leaseTransitionSystemKeepGrantorRows m P).CanReach (leaseInit i) a) :
-    NoStaleRead P a :=
-  let ⟨_, run⟩ := hReachable
-  leaseInvariant_noStaleRead hMargin
-    (LTS.mtrInv_of_trInv (p := LeaseInvariant P)
-      (fun _ _ _ hs h => leaseInvariant_stepKeepGrantorRows hMargin h hs) _ _ _ run
-      (leaseInvariant_init P i))
+    NoStaleRead P a := by
+  obtain ⟨_, run⟩ := hReachable
+  obtain ⟨L, hP, h⟩ := LTS.mtrInv_of_trInv (p := fun a => ∃ L, PromSim a.core L ∧ LeaseInvariant P (leaseSim a L))
+      (fun _ _ _ hs ⟨_, hP, h⟩ => leaseInvariant_stepKeepGrantorRows hMargin hP h hs) _ _ _ run
+      ⟨(init i).localCfg, promSim_init i, leaseInvariant_init P i⟩
+  have hn := leaseInvariant_noStaleRead hMargin h
+  exact ⟨fun p hp => hn.1 p (hP.primCanRead hp), fun r hr => hn.2 r (hP.replCanRead hr)⟩
 
 end SyncReplication

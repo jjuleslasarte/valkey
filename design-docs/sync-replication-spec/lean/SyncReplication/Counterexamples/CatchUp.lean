@@ -57,17 +57,19 @@ committed offset, `0 < 1`) forbids this step, so this is the half of the rule th
 design states. -/
 def catchUp7 := addToSyncSet c6 0 2
 /-- n0 makes n2 eligible: authoritative with an empty log. -/
-def catchUp8 := makeEligible catchUp7 0 2
+def catchUp8p := proposeEligible catchUp7 0 2
+def catchUp8 := learn catchUp8p 0
 
 /-- The direct run: a reconciled primary counts a replica behind its commit point. Only
 `addToSyncSet 0 2` is the weakened action. -/
 theorem noCatchUp_run : (transitionSystemNoCatchUp 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+    [.addToSyncSet 0 1, .makeEligible 0 1, .learn 0, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
      .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
-     .addToSyncSet 0 2, .makeEligible 0 2] catchUp8 :=
+     .addToSyncSet 0 2, .makeEligible 0 2, .learn 0] catchUp8 :=
   LTS.MTr.comp (transitionSystemNoCatchUp 1) (mtr_of_step StepNoCatchUp.step committed_run) <|
   .stepL (StepNoCatchUp.addToSyncSet c6 0 2 (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (.step (Step.makeEligible catchUp7 0 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.learn catchUp8p 0 (by unfold KnowsLatest; decide))) <|
   .refl
 
 /-- AddToSyncSet's catch-up guard is needed: without it a reachable state has an

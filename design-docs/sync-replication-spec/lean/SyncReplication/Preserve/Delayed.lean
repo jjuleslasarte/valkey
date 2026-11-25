@@ -278,7 +278,8 @@ structure RInvariant (s : State Node) : Prop where
   ackOk : ∀ r p g off, RMsg.ack r p g off ∈ s.rnet → s.rgen p r = g →
     (∃ k, s.stream p r = some (k, g)) →
     off ≤ (s.log r).length ∧ (s.log r).take off <+: s.log p ∧ off ≤ s.ackHigh r
-  hist : ∃ H, HistOk s H
+  /-- The ghost ID histories (`idHist`) are a history for every ID in use. -/
+  hist : HistOk s s.idHist
   /-- The per-connection acknowledgement record never exceeds the highest one since the
   last reset of the record: a reconnect starts the first again from 0. -/
   ackedLeMax : ∀ p r, s.acked p r ≤ s.ackedMax p r
@@ -295,11 +296,11 @@ theorem rInvariant_init (i : Node) : RInvariant (init i) where
   stream := by intro p r k g h; simp [init] at h
   dataStream := by intro m h; simp [init] at h
   ackOk := by intro r p g off h; simp [init] at h
-  hist := ⟨fun _ => [], {
+  hist := {
     logH := by intro n; simp [init]
     ownH := by intro p _; simp [init]
     secH := by intro n t o h; simp [init] at h
-    streamH := by intro p r k g h; simp [init] at h }⟩
+    streamH := by intro p r k g h; simp [init] at h }
   ackedLeMax := fun _ _ => Nat.le_refl _
 
 theorem dataOn_of_rnet {s s' : State Node} (h : s'.rnet = s.rnet) (p r : Node) (g : Nat) :
@@ -324,9 +325,10 @@ theorem RInvariant.reset {s s' : State Node} (h : RInvariant s) (n : Node)
     (hg : s'.rgen = closeAll s.rgen n)
     (hnet : s'.rnet = s.rnet) (hst : s'.stream = s.stream)
     (hprimn : ThinksPrimary s' n → (ThinksPrimary s n ∧ s'.replId n = s.replId n) ∨ s'.replId n ∉ s.usedIds)
-    (hHn : ∀ H, HistOk s H → ∃ H' : Nat → List Nat, (∀ t ∈ s.usedIds, H' t = H t) ∧ s'.log n <+: H' (s'.replId n) ∧
-      (ThinksPrimary s' n → H' (s'.replId n) = s'.log n) ∧
-      (∀ t o, s'.replId2 n = some (t, o) → o ≤ (s'.log n).length ∧ (s'.log n).take o = (H' t).take o))
+    (hsame : ∀ t ∈ s.usedIds, s'.idHist t = s.idHist t)
+    (hHn : HistOk s s.idHist → s'.log n <+: s'.idHist (s'.replId n) ∧
+      (ThinksPrimary s' n → s'.idHist (s'.replId n) = s'.log n) ∧
+      (∀ t o, s'.replId2 n = some (t, o) → o ≤ (s'.log n).length ∧ (s'.log n).take o = (s'.idHist t).take o))
     (hak : ∀ p r, s'.acked p r ≤ s'.ackedMax p r) :
     RInvariant s' := by
   have hrg : ∀ x y, s.rgen x y ≤ s'.rgen x y := fun x y => by rw [hg]; exact le_closeAll _ _ _ _
@@ -388,9 +390,11 @@ theorem RInvariant.reset {s s' : State Node} (h : RInvariant s) (n : Node)
     obtain ⟨h1, h2, h3⟩ := h.ackOk r p g off hm hg0 hk
     rw [hlog r hrn, hlog p hpn]; exact ⟨h1, h2, h3.trans (hah r hrn)⟩
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    obtain ⟨H', hsame, hl, ho, hsc⟩ := hHn H hH
-    refine ⟨H', {
+    have hH := h.hist
+    obtain ⟨hl, ho, hsc⟩ := hHn hH
+    set H' := s'.idHist with hH'def
+    set H := s.idHist with hHdef
+    refine {
       logH := fun x => by
         by_cases hx : x = n
         · subst hx; exact hl
@@ -416,7 +420,7 @@ theorem RInvariant.reset {s s' : State Node} (h : RInvariant s) (n : Node)
           simp only [decide_eq_true_eq] at this
           simp [RMsg.down, this]
         simp only [hdata, hpend, hlog r hrn]
-        rw [hsame _ (h.msgIds _ hmem hdown)]; exact this }⟩
+        rw [hsame _ (h.msgIds _ hmem hdown)]; exact this }
   ackedLeMax := hak }
 
 end SyncReplication
@@ -432,7 +436,8 @@ theorem RInvariant.frame {s s' : State Node} (h : RInvariant s)
     (hids : s'.usedIds = s.usedIds) (hg : s'.rgen = s.rgen) (hnet : s'.rnet = s.rnet) (hst : s'.stream = s.stream)
     (hprim : ∀ x, (s'.localCfg x).primary = (s.localCfg x).primary)
     (htp : ∀ x, ThinksPrimary s' x → ThinksPrimary s x) (hah : ∀ x, s.ackHigh x ≤ s'.ackHigh x)
-    (hA : s'.acked = s.acked := by rfl) (hAM : s'.ackedMax = s.ackedMax := by rfl) :
+    (hA : s'.acked = s.acked := by rfl) (hAM : s'.ackedMax = s.ackedMax := by rfl)
+    (hHid : s'.idHist = s.idHist := by rfl) :
     RInvariant s' := by
   have hdata := dataOn_of_rnet hnet
   have hpend := pend_of_rnet hnet
@@ -455,15 +460,17 @@ theorem RInvariant.frame {s s' : State Node} (h : RInvariant s)
     obtain ⟨h1, h2, h3⟩ := h.ackOk r p g off (hnet ▸ hm) hgg hk
     rw [hlog]; exact ⟨h1, h2, h3.trans (hah r)⟩
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    exact ⟨H, {
+    rw [hHid]
+    have hH := h.hist
+    set H := s.idHist with hHdef
+    exact {
       logH := fun x => by rw [hlog, hrid]; exact hH.logH x
       ownH := fun p hp => by rw [hlog, hrid]; exact hH.ownH p (htp p hp)
       secH := fun x t o hx => by rw [hlog]; rw [hrid2] at hx; exact hH.secH x t o hx
       streamH := fun p r k g hs hgg i hi => by
         rw [hst] at hs; rw [hg] at hgg
         simp only [hdata, hpend, hlog] at hi ⊢
-        exact hH.streamH p r k g hs hgg i hi }⟩ }
+        exact hH.streamH p r k g hs hgg i hi } }
 
 /-- An append by a node that thinks it is primary: its ID's history grows with its log. -/
 theorem RInvariant.append {s : State Node} (h : RInvariant s) {p : Node} (hp : ThinksPrimary s p) :
@@ -498,9 +505,10 @@ theorem RInvariant.append {s : State Node} (h : RInvariant s) {p : Node} (hp : T
     show off ≤ ((appendWrite s p).log r).length ∧ ((appendWrite s p).log r).take off <+: (appendWrite s p).log q ∧ _
     rw [hlogx r hrp]; exact ⟨h1, h2.trans (hlog q), h3⟩
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
+    show HistOk _ (update s.idHist (s.replId p) (s.log p ++ [s.replId p]))
+    have hH := h.hist
+    set H := s.idHist with hHdef
     have hHp := hH.ownH p hp
-    refine ⟨update H (s.replId p) (s.log p ++ [s.replId p]), ?_⟩
     have hgrow : ∀ t, H t <+: update H (s.replId p) (s.log p ++ [s.replId p]) t := by
       intro t; by_cases ht : t = s.replId p
       · subst ht; rw [update_self, hHp]; exact List.prefix_append _ _
@@ -587,10 +595,12 @@ theorem RInvariant.regen {s : State Node} (h : RInvariant s) (G : Node → Node 
   dataStream := fun m hm hd hgg => h.dataStream m hm hd (hopen _ _ _ (h.genLe m hm) hgg)
   ackOk := fun r p g off hm hgg hk => h.ackOk r p g off hm (hopen p r g (h.genLe _ hm) hgg) hk
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    exact ⟨H, { logH := hH.logH, ownH := hH.ownH, secH := hH.secH
+    show HistOk _ s.idHist
+    have hH := h.hist
+    set H := s.idHist with hHdef
+    exact { logH := hH.logH, ownH := hH.ownH, secH := hH.secH,
                 streamH := fun p r k g hs hgg =>
-                  hH.streamH p r k g hs (hopen p r g (h.streamGen p r k g hs) hgg) }⟩
+                  hH.streamH p r k g hs (hopen p r g (h.streamGen p r k g hs) hgg) }
 
 /-- Close the connection from `p` to `r`. -/
 theorem RInvariant.closeOne {s : State Node} (h : RInvariant s) (p r : Node) :
@@ -623,11 +633,13 @@ theorem RInvariant.eraseClosed {s : State Node} (h : RInvariant s) {msg : RMsg N
   dataStream := fun m hm => h.dataStream m (List.mem_of_mem_erase hm)
   ackOk := fun r p g off hm => h.ackOk r p g off (List.mem_of_mem_erase hm)
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    exact ⟨H, { logH := hH.logH, ownH := hH.ownH, secH := hH.secH
+    show HistOk _ s.idHist
+    have hH := h.hist
+    set H := s.idHist with hHdef
+    exact { logH := hH.logH, ownH := hH.ownH, secH := hH.secH,
                 streamH := fun p r k g hs hgg i hi => by
                   simp only [hdata p r g hgg, hpend p r g hgg] at hi ⊢
-                  exact hH.streamH p r k g hs hgg i hi }⟩ }
+                  exact hH.streamH p r k g hs hgg i hi } }
 
 /-- A lost message closes its connection, and only that one. -/
 theorem RInvariant.lose {s : State Node} (h : RInvariant s) {msg : RMsg Node} (hm : msg ∈ s.rnet) :
@@ -728,8 +740,10 @@ theorem RInvariant.sendData {s : State Node} (h : RInvariant s) {p r : Node} {k 
     · obtain ⟨rfl, rfl⟩ := hc; exact ⟨k, by cases hk'; exact hs⟩
     · exact ⟨k', hk'⟩
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    refine ⟨H, { logH := hH.logH, ownH := hH.ownH, secH := hH.secH, streamH := ?_ }⟩
+    show HistOk _ s.idHist
+    have hH := h.hist
+    set H := s.idHist with hHdef
+    refine { logH := hH.logH, ownH := hH.ownH, secH := hH.secH, streamH := ?_ }
     intro q x k' g' hs' hgg i hi
     rw [hst] at hs'
     by_cases hc : q = p ∧ x = r ∧ g' = s.rgen p r
@@ -871,11 +885,13 @@ theorem RInvariant.deliverData {s : State Node} (h : RInvariant s) {p r : Node} 
     rw [← prefix_take_eq (hgrow x) h1]
     exact h2.trans (hgrow q)
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
+    show HistOk _ s.idHist
+    have hH := h.hist
+    set H := s.idHist with hHdef
     have h0 : 0 < (dataOn s p r g).length := by rw [hd]; simp
     have hfirst := hH.streamH p r k g hk hgg 0 h0
     simp only [hd, List.getElem_cons_zero, hpendE, List.take_succ_cons, List.take_zero] at hfirst
-    refine ⟨H, {
+    refine {
       logH := fun x => by
         by_cases hx : x = r
         · subst hx; rw [hlogr, hridr]; exact hfirst
@@ -886,7 +902,7 @@ theorem RInvariant.deliverData {s : State Node} (h : RInvariant s) {p r : Node} 
       secH := fun x t o hx => by
         obtain ⟨h1, h2⟩ := hH.secH x t o hx
         exact ⟨h1.trans (hgrow x).length_le, by rw [← prefix_take_eq (hgrow x) h1]; exact h2⟩
-      streamH := ?_ }⟩
+      streamH := ?_ }
     intro q x k' g' hs hgq i hi
     have hgq' : s.rgen q x = g' := hgq
     by_cases hxr : x = r
@@ -961,10 +977,12 @@ theorem RInvariant.sendAck {s : State Node} (h : RInvariant s) (r : Node) : RInv
         rw [List.take_length]; exact (List.prefix_append _ _).trans hpre
       · show _ ≤ update s.ackHigh x _ x; rw [update_self]; exact Nat.le_max_right _ _
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    exact ⟨H, { logH := hH.logH, ownH := hH.ownH, secH := hH.secH
+    show HistOk _ s.idHist
+    have hH := h.hist
+    set H := s.idHist with hHdef
+    exact { logH := hH.logH, ownH := hH.ownH, secH := hH.secH,
                 streamH := fun q x k g' hs hgq i hi => by
-                  simp only [hD, hP] at hi ⊢; exact hH.streamH q x k g' hs hgq i hi }⟩ }
+                  simp only [hD, hP] at hi ⊢; exact hH.streamH q x k g' hs hgq i hi } }
 
 /-- A primary records an acknowledgement: the message goes, and only the records move,
 which this invariant reads only to bound one by the other. -/
@@ -985,10 +1003,12 @@ theorem RInvariant.recordAck {s : State Node} (h : RInvariant s) (r p : Node) (g
   dataStream := fun m hm => h.dataStream m (List.mem_of_mem_erase hm)
   ackOk := fun x q g' o hm => h.ackOk x q g' o (List.mem_of_mem_erase hm)
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    exact ⟨H, { logH := hH.logH, ownH := hH.ownH, secH := hH.secH
+    show HistOk _ s.idHist
+    have hH := h.hist
+    set H := s.idHist with hHdef
+    exact { logH := hH.logH, ownH := hH.ownH, secH := hH.secH,
                 streamH := fun q x k g' hs hgq i hi => by
-                  simp only [hD', hP] at hi ⊢; exact hH.streamH q x k g' hs hgq i hi }⟩
+                  simp only [hD', hP] at hi ⊢; exact hH.streamH q x k g' hs hgq i hi }
   ackedLeMax := by
     intro q x
     show update s.acked p (update (s.acked p) r _) q x ≤ update s.ackedMax p (update (s.ackedMax p) r _) q x
@@ -1026,8 +1046,7 @@ theorem RInvariant.psync {s : State Node} (h : RInvariant s) {r : Node} (hne : p
   set p := primaryOf s r with hp
   have ht := h.closeOne p r
   set t : State Node := { s with rgen := closeLink s.rgen p r } with htdef
-  obtain ⟨H, hH⟩ := h.hist
-  have hpre : s.log r <+: s.log p := prefix_of_psyncOk hH hok
+  have hpre : s.log r <+: s.log p := prefix_of_psyncOk h.hist hok
   have hgr : t.rgen p r = s.rgen p r + 1 := closeLink_self _ _ _
   -- Nothing is in flight on the new connection.
   have hfresh : ∀ m ∈ s.rnet, m.primary = p → m.replica = r → m.g < t.rgen p r := by
@@ -1090,8 +1109,10 @@ theorem RInvariant.psync {s : State Node} (h : RInvariant s) {r : Node} (hne : p
       simp only [RMsg.g, RMsg.link] at this; omega
     · exact ht.ackOk x q g' off hm hgg ⟨k, hk⟩
   hist := by
-    obtain ⟨H', hH'⟩ := ht.hist
-    refine ⟨H', { logH := hH'.logH, ownH := hH'.ownH, secH := hH'.secH, streamH := ?_ }⟩
+    show HistOk _ t.idHist
+    have hH' := ht.hist
+    set H' := t.idHist with hH'def
+    refine { logH := hH'.logH, ownH := hH'.ownH, secH := hH'.secH, streamH := ?_ }
     intro q x k g' hs hgg i hi
     rw [hst] at hs; split_ifs at hs with hc
     · obtain ⟨hq, hx⟩ := hc; subst hq hx; cases hs
@@ -1167,7 +1188,8 @@ theorem RInvariant.frameInto {s s' : State Node} (h : RInvariant s) (n : Node)
     (hg : s'.rgen = closeInto s.rgen n)
     (hprim : ∀ x, x ≠ n → (s'.localCfg x).primary = (s.localCfg x).primary)
     (htp : ∀ x, ThinksPrimary s' x → ThinksPrimary s x) (hah : ∀ x, s.ackHigh x ≤ s'.ackHigh x)
-    (hA : s'.acked = s.acked := by rfl) (hAM : s'.ackedMax = s.ackedMax := by rfl) :
+    (hA : s'.acked = s.acked := by rfl) (hAM : s'.ackedMax = s.ackedMax := by rfl)
+    (hHid : s'.idHist = s.idHist := by rfl) :
     RInvariant s' := by
   have hdata := dataOn_of_rnet hnet
   have hpend := pend_of_rnet hnet
@@ -1195,8 +1217,10 @@ theorem RInvariant.frameInto {s s' : State Node} (h : RInvariant s) (n : Node)
     obtain ⟨h1, h2, h3⟩ := h.ackOk r p g off hm (hop p r g (h.genLe _ hm) hgg).2 hk
     rw [hlog]; exact ⟨h1, h2, h3.trans (hah r)⟩
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    exact ⟨H, {
+    rw [hHid]
+    have hH := h.hist
+    set H := s.idHist with hHdef
+    exact {
       logH := fun x => by rw [hlog, hrid]; exact hH.logH x
       ownH := fun p hp => by rw [hlog, hrid]; exact hH.ownH p (htp p hp)
       secH := fun x t o hx => by rw [hlog]; rw [hrid2] at hx; exact hH.secH x t o hx
@@ -1204,7 +1228,7 @@ theorem RInvariant.frameInto {s s' : State Node} (h : RInvariant s) (n : Node)
         rw [hst] at hs
         have hg0 := (hop p r g (h.streamGen p r k g hs) hgg).2
         simp only [hdata, hpend, hlog] at hi ⊢
-        exact hH.streamH p r k g hs hg0 i hi }⟩ }
+        exact hH.streamH p r k g hs hg0 i hi } }
 
 theorem RInvariant.learn {s : State Node} (hi : Invariant s) (h : RInvariant s) {n : Node}
     (hnkl : ¬ KnowsLatest s n) : RInvariant (learn s n) := by
@@ -1233,15 +1257,16 @@ theorem RInvariant.takeover {s : State Node} (h : RInvariant s) (n : Node) : RIn
       simp [SyncReplication.takeover] at ht; obtain ⟨rfl, -⟩ := ht; exact Finset.mem_insert_of_mem (h.ids n))
     rfl rfl rfl
     (fun _ => Or.inr (by rw [hrid]; exact freshId_not_mem s))
-    (fun H hH => by
-      obtain ⟨hsame, hnew⟩ := fresh_hist h (H := H) (s.log n)
-      refine ⟨update H (freshId s) (s.log n), hsame, ?_, ?_, ?_⟩
-      · show s.log n <+: _; rw [hrid, hnew]
-      · intro _; show _ = s.log n; rw [hrid, hnew]
+    (fresh_hist h (H := s.idHist) (s.log n)).1
+    (fun hH => by
+      obtain ⟨hsame, hnew⟩ := fresh_hist h (H := s.idHist) (s.log n)
+      refine ⟨?_, ?_, ?_⟩
+      · show s.log n <+: update s.idHist (freshId s) (s.log n) _; rw [hrid, hnew]
+      · intro _; show update s.idHist (freshId s) (s.log n) _ = s.log n; rw [hrid, hnew]
       · intro t o ht
         simp [SyncReplication.takeover] at ht; obtain ⟨rfl, rfl⟩ := ht
         refine ⟨Nat.le_refl _, ?_⟩
-        show (s.log n).take _ = _
+        show (s.log n).take _ = (update s.idHist (freshId s) (s.log n) _).take _
         rw [hsame _ (h.ids n), List.take_length]
         exact (List.prefix_iff_eq_take.1 (hH.logH n)))
     (fun q x => by simp only [SyncReplication.takeover, update]; ack_le h.ackedLeMax)
@@ -1255,8 +1280,9 @@ theorem RInvariant.resync {s : State Node} (h : RInvariant s) {r : Node} (hne : 
     (fun t o ht => by simp [SyncReplication.resync] at ht)
     rfl rfl rfl
     (fun hp => absurd hp.1 hne)
-    (fun H hH => ⟨H, fun _ _ => rfl, by
-      show update s.log r _ r <+: H (update s.replId r _ r)
+    (fun _ _ => rfl)
+    (fun hH => ⟨by
+      show update s.log r _ r <+: s.idHist (update s.replId r _ r)
       rw [update_self, update_self]
       exact (List.take_prefix _ _).trans (hH.logH _),
       fun hp => absurd hp.1 hne, fun t o ht => by simp [SyncReplication.resync] at ht⟩)
@@ -1281,6 +1307,7 @@ theorem RInvariant.restart {s s' : State Node} (h : RInvariant s) (n : Node) (k 
     (hah : ∀ x, x ≠ n → s'.ackHigh x = s.ackHigh x)
     (hg : s'.rgen = closeAll s.rgen n)
     (hnet : s'.rnet = s.rnet) (hst : s'.stream = s.stream)
+    (hHid : s'.idHist = update s.idHist (freshId s) ((s.log n).take k))
     (hak : ∀ p r, s'.acked p r ≤ s'.ackedMax p r) : RInvariant s' :=
   h.reset n hlog hrid hrid2 hcfgx hincx (fun x hx => by rw [hah x hx]) (by rw [hids]; exact Finset.subset_insert _ _)
     (by rw [hridn, hids]; exact Finset.mem_insert_self _ _)
@@ -1288,9 +1315,11 @@ theorem RInvariant.restart {s s' : State Node} (h : RInvariant s) (n : Node) (k 
       obtain ⟨rfl, -⟩ := hsec t o ht; rw [hids]; exact Finset.mem_insert_of_mem (h.ids n))
     hg hnet hst
     (fun _ => Or.inr (by rw [hridn]; exact freshId_not_mem s))
-    (fun H hH => by
-      obtain ⟨hsame, hnew⟩ := fresh_hist h (H := H) ((s.log n).take k)
-      refine ⟨update H (freshId s) ((s.log n).take k), hsame, ?_, ?_, ?_⟩
+    (by rw [hHid]; exact (fresh_hist h (H := s.idHist) ((s.log n).take k)).1)
+    (fun hH => by
+      rw [hHid]
+      obtain ⟨hsame, hnew⟩ := fresh_hist h (H := s.idHist) ((s.log n).take k)
+      refine ⟨?_, ?_, ?_⟩
       · rw [hridn, hnew, hlogn]
       · intro _; rw [hridn, hnew, hlogn]
       · intro t o ht
@@ -1308,7 +1337,8 @@ theorem RInvariant.restartEmpty {s : State Node} (h : RInvariant s) (n : Node) :
     (fun x hx => by simp [SyncReplication.restartEmpty, update, hx]) rfl (fun _ _ => rfl)
     (fun x hx => by simp [SyncReplication.restartEmpty, update, hx])
     (fun x hx => by simp [SyncReplication.restartEmpty, update, hx])
-    rfl rfl rfl (fun q x => by simp only [SyncReplication.restartEmpty, update]; ack_le h.ackedLeMax)
+    rfl rfl rfl (by simp [SyncReplication.restartEmpty])
+    (fun q x => by simp only [SyncReplication.restartEmpty, update]; ack_le h.ackedLeMax)
 
 /-- A restart of a replica: `n` keeps the first `k` entries and its ID, drops its
 secondary ID, and its connections close. -/
@@ -1321,12 +1351,14 @@ theorem RInvariant.restartKeepId {s s' : State Node} (h : RInvariant s) (n : Nod
     (hah : ∀ x, x ≠ n → s'.ackHigh x = s.ackHigh x)
     (hg : s'.rgen = closeAll s.rgen n)
     (hnet : s'.rnet = s.rnet) (hst : s'.stream = s.stream)
+    (hHid : ∀ t ∈ s.usedIds, s'.idHist t = s.idHist t)
     (hak : ∀ p r, s'.acked p r ≤ s'.ackedMax p r) : RInvariant s' :=
   h.reset n hlog (fun _ _ => by rw [hrid]) hrid2 (fun _ _ => by rw [hcfg]) hincx (fun x hx => by rw [hah x hx])
     (by rw [hids]) (by rw [hrid, hids]; exact h.ids n) (fun t o ht => by rw [hsec] at ht; cases ht)
     hg hnet hst
     (fun hp => absurd (by rw [← hcfg]; exact hp.1) hrep)
-    (fun H hH => ⟨H, fun _ _ => rfl, by rw [hlogn, hrid]; exact (List.take_prefix _ _).trans (hH.logH n),
+    hHid
+    (fun hH => ⟨by rw [hlogn, hrid, hHid _ (h.ids n)]; exact (List.take_prefix _ _).trans (hH.logH n),
       fun hp => absurd (by rw [← hcfg]; exact hp.1) hrep, fun t o ht => by rw [hsec] at ht; cases ht⟩) hak
 
 /-- A restart with `k` entries kept, the IDs from `restartIds`. -/
@@ -1338,22 +1370,25 @@ theorem RInvariant.restartWith {s s' : State Node} (h : RInvariant s) (n : Node)
     (hah : ∀ x, x ≠ n → s'.ackHigh x = s.ackHigh x)
     (hg : s'.rgen = closeAll s.rgen n)
     (hnet : s'.rnet = s.rnet) (hst : s'.stream = s.stream)
+    (hHid : s'.idHist = update s.idHist (freshId s) ((s.log n).take k))
     (hak : ∀ p r, s'.acked p r ≤ s'.ackedMax p r) : RInvariant s' := by
   by_cases hp : (s.localCfg n).primary = n
   · simp only [restartIds, hp, if_true] at hR hU hR2
     exact h.restart n k hk hlogn hlog (by rw [hR]; simp) (fun x hx => by rw [hR]; simp [update, hx])
       (fun t o ht => by rw [hR2] at ht; simp at ht; exact ⟨ht.1.symm, ht.2.symm⟩)
       (fun x hx => by rw [hR2]; simp [update, hx]) hU
-      (fun x _ => by rw [hcfg]) hincx hah hg hnet hst hak
+      (fun x _ => by rw [hcfg]) hincx hah hg hnet hst hHid hak
   · simp only [restartIds, hp, if_false] at hR hU hR2
     exact h.restartKeepId n k hp hlogn hlog hR (by rw [hR2]; simp) (fun x hx => by rw [hR2]; simp [update, hx])
-      hU hcfg hincx hah hg hnet hst hak
+      hU hcfg hincx hah hg hnet hst
+      (fun t ht => by rw [hHid]; exact update_of_ne _ _ (fun e => freshId_not_mem s (e ▸ ht))) hak
 
 theorem RInvariant.restartKeep {s : State Node} (h : RInvariant s) (n : Node) :
     RInvariant (restartKeep s n) :=
   h.restartWith n (s.log n).length (Nat.le_refl _) (by simp [SyncReplication.restartKeep])
     (fun _ _ => rfl) rfl rfl rfl rfl (fun _ _ => rfl) (fun _ _ => rfl)
-    rfl rfl rfl (fun q x => by simp only [SyncReplication.restartKeep, update]; ack_le h.ackedLeMax)
+    rfl rfl rfl (by simp [SyncReplication.restartKeep])
+    (fun q x => by simp only [SyncReplication.restartKeep, update]; ack_le h.ackedLeMax)
 
 theorem RInvariant.restartPartialKeep {s : State Node} (h : RInvariant s) (n : Node) {k : Nat}
     (hk : k < (s.log n).length) : RInvariant (restartPartialKeep s n k) := by
@@ -1363,7 +1398,7 @@ theorem RInvariant.restartPartialKeep {s : State Node} (h : RInvariant s) (n : N
     unfold restartIds; split <;> rfl
   exact h.restartWith n k hk.le (by simp [SyncReplication.restartPartialKeep])
     (fun x hx => by simp [SyncReplication.restartPartialKeep, update, hx]) hR hU rfl rfl (fun _ _ => rfl) (fun _ _ => rfl)
-    rfl rfl rfl (fun q x => by simp only [SyncReplication.restartPartialKeep, SyncReplication.restartKeep, update]; ack_le h.ackedLeMax)
+    rfl rfl rfl rfl (fun q x => by simp only [SyncReplication.restartPartialKeep, SyncReplication.restartKeep, update]; ack_le h.ackedLeMax)
 
 theorem RInvariant.restartPartialFresh {s : State Node} (h : RInvariant s) (n : Node) {k : Nat}
     (hk : k < (s.log n).length) : RInvariant (restartPartialFresh s n k) :=
@@ -1371,7 +1406,7 @@ theorem RInvariant.restartPartialFresh {s : State Node} (h : RInvariant s) (n : 
     (fun x hx => by simp [SyncReplication.restartPartialFresh, update, hx]) rfl rfl rfl rfl
     (fun x hx => by simp [SyncReplication.restartPartialFresh, SyncReplication.restartEmpty, update, hx])
     (fun x hx => by simp [SyncReplication.restartPartialFresh, SyncReplication.restartEmpty, update, hx])
-    rfl rfl rfl (fun q x => by simp only [SyncReplication.restartPartialFresh, SyncReplication.restartEmpty, update]; ack_le h.ackedLeMax)
+    rfl rfl rfl rfl (fun q x => by simp only [SyncReplication.restartPartialFresh, SyncReplication.restartEmpty, update]; ack_le h.ackedLeMax)
 
 end SyncReplication
 
@@ -1382,7 +1417,7 @@ variable {Node : Type} [DecidableEq Node]
 /-! ## Every step of the delayed model preserves both invariants -/
 
 theorem invariants_step {m : Nat} {s s' : State Node} {μ : Action Node} (hi : Invariant s) (hr : RInvariant s)
-    (hs : Step m s μ s') : Invariant s' ∧ RInvariant s' := by
+    (hs : StepA m s μ s') : Invariant s' ∧ RInvariant s' := by
   cases hs with
   | append p hp _ => exact ⟨invariant_append hi p, hr.append hp⟩
   | commit p hp _ hlen hcap =>
@@ -1396,6 +1431,10 @@ theorem invariants_step {m : Nat} {s s' : State Node} {μ : Action Node} (hi : I
   | learn n hnkl => exact ⟨invariant_learn hi n hnkl, hr.learn hi hnkl⟩
   | takeover n hkl hel hnp hin => exact ⟨invariant_takeover hi n hkl hel hnp hin, hr.takeover n⟩
   | resync r hne hsy hke => exact ⟨invariant_resync hi r hne hsy hke, hr.resync hne⟩
+  | resyncStale r hne hsy hna =>
+    refine ⟨invariant_resyncOf hi r hne hsy ⟨?_, fun he hi' => hna ⟨Or.inl he, hi'⟩, ?_⟩, hr.resync hne⟩
+    · intro e; apply hne; show (s.localCfg r).primary = r; rw [e, hi.primKnows]
+    · intro x hx e; subst e; exact hne hx.1
   | restartEmpty n hkl hsurv => exact ⟨invariant_restartEmpty hi n hkl hsurv, hr.restartEmpty n⟩
   | restartKeep n hkl => exact ⟨invariant_restartKeep hi n hkl, hr.restartKeep n⟩
   | restartPartialKeep n k hkl hk hkeep =>

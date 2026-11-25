@@ -218,6 +218,13 @@ def Keyed (w : List Written) (L : List Nat) : Prop :=
 /-- Operation `i` has a response in `H`. -/
 def Responded (H : ClientHistory) (i : Nat) : Prop := ∃ e ∈ H, e.isRes ∧ e.id = i
 
+/-- A linearized operation is a committed write, or a read that has responded, or a read
+held on a replica (or once held and answered `UNCOMMITTED`) that has not responded and
+is no longer waiting. -/
+abbrev LinShape (w : List Written) (H : ClientHistory) (R : List (Nat × Nat × Node)) (u : ClientOp) : Prop :=
+  (∃ x ∈ w, u = x.toOp) ∨
+    (u.op = .read ∧ (u.res ∈ H ∨ (¬ Responded H u.id ∧ u.id ∉ R.map Prod.fst)))
+
 /-- The client layer's invariant: the lease and reply invariants, plus facts about the
 history, the appends, the held replies, the operations in progress and the
 linearization so far. -/
@@ -257,7 +264,7 @@ structure ClientInvariant (P : LeaseParams) (a : ClientState Node) : Prop where
   readingNodup : (a.reading.map Prod.fst).Nodup
   /-- The linearization so far: committed writes, in the history's order, and reads
   that have responded. -/
-  linShape : ∀ u ∈ a.lin, (∃ x ∈ a.written, u.1 = x.toOp) ∨ (u.1.op = .read ∧ u.1.res ∈ a.history)
+  linShape : ∀ u ∈ a.lin, LinShape a.written a.history a.reading u.1
   linWrites : writes ((a.lin.map Prod.fst).map Operation.call) = logOps a.written a.lease.core.hist
   /-- A linearized write is in the committed history. -/
   linCommitted : ∀ u ∈ a.lin, ∀ x ∈ a.written, u.1 = x.toOp →
@@ -274,6 +281,20 @@ structure ClientInvariant (P : LeaseParams) (a : ClientState Node) : Prop where
   linResp : ∀ e ∈ a.history, e.isRes → ∃ u ∈ a.lin, u.1.res = e
   /-- The linearization is legal for the log. -/
   linLegal : LogLegal ((a.lin.map Prod.fst).map Operation.call)
+  /-- Each held read is of an invoked read that has not responded and no longer waits;
+  no two share an operation. -/
+  heldInv : ∀ g ∈ a.heldReads, Event.inv g.op g.client .read ∈ a.history ∧ ¬ Responded a.history g.op ∧
+    g.op ∉ a.reading.map Prod.fst
+  heldNodup : (a.heldReads.map HeldRead.op).Nodup
+  /-- A held read's log is that of its replica when it ran: its offset is its length, its
+  entries were appended, and it is within the history of the replica's ID then. -/
+  heldShape : ∀ g ∈ a.heldReads, g.offset = g.entries.length ∧ Keyed a.written g.entries ∧
+    g.replId ∈ a.lease.core.usedIds ∧ g.entries <+: a.lease.core.idHist g.replId
+  /-- A held read is linearized exactly once the committed history has reached its log,
+  and then as the read returning that log. -/
+  heldLin : ∀ g ∈ a.heldReads, g.entries <+: a.lease.core.hist → ∃ u ∈ a.lin, u.1 = g.toOp a.written
+  heldLinOnly : ∀ g ∈ a.heldReads, ∀ u ∈ a.lin, u.1.id = g.op →
+    u.1 = g.toOp a.written ∧ g.entries <+: a.lease.core.hist
 
 /-- No two nodes that think they are primary share an ID: `RInvariant.uniqPrim`. -/
 theorem ClientInvariant.uniqPrim {P : LeaseParams} {a : ClientState Node} (h : ClientInvariant P a) :
@@ -322,6 +343,11 @@ theorem clientInvariant_init (P : LeaseParams) (i : Node) : ClientInvariant P (c
   linSorted := by simp [clientInit]
   linResp := by simp [clientInit]
   linLegal := by intro k hk; simp [clientInit] at hk
+  heldInv := by simp [clientInit]
+  heldNodup := by simp [clientInit]
+  heldShape := by simp [clientInit]
+  heldLin := by simp [clientInit]
+  heldLinOnly := by simp [clientInit]
 
 end SyncReplication
 
@@ -398,7 +424,7 @@ theorem entry_update {L : Node → List Nat} {r : Node} {X : List Nat} {n : Node
 
 /-- A replication step other than an append or a restart. -/
 theorem coreMove_step {s s' : State Node} (h : Invariant s) (hr : RInvariant s) (ht : ReplIdsIssued s) {m : Nat}
-    {μ : Action Node} (hs : Step m s μ s') (hμ : μ.isRestart = false) (hna : ∀ p, μ ≠ .append p) :
+    {μ : Action Node} (hs : StepA m s μ s') (hμ : μ.isRestart = false) (hna : ∀ p, μ ≠ .append p) :
     CoreMove s s' := by
   obtain ⟨hh, hv, ht', hx⟩ := step_facts h hr ht hs hμ
   have hids : ∀ x, s'.replId x ∈ s.usedIds ∨ (∀ y, s'.replId y = s'.replId x → y = x) := by
@@ -418,7 +444,7 @@ theorem coreMove_step {s s' : State Node} (h : Invariant s) (hr : RInvariant s) 
       by_cases hxr : x = r
       · subst hxr; rw [update_self]; exact (hr.deliver_prefix hin hcur hf).2.2
       · rw [update_of_ne _ _ hxr]; exact ht x
-    | resync r _ _ _ =>
+    | resync r _ _ _ | resyncStale r _ _ _ =>
       intro x; left
       show update s.replId r (s.replId (primaryOf s r)) x ∈ _
       by_cases hxr : x = r
@@ -441,7 +467,7 @@ theorem coreMove_step {s s' : State Node} (h : Invariant s) (hr : RInvariant s) 
       · subst hn; rw [update_self] at hj
         exact ⟨p, by rw [prefix_getElem? hpre (List.getElem?_eq_some_iff.1 hj).1]; exact hj⟩
       · rw [update_of_ne _ _ hn] at hj; exact ⟨n, hj⟩
-    | resync r _ _ _ =>
+    | resync r _ _ _ | resyncStale r _ _ _ =>
       intro n j v hj
       change (update s.log r _ n)[j]? = some v at hj
       by_cases hn : n = r
@@ -629,17 +655,106 @@ theorem ClientInvariant.lin_of_id {P : LeaseParams} {a : ClientState Node} (h : 
     simp only [Operation.inv, Event.inv.injEq] at this
     rw [hr] at this; exact absurd this.2.2 (by simp)
 
+/-- Reads that each return the writes of `L` keep `L` legal when appended to it. -/
+theorem logLegal_append_reads {V : Type} [DecidableEq V] {L M : List (LogOp V × LogRes V)}
+    (hL : LogLegal L) (hM : ∀ c ∈ M, c = (.read, .log (writes L))) : LogLegal (L ++ M) := by
+  have hw : ∀ N : List (LogOp V × LogRes V), (∀ c ∈ N, c.1 = .read) → writes N = [] := by
+    intro N hN; unfold writes; rw [List.filterMap_eq_nil_iff]
+    intro c hc; rcases c with ⟨o, r⟩; have := hN _ hc; simp only at this; subst this; rfl
+  intro k hk
+  by_cases hkL : k < L.length
+  · rw [List.getElem_append_left hkL, List.take_append_of_le_length (by omega)]
+    exact hL k hkL
+  · have hk' : k - L.length < M.length := by simp at hk; omega
+    rw [List.getElem_append_right (by omega)]
+    have hc := hM _ (List.getElem_mem hk')
+    rw [hc, List.take_append, List.take_of_length_le (by omega)]
+    simp only [answer, writes_append]
+    rw [hw (M.take (k - L.length)) (fun c hc' => by rw [hM c (List.mem_of_mem_take hc')])]; simp
+
+theorem mem_readsReached {w : List Written} {g : List (HeldRead Node)} {old new : List Nat} {mark : Nat}
+    {u : ClientOp × Nat} (hu : u ∈ readsReached w g old new mark) :
+    ∃ x ∈ g, new = x.entries ∧ ¬ x.entries <+: old ∧ u = (x.toOp w, mark) := by
+  obtain ⟨x, hx, rfl⟩ := List.mem_map.1 hu
+  obtain ⟨hx, hc⟩ := List.mem_filter.1 hx
+  simp only [Bool.and_eq_true, decide_eq_true_eq, Bool.not_eq_true', decide_eq_false_iff_not] at hc
+  exact ⟨x, hx, hc.1, hc.2, rfl⟩
+
+theorem readsReached_same (w : List Written) (g : List (HeldRead Node)) (L : List Nat) (mark : Nat) :
+    readsReached w g L L mark = [] := by
+  unfold readsReached; rw [List.map_eq_nil_iff, List.filter_eq_nil_iff]
+  intro x _; simp only [Bool.and_eq_true, decide_eq_true_eq, Bool.not_eq_true', decide_eq_false_iff_not, not_and,
+    not_not]
+  intro he; rw [he]
+
+theorem readsReached_calls (w : List Written) (g : List (HeldRead Node)) (old new : List Nat) (mark : Nat) :
+    ∀ c ∈ ((readsReached w g old new mark).map Prod.fst).map Operation.call,
+      c = (.read, .log (logOps w new)) := by
+  intro c hc
+  obtain ⟨o, ho, rfl⟩ := List.mem_map.1 hc
+  obtain ⟨u, hu, rfl⟩ := List.mem_map.1 ho
+  obtain ⟨x, -, hn, -, rfl⟩ := mem_readsReached hu
+  rw [hn]; rfl
+
+theorem prefix_concat_not {l h : List Nat} {e : Nat} (h1 : l <+: h ++ [e]) (h2 : ¬ l <+: h) : l = h ++ [e] := by
+  rcases List.prefix_concat_iff.1 h1 with h3 | h3
+  · exact h3
+  · exact absurd h3 h2
+
+/-- An append extends the history of the appending primary's ID and no other. -/
+theorem appendWrite_idHist {s : State Node} (hr : RInvariant s) {p : Node} (hp : ThinksPrimary s p) :
+    ∀ t, s.idHist t <+: (appendWrite s p).idHist t := by
+  intro t
+  show _ <+: update s.idHist (s.replId p) (s.log p ++ [s.replId p]) t
+  by_cases e : t = s.replId p
+  · subst e; rw [update_self, hr.hist.ownH p hp]; exact List.prefix_append _ _
+  · rw [update_of_ne _ _ e]
+
+/-- A step only extends the history of an ID in use. -/
+theorem step_idHist {m : Nat} {s s' : State Node} {μ : Action Node} (hr : RInvariant s)
+    (hs : StepA m s μ s') : ∀ t ∈ s.usedIds, s.idHist t <+: s'.idHist t := by
+  intro t ht
+  have hf : ∀ L, s.idHist t <+: update s.idHist (freshId s) L t := fun L => by
+    rw [update_of_ne _ _ (fun (e : t = freshId s) => freshId_not_mem s (e ▸ ht))]
+  cases hs with
+  | append p hp _ => exact appendWrite_idHist hr hp t
+  | takeover => exact hf _
+  | restartEmpty => exact hf _
+  | restartKeep => exact hf _
+  | restartPartialKeep => exact hf _
+  | restartPartialFresh => exact hf _
+  | _ => exact List.prefix_refl _
+
+/-- A step adds at most one entry to the committed history. -/
+theorem step_hist {m : Nat} {s s' : State Node} {μ : Action Node} (hs : StepA m s μ s') :
+    s'.hist = s.hist ∨ ∃ e, s'.hist = s.hist ++ [e] := by
+  cases hs with
+  | commit p =>
+    unfold commitNext; dsimp only; split_ifs <;> simp
+  | _ => exact Or.inl rfl
+
+/-- A held read and a write never share an operation id. -/
+theorem ClientInvariant.held_ne_written {P : LeaseParams} {a : ClientState Node} (h : ClientInvariant P a)
+    {g : HeldRead Node} (hg : g ∈ a.heldReads) {x : Written} (hx : x ∈ a.written) : x.op ≠ g.op := by
+  intro he
+  have := inv_unique h.wf (h.writtenInv x hx) (h.heldInv g hg).1 rfl rfl (by simp [Event.id, he])
+  simp at this
+
 /-- The client invariant survives a move of the replication state that is not an append,
-with the held replies cut down to a sublist and the newly committed writes linearized
-now. -/
+with the held replies and the held reads cut down to sublists, the newly committed writes
+linearized now, and then every held read whose log the history has just reached. -/
 theorem ClientInvariant.move {P : LeaseParams} {a : ClientState Node} (h : ClientInvariant P a)
-    (l : LeaseState Node) (hd : List (Held Node))
+    (l : LeaseState Node) (hd : List (Held Node)) (hg : List (HeldRead Node))
     (hl : LeaseInvariant P l) (hr : ReplyInvariant ⟨l.core, hd, a.acknowledged⟩)
-    (hsub : hd.Sublist a.held) (hm : CoreMove a.lease.core l.core) :
+    (hsub : hd.Sublist a.held) (hgsub : hg.Sublist a.heldReads) (hm : CoreMove a.lease.core l.core)
+    (hgrow : l.core.hist = a.lease.core.hist ∨ ∃ e, l.core.hist = a.lease.core.hist ++ [e])
+    (hidm : ∀ t ∈ a.lease.core.usedIds, a.lease.core.idHist t <+: l.core.idHist t) :
     ClientInvariant P { a with
       lease := l
       held := hd
-      lin := a.lin ++ commitsOf a.written a.lease.core.hist l.core.hist a.history.length } := by
+      heldReads := hg
+      lin := a.lin ++ commitsOf a.written a.lease.core.hist l.core.hist a.history.length ++
+        readsReached a.written hg a.lease.core.hist l.core.hist a.history.length } := by
   have hsplit : a.lease.core.hist ++ l.core.hist.drop a.lease.core.hist.length = l.core.hist :=
     List.prefix_iff_eq_append.1 hm.hist
   have hlift : ∀ j v, a.lease.core.hist[j]? = some v → l.core.hist[j]? = some v := fun j v hj => by
@@ -653,10 +768,21 @@ theorem ClientInvariant.move {P : LeaseParams} {a : ClientState Node} (h : Clien
     · obtain ⟨n', h'⟩ := hm.histNew j v hj (by omega); exact h.logKeyed n' j v h'
   have hnew := fun u (hu : u ∈ commitsOf a.written a.lease.core.hist l.core.hist a.history.length) =>
     mem_commitsOf h.keysNodup hhistKeyed hu
+  have hgsubs : ∀ x ∈ hg, x ∈ a.heldReads := fun x hx => hgsub.subset hx
   -- A newly committed write has not responded.
   have hnotResp : ∀ x ∈ a.written, a.lease.core.hist.length < x.offset → ¬ Responded a.history x.op := by
     intro x hx hlt hresp
     have := (List.getElem?_eq_some_iff.1 (h.respondedCommitted x hx hresp).2).1; omega
+  -- A newly linearized read: a held read, invoked, not responded, not waiting.
+  have hread := fun u (hu : u ∈ readsReached a.written hg a.lease.core.hist l.core.hist a.history.length) =>
+    mem_readsReached hu
+  -- A newly linearized read was not linearized before.
+  have hreadNew : ∀ x ∈ hg, ¬ x.entries <+: a.lease.core.hist → ∀ u ∈ a.lin, u.1.id ≠ x.op :=
+    fun x hx hnp u hu he => hnp (h.heldLinOnly x (hgsubs x hx) u hu he).2
+  have hwrites : writes (((a.lin ++ commitsOf a.written a.lease.core.hist l.core.hist a.history.length).map
+      Prod.fst).map Operation.call) = logOps a.written l.core.hist := by
+    rw [List.map_append, List.map_append, writes_append, h.linWrites, writes_commitsOf,
+      ← logOps_append, hsplit]
   exact {
   lease := hl
   reply := hr
@@ -684,74 +810,156 @@ theorem ClientInvariant.move {P : LeaseParams} {a : ClientState Node} (h : Clien
   linShape := by
     intro u hu
     rcases List.mem_append.1 hu with hu | hu
-    · exact h.linShape u hu
-    · obtain ⟨-, x, hx, hux, -⟩ := hnew u hu; exact Or.inl ⟨x, hx, hux⟩
+    · rcases List.mem_append.1 hu with hu | hu
+      · exact h.linShape u hu
+      · obtain ⟨-, x, hx, hux, -⟩ := hnew u hu; exact Or.inl ⟨x, hx, hux⟩
+    · obtain ⟨x, hx, -, -, rfl⟩ := hread u hu
+      obtain ⟨-, h2, h3⟩ := h.heldInv x (hgsubs x hx)
+      exact Or.inr ⟨rfl, Or.inr ⟨h2, h3⟩⟩
   linWrites := by
-    show writes (((a.lin ++ _).map Prod.fst).map Operation.call) = logOps a.written l.core.hist
-    rw [List.map_append, List.map_append, writes_append, h.linWrites, writes_commitsOf,
-      ← logOps_append, hsplit]
+    rw [List.map_append, List.map_append, writes_append, hwrites]
+    have : writes (((readsReached a.written hg a.lease.core.hist l.core.hist a.history.length).map
+        Prod.fst).map Operation.call) = [] := by
+      unfold writes; rw [List.filterMap_eq_nil_iff]
+      intro c hc; rw [readsReached_calls _ _ _ _ _ c hc]
+    rw [this, List.append_nil]
   linCommitted := by
     intro u hu x hx hux
     rcases List.mem_append.1 hu with hu | hu
-    · obtain ⟨h1, h2⟩ := h.linCommitted u hu x hx hux; exact ⟨h1, hlift _ _ h2⟩
-    · obtain ⟨-, y, hy, huy, hlt, hh⟩ := hnew u hu
-      have : y = x := List.inj_on_of_nodup_map h.opsNodup hy hx
-        (by have := congrArg Operation.id (huy.symm.trans hux); exact this)
-      subst this; exact ⟨by omega, hh⟩
+    · rcases List.mem_append.1 hu with hu | hu
+      · obtain ⟨h1, h2⟩ := h.linCommitted u hu x hx hux; exact ⟨h1, hlift _ _ h2⟩
+      · obtain ⟨-, y, hy, huy, hlt, hh⟩ := hnew u hu
+        have : y = x := List.inj_on_of_nodup_map h.opsNodup hy hx
+          (by have := congrArg Operation.id (huy.symm.trans hux); exact this)
+        subst this; exact ⟨by omega, hh⟩
+    · obtain ⟨y, -, -, -, rfl⟩ := hread u hu
+      exact absurd (congrArg Operation.op hux) (by simp [HeldRead.toOp, Written.toOp])
   linIds := by
-    show ((a.lin ++ _).map fun u => u.1.id).Nodup
     rw [List.map_append, List.nodup_append]
-    refine ⟨h.linIds, ?_, ?_⟩
-    · exact commitsOf_ids_nodup h.keysNodup h.opsNodup hhistKeyed
+    refine ⟨?_, ?_, ?_⟩
+    · rw [List.map_append, List.nodup_append]
+      refine ⟨h.linIds, ?_, ?_⟩
+      · exact commitsOf_ids_nodup h.keysNodup h.opsNodup hhistKeyed
+      · intro i hi j hj hij; subst hij
+        obtain ⟨u, hu, rfl⟩ := List.mem_map.1 hi
+        obtain ⟨v, hv, hvi⟩ := List.mem_map.1 hj
+        obtain ⟨-, x, hx, hvx, hlt, -⟩ := hnew v hv
+        have hux := h.lin_of_id hu hx (by rw [← hvi, hvx]; rfl)
+        obtain ⟨-, hh⟩ := h.linCommitted u hu x hx hux
+        have := (List.getElem?_eq_some_iff.1 hh).1; omega
+    · -- The new reads are distinct held reads.
+      have hnd : (hg.filter fun x => decide (l.core.hist = x.entries) && !decide (x.entries <+: a.lease.core.hist)).Nodup :=
+        ((List.Nodup.of_map _ h.heldNodup).sublist hgsub).filter _
+      unfold readsReached
+      rw [List.map_map]
+      refine List.Nodup.map_on ?_ hnd
+      intro x hx y hy he
+      have hx' := hgsubs x (List.mem_filter.1 hx).1
+      have hy' := hgsubs y (List.mem_filter.1 hy).1
+      exact List.inj_on_of_nodup_map h.heldNodup hx' hy' (by simpa [HeldRead.toOp] using he)
     · intro i hi j hj hij; subst hij
-      obtain ⟨u, hu, rfl⟩ := List.mem_map.1 hi
       obtain ⟨v, hv, hvi⟩ := List.mem_map.1 hj
-      obtain ⟨-, x, hx, hvx, hlt, -⟩ := hnew v hv
-      have hux := h.lin_of_id hu hx (by rw [← hvi, hvx]; rfl)
-      obtain ⟨-, hh⟩ := h.linCommitted u hu x hx hux
-      have := (List.getElem?_eq_some_iff.1 hh).1; omega
+      obtain ⟨x, hx, -, hnp, rfl⟩ := hread v hv
+      obtain ⟨u, hu, rfl⟩ := List.mem_map.1 hi
+      rcases List.mem_append.1 hu with hu | hu
+      · exact hreadNew x hx hnp u hu hvi.symm
+      · obtain ⟨-, y, hy, huy, -⟩ := hnew u hu
+        exact h.held_ne_written (hgsubs x hx) hy (by rw [show y.op = u.1.id by rw [huy]; rfl]; exact hvi.symm)
   linInv := by
     intro u hu
     rcases List.mem_append.1 hu with hu | hu
-    · exact h.linInv u hu
-    · obtain ⟨-, x, hx, hux, -⟩ := hnew u hu; rw [hux]; exact h.writtenInv x hx
+    · rcases List.mem_append.1 hu with hu | hu
+      · exact h.linInv u hu
+      · obtain ⟨-, x, hx, hux, -⟩ := hnew u hu; rw [hux]; exact h.writtenInv x hx
+    · obtain ⟨x, hx, -, -, rfl⟩ := hread u hu; exact (h.heldInv x (hgsubs x hx)).1
   linInvLt := by
     intro u hu i hi
     rcases List.mem_append.1 hu with hu | hu
-    · exact h.linInvLt u hu i hi
-    · obtain ⟨hm, -⟩ := hnew u hu; rw [hm]; exact (List.getElem?_eq_some_iff.1 hi).1
+    · rcases List.mem_append.1 hu with hu | hu
+      · exact h.linInvLt u hu i hi
+      · obtain ⟨hm, -⟩ := hnew u hu; rw [hm]; exact (List.getElem?_eq_some_iff.1 hi).1
+    · obtain ⟨x, -, -, -, rfl⟩ := hread u hu; exact (List.getElem?_eq_some_iff.1 hi).1
   linResGe := by
     intro u hu i hi
     rcases List.mem_append.1 hu with hu | hu
-    · exact h.linResGe u hu i hi
-    · obtain ⟨-, x, hx, hux, hlt, -⟩ := hnew u hu
-      exact absurd ⟨_, List.mem_of_getElem? hi, rfl, by rw [hux]; rfl⟩ (hnotResp x hx hlt)
+    · rcases List.mem_append.1 hu with hu | hu
+      · exact h.linResGe u hu i hi
+      · obtain ⟨-, x, hx, hux, hlt, -⟩ := hnew u hu
+        exact absurd ⟨_, List.mem_of_getElem? hi, rfl, by rw [hux]; rfl⟩ (hnotResp x hx hlt)
+    · obtain ⟨x, hx, -, -, rfl⟩ := hread u hu
+      exact absurd ⟨_, List.mem_of_getElem? hi, rfl, rfl⟩ (h.heldInv x (hgsubs x hx)).2.1
   linResEq := by
     intro u hu e he hres hid
     rcases List.mem_append.1 hu with hu | hu
-    · exact h.linResEq u hu e he hres hid
-    · obtain ⟨-, x, hx, hux, hlt, -⟩ := hnew u hu
-      exact absurd ⟨e, he, hres, by rw [hid, hux]; rfl⟩ (hnotResp x hx hlt)
+    · rcases List.mem_append.1 hu with hu | hu
+      · exact h.linResEq u hu e he hres hid
+      · obtain ⟨-, x, hx, hux, hlt, -⟩ := hnew u hu
+        exact absurd ⟨e, he, hres, by rw [hid, hux]; rfl⟩ (hnotResp x hx hlt)
+    · obtain ⟨x, hx, -, -, rfl⟩ := hread u hu
+      exact absurd ⟨e, he, hres, hid⟩ (h.heldInv x (hgsubs x hx)).2.1
   linMarkLe := by
     intro u hu
     rcases List.mem_append.1 hu with hu | hu
-    · exact h.linMarkLe u hu
-    · obtain ⟨hm, -⟩ := hnew u hu; exact hm.le
+    · rcases List.mem_append.1 hu with hu | hu
+      · exact h.linMarkLe u hu
+      · obtain ⟨hm, -⟩ := hnew u hu; exact hm.le
+    · obtain ⟨x, -, -, -, rfl⟩ := hread u hu; exact le_refl _
   linSorted := by
-    refine List.pairwise_append.2 ⟨h.linSorted, List.pairwise_of_forall_mem_list fun u hu v hv => ?_,
-      fun u hu v hv => ?_⟩
+    have hmark : ∀ u ∈ a.lin ++ commitsOf a.written a.lease.core.hist l.core.hist a.history.length,
+        u.2 ≤ a.history.length := by
+      intro u hu
+      rcases List.mem_append.1 hu with hu | hu
+      · exact h.linMarkLe u hu
+      · rw [(hnew u hu).1]
+    refine List.pairwise_append.2 ⟨List.pairwise_append.2 ⟨h.linSorted,
+      List.pairwise_of_forall_mem_list fun u hu v hv => ?_, fun u hu v hv => ?_⟩,
+      List.pairwise_of_forall_mem_list fun u hu v hv => ?_, fun u hu v hv => ?_⟩
     · rw [(hnew u hu).1, (hnew v hv).1]
     · rw [(hnew v hv).1]; exact h.linMarkLe u hu
+    · obtain ⟨x, -, -, -, rfl⟩ := hread u hu; obtain ⟨y, -, -, -, rfl⟩ := hread v hv; exact le_refl _
+    · obtain ⟨y, -, -, -, rfl⟩ := hread v hv; exact hmark u hu
   linResp := fun e he hres => by
-    obtain ⟨u, hu, hue⟩ := h.linResp e he hres; exact ⟨u, List.mem_append_left _ hu, hue⟩
+    obtain ⟨u, hu, hue⟩ := h.linResp e he hres
+    exact ⟨u, List.mem_append_left _ (List.mem_append_left _ hu), hue⟩
   linLegal := by
-    show LogLegal (((a.lin ++ _).map Prod.fst).map Operation.call)
     rw [List.map_append, List.map_append]
-    refine logLegal_append_writes h.linLegal fun c hc => ?_
-    obtain ⟨u, hu, rfl⟩ := List.mem_map.1 hc
-    obtain ⟨v, hv, rfl⟩ := List.mem_map.1 hu
-    obtain ⟨-, x, -, hvx, -⟩ := hnew v hv
-    exact ⟨x.op, by rw [hvx]; rfl⟩ }
+    refine logLegal_append_reads ?_ ?_
+    · rw [List.map_append, List.map_append]
+      refine logLegal_append_writes h.linLegal fun c hc => ?_
+      obtain ⟨u, hu, rfl⟩ := List.mem_map.1 hc
+      obtain ⟨v, hv, rfl⟩ := List.mem_map.1 hu
+      obtain ⟨-, x, -, hvx, -⟩ := hnew v hv
+      exact ⟨x.op, by rw [hvx]; rfl⟩
+    · intro c hc
+      rw [readsReached_calls _ _ _ _ _ c hc, hwrites]
+  heldInv := fun x hx => h.heldInv x (hgsubs x hx)
+  heldNodup := h.heldNodup.sublist (hgsub.map _)
+  heldShape := by
+    intro x hx
+    obtain ⟨h1, h2, h3, h4⟩ := h.heldShape x (hgsubs x hx)
+    exact ⟨h1, h2, hm.ids h3, h4.trans (hidm _ h3)⟩
+  heldLin := by
+    intro x hx hp
+    by_cases hold : x.entries <+: a.lease.core.hist
+    · obtain ⟨u, hu, hux⟩ := h.heldLin x (hgsubs x hx) hold
+      exact ⟨u, List.mem_append_left _ (List.mem_append_left _ hu), hux⟩
+    · have heq : l.core.hist = x.entries := by
+        rcases hgrow with he | ⟨e, he⟩
+        · rw [he] at hp; exact absurd hp hold
+        · rw [he] at hp ⊢; exact (prefix_concat_not hp hold).symm
+      refine ⟨(x.toOp a.written, a.history.length), List.mem_append_right _ ?_, rfl⟩
+      unfold readsReached
+      exact List.mem_map.2 ⟨x, List.mem_filter.2 ⟨hx, by simp [heq, hold]⟩, rfl⟩
+  heldLinOnly := by
+    intro x hx u hu he
+    rcases List.mem_append.1 hu with hu | hu
+    · rcases List.mem_append.1 hu with hu | hu
+      · obtain ⟨h1, h2⟩ := h.heldLinOnly x (hgsubs x hx) u hu he; exact ⟨h1, h2.trans hm.hist⟩
+      · obtain ⟨-, y, hy, huy, -⟩ := hnew u hu
+        exact absurd (by rw [← he, huy]; rfl) (h.held_ne_written (hgsubs x hx) hy)
+    · obtain ⟨y, hy, hn, -, rfl⟩ := hread u hu
+      have : y = x := List.inj_on_of_nodup_map h.heldNodup (hgsubs y hy) (hgsubs x hx) he
+      subst this; exact ⟨rfl, by rw [hn]⟩ }
 
 end SyncReplication
 
@@ -766,23 +974,26 @@ variable {Node : Type} [DecidableEq Node]
 /-- A fresh replication ID does not touch anything the lease invariant reads. -/
 theorem leaseInvariant_freshen {P : LeaseParams} {l : LeaseState Node} (h : LeaseInvariant P l)
     (n : Node) : LeaseInvariant P (freshen l n) :=
-  { h with core := h.core.replId_frame _ _, rcore := h.rcore.newId n,
+  { h with core := (h.core.replId_frame (update l.core.replId n (freshId l.core))
+             (insert (freshId l.core) l.core.usedIds)).idHist_frame
+             (update l.core.idHist (freshId l.core) (l.core.log n)), rcore := h.rcore.newId n,
            drop := ⟨h.drop.1, h.drop.2, h.drop.3, h.drop.4⟩ }
 
 /-- A lease step of the client layer either leaves the replication state alone or is a
 replication step other than an append or a restart. -/
 theorem leaseStep_core {m : Nat} {P : LeaseParams} {a l : LeaseState Node} {μ : LeaseAction Node}
-    (hs : LeaseStep m P a μ l) (hμ : μ.isClientLease = true) :
-    l.core = a.core ∨ ∃ μ', Step m a.core μ' l.core ∧ μ'.isRestart = false ∧ ∀ p, μ' ≠ .append p := by
+    (hs : LeaseStepA m P a μ l) (hμ : μ.isClientLease = true) :
+    l.core = a.core ∨ ∃ μ', StepA m a.core μ' l.core ∧ μ'.isRestart = false ∧ ∀ p, μ' ≠ .append p := by
   cases hs with
   | core μ c hc hcore =>
     right; refine ⟨μ, hc, ?_, ?_⟩
     · cases μ <;> simp_all [Action.isCore, Action.isRestart]
     · intro p e; subst e; simp [LeaseAction.isClientLease] at hμ
-  | learn n hn => right; exact ⟨_, Step.learn _ n hn, rfl, by simp⟩
-  | demote p r hp hkl hel _ => right; exact ⟨_, Step.makeIneligible _ p r hp hkl hel, rfl, by simp⟩
-  | takeover n hkl hel hnp hin _ => right; exact ⟨_, Step.takeover _ n hkl hel hnp hin, rfl, by simp⟩
-  | resync r h1 h2 h3 => right; exact ⟨_, Step.resync _ r h1 h2 h3, rfl, by simp⟩
+  | learn n hn => right; exact ⟨_, StepA.learn _ n hn, rfl, by simp⟩
+  | demote p r hp hkl hel _ => right; exact ⟨_, StepA.makeIneligible _ p r hp hkl hel, rfl, by simp⟩
+  | takeover n hkl hel hnp hin _ => right; exact ⟨_, StepA.takeover _ n hkl hel hnp hin, rfl, by simp⟩
+  | resync r h1 h2 h3 => right; exact ⟨_, StepA.resync _ r h1 h2 h3, rfl, by simp⟩
+  | resyncStale r h1 h2 h3 => right; exact ⟨_, StepA.resyncStale _ r h1 h2 h3, rfl, by simp⟩
   | restartEmpty => simp [LeaseAction.isClientLease] at hμ
   | restartKeep => simp [LeaseAction.isClientLease] at hμ
   | restartPartialKeep => simp [LeaseAction.isClientLease] at hμ
@@ -792,7 +1003,8 @@ theorem leaseStep_core {m : Nat} {P : LeaseParams} {a l : LeaseState Node} {μ :
 /-- The replication state after `freshen`. -/
 theorem freshen_core (l : LeaseState Node) (n : Node) :
     (freshen l n).core = { l.core with replId := update l.core.replId n (freshId l.core),
-                                       usedIds := insert (freshId l.core) l.core.usedIds } := rfl
+                                       usedIds := insert (freshId l.core) l.core.usedIds,
+                                       idHist := update l.core.idHist (freshId l.core) (l.core.log n) } := rfl
 
 /-- A restart of `n` (or nothing), then a fresh ID for `n`. -/
 theorem coreMove_fresh {c : State Node} (ht : ReplIdsIssued c) {n : Node} (l : LeaseState Node)
@@ -959,12 +1171,14 @@ section steps
 variable {P : LeaseParams} {a : ClientState Node} (h : ClientInvariant P a)
 include h
 
-theorem ClientInvariant.moveSameHist (l : LeaseState Node) (hd : List (Held Node))
+theorem ClientInvariant.moveSameHist (l : LeaseState Node) (hd : List (Held Node)) (hg : List (HeldRead Node))
     (hl : LeaseInvariant P l) (hr : ReplyInvariant ⟨l.core, hd, a.acknowledged⟩)
-    (hsub : hd.Sublist a.held) (hm : CoreMove a.lease.core l.core)
-    (hh : l.core.hist = a.lease.core.hist) : ClientInvariant P { a with lease := l, held := hd } := by
-  have := h.move l hd hl hr hsub hm
-  rw [hh, commitsOf_self, List.append_nil] at this
+    (hsub : hd.Sublist a.held) (hgsub : hg.Sublist a.heldReads) (hm : CoreMove a.lease.core l.core)
+    (hh : l.core.hist = a.lease.core.hist)
+    (hidm : ∀ t ∈ a.lease.core.usedIds, a.lease.core.idHist t <+: l.core.idHist t) :
+    ClientInvariant P { a with lease := l, held := hd, heldReads := hg } := by
+  have := h.move l hd hg hl hr hsub hgsub hm (Or.inl hh) hidm
+  rw [hh, commitsOf_self, List.append_nil, readsReached_same, List.append_nil] at this
   exact this
 
 theorem ClientInvariant.ids_lt_of_inv {e : Event Nat (LogOp Nat) (LogRes Nat)} (he : e ∈ a.history) :
@@ -1034,12 +1248,17 @@ theorem ClientInvariant.invokeWrite (c : Nat) : ClientInvariant P
   readingInv := fun u hu => ⟨List.mem_append_left _ (h.readingInv u hu).1,
     fun hr => (h.readingInv u hu).2 ((hresp _).1 hr)⟩
   readingNodup := h.readingNodup
-  linShape := fun u hu => (h.linShape u hu).imp id fun ⟨h1, h2⟩ => ⟨h1, List.mem_append_left _ h2⟩
+  linShape := fun u hu => (h.linShape u hu).imp id fun ⟨h1, h2⟩ =>
+    ⟨h1, h2.imp (List.mem_append_left _) fun ⟨h3, h4⟩ => ⟨fun hr => h3 ((hresp _).1 hr), h4⟩⟩
   linWrites := h.linWrites, linCommitted := h.linCommitted, linIds := h.linIds
   linInv := fun u hu => List.mem_append_left _ (h.linInv u hu)
   linInvLt := hiv, linResGe := hrg, linResEq := hre
   linMarkLe := fun u hu => (h.linMarkLe u hu).trans (by simp)
-  linSorted := h.linSorted, linResp := hrp, linLegal := h.linLegal }
+  linSorted := h.linSorted, linResp := hrp, linLegal := h.linLegal
+  heldInv := fun g hg => by
+    obtain ⟨h1, h2, h3⟩ := h.heldInv g hg
+    exact ⟨List.mem_append_left _ h1, fun hr => h2 ((hresp _).1 hr), h3⟩
+  heldNodup := h.heldNodup, heldShape := h.heldShape, heldLin := h.heldLin, heldLinOnly := h.heldLinOnly }
 
 theorem ClientInvariant.invokeRead (c : Nat) (n : Node) : ClientInvariant P
     { a with history := a.history ++ [.inv a.nextOp c .read],
@@ -1071,12 +1290,28 @@ theorem ClientInvariant.invokeRead (c : Nat) (n : Node) : ClientInvariant P
     refine List.nodup_cons.2 ⟨fun hm => ?_, h.readingNodup⟩
     obtain ⟨u, hu, hue⟩ := List.mem_map.1 hm
     have := h.idsLt _ (h.readingInv u hu).1; simp [Event.id] at this; omega
-  linShape := fun u hu => (h.linShape u hu).imp id fun ⟨h1, h2⟩ => ⟨h1, List.mem_append_left _ h2⟩
+  linShape := fun u hu => (h.linShape u hu).imp id fun ⟨h1, h2⟩ =>
+    ⟨h1, h2.imp (List.mem_append_left _) fun ⟨h3, h4⟩ => ⟨fun hr => h3 ((hresp _).1 hr), by
+      intro hm
+      rw [List.map_cons, List.mem_cons] at hm
+      rcases hm with he | hm
+      · have he : u.1.id = a.nextOp := he
+        have := h.idsLt _ (h.linInv u hu); simp [Operation.inv, Event.id] at this; omega
+      · exact h4 hm⟩⟩
   linWrites := h.linWrites, linCommitted := h.linCommitted, linIds := h.linIds
   linInv := fun u hu => List.mem_append_left _ (h.linInv u hu)
   linInvLt := hiv, linResGe := hrg, linResEq := hre
   linMarkLe := fun u hu => (h.linMarkLe u hu).trans (by simp)
-  linSorted := h.linSorted, linResp := hrp, linLegal := h.linLegal }
+  linSorted := h.linSorted, linResp := hrp, linLegal := h.linLegal
+  heldInv := fun g hg => by
+    obtain ⟨h1, h2, h3⟩ := h.heldInv g hg
+    refine ⟨List.mem_append_left _ h1, fun hr => h2 ((hresp _).1 hr), fun hm => ?_⟩
+    rw [List.map_cons, List.mem_cons] at hm
+    rcases hm with he | hm
+    · have he : g.op = a.nextOp := he
+      have := h.idsLt _ h1; simp [Event.id] at this; omega
+    · exact h3 hm
+  heldNodup := h.heldNodup, heldShape := h.heldShape, heldLin := h.heldLin, heldLinOnly := h.heldLinOnly }
 
 end steps
 
@@ -1115,9 +1350,13 @@ theorem ClientInvariant.append (hM : 2 * P.drift ≤ P.margin) {m : Nat} {p : No
   have hlogp : (appendWrite a.lease.core p).log p = a.lease.core.log p ++ [a.lease.core.replId p] := by simp [appendWrite]
   have hlog : ∀ x, a.lease.core.log x <+: (appendWrite a.lease.core p).log x := grow_upd a.lease.core.log p _
   have hwnd : a.waiting.Nodup := List.Nodup.of_map _ h.waitingNodup
+  have hnotKeyed : ∀ g ∈ a.heldReads, ∀ j v, g.entries[j]? = some v → ¬ (y.offset = j + 1 ∧ y.replId = v) := by
+    rintro g hg j v hj ⟨h1, h2⟩
+    obtain ⟨x, hx, h3, h4⟩ := (h.heldShape g hg).2.1 j v hj
+    exact hnew x hx ⟨h3.trans h1.symm, h4.trans h2.symm⟩
   exact {
-  lease := leaseInvariant_step hM h.lease (LeaseStep.core _ (.append p) _ (Step.append _ p hp hW) rfl)
-  reply := replyInvariant_step h.reply (ReplyStep.write a.reply p hp hW)
+  lease := leaseInvariant_step hM h.lease (LeaseStepA.core _ (.append p) _ (StepA.append _ p hp hW) rfl)
+  reply := replyInvariant_step h.reply (ReplyStepA.write a.reply p hp hW)
   wf := h.wf, idsLt := h.idsLt
   keysNodup := List.nodup_cons.2 ⟨fun hm => by
       obtain ⟨x, hx, hxe⟩ := List.mem_map.1 hm
@@ -1199,7 +1438,23 @@ theorem ClientInvariant.append (hM : 2 * P.drift ≤ P.margin) {m : Nat} {p : No
     · exact h.linCommitted u hu x hx hux
   linIds := h.linIds, linInv := h.linInv, linInvLt := h.linInvLt, linResGe := h.linResGe
   linResEq := h.linResEq, linMarkLe := h.linMarkLe, linSorted := h.linSorted
-  linResp := h.linResp, linLegal := h.linLegal }
+  linResp := h.linResp, linLegal := h.linLegal
+  heldInv := h.heldInv, heldNodup := h.heldNodup
+  heldShape := by
+    intro g hg
+    obtain ⟨h1, h2, h3, h4⟩ := h.heldShape g hg
+    refine ⟨h1, fun j v hj => ?_, h3, h4.trans (appendWrite_idHist h.lease.rcore hp _)⟩
+    obtain ⟨x, hx, hx1, hx2⟩ := h2 j v hj; exact ⟨x, List.mem_cons_of_mem _ hx, hx1, hx2⟩
+  heldLin := by
+    intro g hg hgh
+    obtain ⟨u, hu, hug⟩ := h.heldLin g hg hgh
+    refine ⟨u, hu, ?_⟩
+    rw [hug]; unfold HeldRead.toOp; rw [logOps_cons (hnotKeyed g hg)]
+  heldLinOnly := by
+    intro g hg u hu he
+    obtain ⟨h1, h2⟩ := h.heldLinOnly g hg u hu he
+    refine ⟨?_, h2⟩
+    rw [h1]; unfold HeldRead.toOp; rw [logOps_cons (hnotKeyed g hg)] }
 
 /-- A write that has committed is linearized. -/
 theorem ClientInvariant.committed_lin {x : Written} (hx : x ∈ a.written) (h1 : 1 ≤ x.offset)
@@ -1224,7 +1479,7 @@ theorem ClientInvariant.release {m : Nat} {g : Held Node} {x : Written} (hm : g 
       { a with held := a.held.erase g, acknowledged := (g.offset, g.replId) :: a.acknowledged,
                history := a.history ++ [.res x.op x.client .ok] } := by
   obtain ⟨hxw, hxo, hxr⟩ := entryOp_mem hx
-  have hr := replyInvariant_step (m := m) h.reply (ReplyStep.release a.reply g hm hc hf)
+  have hr := replyInvariant_step (m := m) h.reply (ReplyStepA.release a.reply g hm hc hf)
   obtain ⟨hd1, hd2, hd3⟩ := hr.acked _ List.mem_cons_self
   have hd1 : 1 ≤ g.offset := hd1
   have hd2 : g.offset ≤ a.lease.core.hist.length := hd2
@@ -1285,7 +1540,12 @@ theorem ClientInvariant.release {m : Nat} {g : Held Node} {x : Written} (hm : g 
     · have := inv_unique h.wf h1 hinv rfl rfl (by simp [Event.id, hr'])
       simp at this
   readingNodup := h.readingNodup
-  linShape := fun u hu => (h.linShape u hu).imp id fun ⟨h1, h2⟩ => ⟨h1, List.mem_append_left _ h2⟩
+  linShape := fun u hu => (h.linShape u hu).imp id fun ⟨h1, h2⟩ =>
+    ⟨h1, h2.imp (List.mem_append_left _) fun ⟨h3, h4⟩ => ⟨fun hr' => by
+      rcases hresp _ hr' with hr' | hr'
+      · exact h3 hr'
+      · have := inv_unique h.wf (h.linInv u hu) hinv rfl rfl (by simp [Operation.inv, Event.id, hr'])
+        simp [Operation.inv, h1] at this, h4⟩⟩
   linWrites := h.linWrites, linCommitted := h.linCommitted, linIds := h.linIds
   linInv := fun u hu => List.mem_append_left _ (h.linInv u hu)
   linInvLt := by
@@ -1312,7 +1572,14 @@ theorem ClientInvariant.release {m : Nat} {g : Held Node} {x : Written} (hm : g 
     rcases List.mem_append.1 he with he | he
     · exact h.linResp e he hres
     · rw [List.mem_singleton] at he; subst he; exact ⟨u0, hu0, by rw [hu0x]; rfl⟩
-  linLegal := h.linLegal }
+  linLegal := h.linLegal
+  heldInv := fun g hg => by
+    obtain ⟨h1, h2, h3⟩ := h.heldInv g hg
+    refine ⟨List.mem_append_left _ h1, fun hr' => ?_, h3⟩
+    rcases hresp _ hr' with hr' | hr'
+    · exact h2 hr'
+    · exact h.held_ne_written hg hxw hr'.symm
+  heldNodup := h.heldNodup, heldShape := h.heldShape, heldLin := h.heldLin, heldLinOnly := h.heldLinOnly }
 
 /-- A node answers a read. -/
 theorem ClientInvariant.respondRead (hM : 2 * P.drift ≤ P.margin) {op c : Nat} {n : Node}
@@ -1338,9 +1605,10 @@ theorem ClientInvariant.respondRead (hM : 2 * P.drift ≤ P.margin) {op c : Nat}
     simp at this
   have hnotLin : ∀ u ∈ a.lin, u.1.id ≠ op := by
     intro u hu he
-    rcases h.linShape u hu with ⟨x, hx, hux⟩ | ⟨-, hres⟩
+    rcases h.linShape u hu with ⟨x, hx, hux⟩ | ⟨-, hres | ⟨-, hnr⟩⟩
     · exact hnotW x hx (by rw [← he, hux]; rfl)
     · exact hrr ⟨_, hres, rfl, he⟩
+    · exact hnr (he ▸ List.mem_map_of_mem hrd)
   have hresp : ∀ i, Responded (a.history ++ [R.res]) i → Responded a.history i ∨ i = op :=
     fun i hr' => (responded_append_res hr').imp id fun e => e.symm
   exact {
@@ -1387,9 +1655,13 @@ theorem ClientInvariant.respondRead (hM : 2 * P.drift ≤ P.margin) {op c : Nat}
   linShape := by
     intro u hu
     rcases List.mem_append.1 hu with hu | hu
-    · exact (h.linShape u hu).imp id fun ⟨h1, h2⟩ => ⟨h1, List.mem_append_left _ h2⟩
+    · exact (h.linShape u hu).imp id fun ⟨h1, h2⟩ =>
+        ⟨h1, h2.imp (List.mem_append_left _) fun ⟨h3, h4⟩ => ⟨fun hr' => by
+          rcases hresp _ hr' with hr' | hr'
+          · exact h3 hr'
+          · exact h4 (hr' ▸ List.mem_map_of_mem hrd), fun hm => h4 (List.Sublist.subset (List.erase_sublist.map _) hm)⟩⟩
     · rw [List.mem_singleton] at hu; subst hu
-      exact Or.inr ⟨rfl, List.mem_append_right _ (List.mem_singleton_self _)⟩
+      exact Or.inr ⟨rfl, Or.inl (List.mem_append_right _ (List.mem_singleton_self _))⟩
   linWrites := by
     rw [List.map_append, List.map_append, writes_append, h.linWrites]
     simp only [writes, List.map_cons, List.map_nil, List.filterMap_cons, List.filterMap_nil]
@@ -1457,7 +1729,312 @@ theorem ClientInvariant.respondRead (hM : 2 * P.drift ≤ P.margin) {op c : Nat}
     rw [List.map_append, List.map_append]
     have := logLegal_append_read h.linLegal
     rw [h.linWrites, ← hlog] at this
-    exact this }
+    exact this
+  heldInv := fun g hg => by
+    obtain ⟨h1, h2, h3⟩ := h.heldInv g hg
+    have hne : g.op ≠ op := fun e => h3 (e ▸ List.mem_map_of_mem hrd)
+    refine ⟨List.mem_append_left _ h1, fun hr' => ?_, fun hm => h3 (List.Sublist.subset (List.erase_sublist.map _) hm)⟩
+    rcases hresp _ hr' with hr' | hr'
+    · exact h2 hr'
+    · exact hne hr'
+  heldNodup := h.heldNodup, heldShape := h.heldShape
+  heldLin := fun g hg hgh => by
+    obtain ⟨u, hu, hug⟩ := h.heldLin g hg hgh; exact ⟨u, List.mem_append_left _ hu, hug⟩
+  heldLinOnly := by
+    intro g hg u hu he
+    rcases List.mem_append.1 hu with hu | hu
+    · exact h.heldLinOnly g hg u hu he
+    · rw [List.mem_singleton] at hu; subst hu
+      exact absurd (List.mem_map_of_mem (f := Prod.fst) hrd) (by simpa [← he, hR] using (h.heldInv g hg).2.2) }
+
+
+/-- A replica holding a valid read lease, which does not think it is primary, holds the
+committed history. -/
+theorem ClientInvariant.hist_of_readLease {n : Node} (hnp : ¬ ThinksPrimary a.lease.core n)
+    (hlv : ReadLeaseValid P a.lease n) : a.lease.core.hist <+: a.lease.core.log n := by
+  unfold ReadLeaseValid at hlv
+  cases hx : a.lease.readLease n with
+  | none => rw [hx] at hlv; exact absurd hlv (by simp [HolderValid])
+  | some x =>
+    rw [hx] at hlv
+    exact h.lease.core.eligibleHoldsCommitted n (h.lease.leaseAuth n x (Or.inl hx) hnp hlv)
+
+/-- **A held read that may be released returns a committed prefix.** If the replica's
+committed view has reached the read's offset and the replica still has the replication
+ID it had when the read ran, the log the read returns is a prefix of the committed
+history. -/
+theorem ClientInvariant.heldRead_committed {g : HeldRead Node} (hg : g ∈ a.heldReads)
+    (hc : g.offset ≤ a.lease.committedView g.node) (hId : a.lease.core.replId g.node = g.replId) :
+    g.entries <+: a.lease.core.hist := by
+  obtain ⟨h1, -, -, h4⟩ := h.heldShape g hg
+  have hlen := h.lease.committedViewLen g.node
+  obtain ⟨-, hv⟩ := h.lease.committedViewHist g.node
+  have hlog : a.lease.core.log g.node <+: a.lease.core.idHist g.replId := by
+    rw [← hId]; exact h.lease.rcore.hist.logH g.node
+  have he : g.entries <+: a.lease.core.log g.node :=
+    List.prefix_of_prefix_length_le h4 hlog (by omega)
+  have he' : g.entries <+: (a.lease.core.log g.node).take (a.lease.committedView g.node) :=
+    List.prefix_of_prefix_length_le h4 ((List.take_prefix _ _).trans hlog)
+      (by rw [List.length_take]; omega)
+  exact he'.trans hv
+
+/-- A replica holds a read. -/
+theorem ClientInvariant.holdRead {op c : Nat} {n : Node} (hrd : (op, c, n) ∈ a.reading)
+    (hnp : ¬ ThinksPrimary a.lease.core n) (hlv : ReadLeaseValid P a.lease n)
+    (hdirty : a.lease.committedView n < (a.lease.core.log n).length) :
+    ClientInvariant P
+      { a with reading := a.reading.erase (op, c, n),
+               heldReads := ⟨op, c, n, (a.lease.core.log n).length, a.lease.core.replId n,
+                             a.lease.core.log n⟩ :: a.heldReads,
+               lin := a.lin ++ readsReached a.written
+                 [⟨op, c, n, (a.lease.core.log n).length, a.lease.core.replId n, a.lease.core.log n⟩]
+                 [] a.lease.core.hist a.history.length } := by
+  set g0 : HeldRead Node := ⟨op, c, n, (a.lease.core.log n).length, a.lease.core.replId n, a.lease.core.log n⟩
+    with hg0
+  obtain ⟨hri, hrr⟩ := h.readingInv _ hrd
+  have hhist := h.hist_of_readLease hnp hlv
+  have hne : a.lease.core.log n ≠ [] := fun e => by rw [e] at hdirty; simp at hdirty
+  have hrnd : a.reading.Nodup := List.Nodup.of_map _ h.readingNodup
+  have hopIn : op ∈ a.reading.map Prod.fst := List.mem_map_of_mem hrd
+  have hnotIn : op ∉ (a.reading.erase (op, c, n)).map Prod.fst := by
+    intro hm
+    obtain ⟨y, hy, hye⟩ := List.mem_map.1 hm
+    have hy' := (List.Nodup.mem_erase_iff hrnd).1 hy
+    exact hy'.1 (List.inj_on_of_nodup_map h.readingNodup hy'.2 hrd hye)
+  have hsubR : ∀ i, i ∉ a.reading.map Prod.fst → i ∉ (a.reading.erase (op, c, n)).map Prod.fst :=
+    fun i hi hm => hi (List.Sublist.subset (List.erase_sublist.map _) hm)
+  have hRR : ∀ u ∈ readsReached a.written [g0] [] a.lease.core.hist a.history.length,
+      a.lease.core.hist = g0.entries ∧ u = (g0.toOp a.written, a.history.length) := by
+    intro u hu
+    obtain ⟨x, hx, hn, -, rfl⟩ := mem_readsReached hu
+    rw [List.mem_singleton] at hx; subst hx
+    exact ⟨hn, rfl⟩
+  -- No linearized operation has this read's id.
+  have hnotLin : ∀ u ∈ a.lin, u.1.id ≠ op := by
+    intro u hu he
+    rcases h.linShape u hu with ⟨x, hx, hux⟩ | ⟨-, hres | ⟨-, hnr⟩⟩
+    · have := inv_unique h.wf (h.writtenInv x hx) hri rfl rfl (by simp [Event.id, ← he, hux, Written.toOp])
+      simp at this
+    · exact hrr ⟨_, hres, rfl, he⟩
+    · exact hnr (he ▸ hopIn)
+  have hnotHeld : ∀ g ∈ a.heldReads, g.op ≠ op := fun g hg e => (h.heldInv g hg).2.2 (e ▸ hopIn)
+  exact {
+  lease := h.lease, reply := h.reply, wf := h.wf, idsLt := h.idsLt
+  keysNodup := h.keysNodup, opsNodup := h.opsNodup, writtenInv := h.writtenInv
+  writtenIds := h.writtenIds, owned := h.owned, logKeyed := h.logKeyed, histKeyed := h.histKeyed
+  respondedCommitted := h.respondedCommitted
+  heldKeyed := h.heldKeyed, heldKeysNodup := h.heldKeysNodup, heldPending := h.heldPending
+  waitingInv := h.waitingInv, waitingNodup := h.waitingNodup
+  readingInv := fun u hu => h.readingInv u (List.mem_of_mem_erase hu)
+  readingNodup := h.readingNodup.sublist (List.erase_sublist.map _)
+  linShape := by
+    intro u hu
+    rcases List.mem_append.1 hu with hu | hu
+    · exact (h.linShape u hu).imp id fun ⟨h1, h2⟩ => ⟨h1, h2.imp id fun ⟨h3, h4⟩ => ⟨h3, hsubR _ h4⟩⟩
+    · obtain ⟨-, rfl⟩ := hRR u hu
+      exact Or.inr ⟨rfl, Or.inr ⟨hrr, hnotIn⟩⟩
+  linWrites := by
+    rw [List.map_append, List.map_append, writes_append, h.linWrites]
+    have : writes (((readsReached a.written [g0] [] a.lease.core.hist a.history.length).map
+        Prod.fst).map Operation.call) = [] := by
+      unfold writes; rw [List.filterMap_eq_nil_iff]
+      intro c hc; rw [readsReached_calls _ _ _ _ _ c hc]
+    rw [this, List.append_nil]
+  linCommitted := by
+    intro u hu x hx hux
+    rcases List.mem_append.1 hu with hu | hu
+    · exact h.linCommitted u hu x hx hux
+    · obtain ⟨-, rfl⟩ := hRR u hu
+      exact absurd (congrArg Operation.op hux) (by simp [HeldRead.toOp, Written.toOp])
+  linIds := by
+    rw [List.map_append, List.nodup_append]
+    refine ⟨h.linIds, ?_, ?_⟩
+    · unfold readsReached; rw [List.map_map]
+      exact (List.filter_sublist.map _).nodup (by simp)
+    · intro i hi j hj hij; subst hij
+      obtain ⟨u, hu, rfl⟩ := List.mem_map.1 hi
+      obtain ⟨v, hv, hvi⟩ := List.mem_map.1 hj
+      obtain ⟨-, rfl⟩ := hRR v hv
+      exact hnotLin u hu hvi.symm
+  linInv := by
+    intro u hu
+    rcases List.mem_append.1 hu with hu | hu
+    · exact h.linInv u hu
+    · obtain ⟨-, rfl⟩ := hRR u hu; exact hri
+  linInvLt := by
+    intro u hu i hi
+    rcases List.mem_append.1 hu with hu | hu
+    · exact h.linInvLt u hu i hi
+    · obtain ⟨-, rfl⟩ := hRR u hu; exact (List.getElem?_eq_some_iff.1 hi).1
+  linResGe := by
+    intro u hu i hi
+    rcases List.mem_append.1 hu with hu | hu
+    · exact h.linResGe u hu i hi
+    · obtain ⟨-, rfl⟩ := hRR u hu; exact absurd ⟨_, List.mem_of_getElem? hi, rfl, rfl⟩ hrr
+  linResEq := by
+    intro u hu e he hres hid
+    rcases List.mem_append.1 hu with hu | hu
+    · exact h.linResEq u hu e he hres hid
+    · obtain ⟨-, rfl⟩ := hRR u hu; exact absurd ⟨e, he, hres, hid⟩ hrr
+  linMarkLe := by
+    intro u hu
+    rcases List.mem_append.1 hu with hu | hu
+    · exact h.linMarkLe u hu
+    · obtain ⟨-, rfl⟩ := hRR u hu; exact le_refl _
+  linSorted := by
+    refine List.pairwise_append.2 ⟨h.linSorted, List.pairwise_of_forall_mem_list fun u hu v hv => ?_,
+      fun u hu v hv => ?_⟩
+    · obtain ⟨-, rfl⟩ := hRR u hu; obtain ⟨-, rfl⟩ := hRR v hv; exact le_refl _
+    · obtain ⟨-, rfl⟩ := hRR v hv; exact h.linMarkLe u hu
+  linResp := fun e he hres => by
+    obtain ⟨u, hu, hue⟩ := h.linResp e he hres; exact ⟨u, List.mem_append_left _ hu, hue⟩
+  linLegal := by
+    rw [List.map_append, List.map_append]
+    refine logLegal_append_reads h.linLegal fun c hc => ?_
+    rw [readsReached_calls _ _ _ _ _ c hc, h.linWrites]
+  heldInv := by
+    intro g hg
+    rcases List.mem_cons.1 hg with rfl | hg
+    · exact ⟨hri, hrr, hnotIn⟩
+    · obtain ⟨h1, h2, h3⟩ := h.heldInv g hg; exact ⟨h1, h2, hsubR _ h3⟩
+  heldNodup := List.nodup_cons.2 ⟨fun hm => by
+      obtain ⟨g, hg, hge⟩ := List.mem_map.1 hm; exact hnotHeld g hg hge, h.heldNodup⟩
+  heldShape := by
+    intro g hg
+    rcases List.mem_cons.1 hg with rfl | hg
+    · exact ⟨rfl, h.logKeyed n, h.lease.rcore.ids n, h.lease.rcore.hist.logH n⟩
+    · exact h.heldShape g hg
+  heldLin := by
+    intro g hg hgh
+    rcases List.mem_cons.1 hg with rfl | hg
+    · have heq : a.lease.core.hist = a.lease.core.log n := List.IsPrefix.eq_of_length hhist
+        (le_antisymm hhist.length_le hgh.length_le)
+      refine ⟨(g0.toOp a.written, a.history.length), List.mem_append_right _ ?_, rfl⟩
+      unfold readsReached
+      exact List.mem_map.2 ⟨g0, List.mem_filter.2 ⟨List.mem_singleton_self _, by
+        simp [hg0, heq, List.prefix_nil, hne]⟩, rfl⟩
+    · obtain ⟨u, hu, hug⟩ := h.heldLin g hg hgh; exact ⟨u, List.mem_append_left _ hu, hug⟩
+  heldLinOnly := by
+    intro g hg u hu he
+    rcases List.mem_cons.1 hg with rfl | hg
+    · rcases List.mem_append.1 hu with hu | hu
+      · exact absurd he (hnotLin u hu)
+      · obtain ⟨hn, rfl⟩ := hRR u hu; exact ⟨rfl, by rw [hn]⟩
+    · rcases List.mem_append.1 hu with hu | hu
+      · exact h.heldLinOnly g hg u hu he
+      · obtain ⟨-, rfl⟩ := hRR u hu; exact absurd he.symm (hnotHeld g hg) }
+
+/-- A held read is released: it responds with the log it read. -/
+theorem ClientInvariant.releaseRead {g : HeldRead Node} (hg : g ∈ a.heldReads)
+    (hc : g.offset ≤ a.lease.committedView g.node) (hId : a.lease.core.replId g.node = g.replId) :
+    ClientInvariant P
+      { a with history := a.history ++ [(g.toOp a.written).res], heldReads := a.heldReads.erase g } := by
+  obtain ⟨hgi, hgr, hgR⟩ := h.heldInv g hg
+  obtain ⟨u0, hu0, hu0g⟩ := h.heldLin g hg (h.heldRead_committed hg hc hId)
+  have hgnd : a.heldReads.Nodup := List.Nodup.of_map _ h.heldNodup
+  have hresp : ∀ i, Responded (a.history ++ [(g.toOp a.written).res]) i → Responded a.history i ∨ i = g.op :=
+    fun i hr' => (responded_append_res hr').imp id fun e => e.symm
+  have hnotW : ∀ x ∈ a.written, x.op ≠ g.op := fun x hx => h.held_ne_written hg hx
+  exact {
+  lease := h.lease, reply := h.reply
+  wf := wf_append_res h.wf rfl hgr hgi rfl rfl rfl
+  idsLt := by
+    intro e he
+    rcases List.mem_append.1 he with he | he
+    · exact h.idsLt e he
+    · rw [List.mem_singleton] at he; subst he; have := h.idsLt _ hgi; exact this
+  keysNodup := h.keysNodup, opsNodup := h.opsNodup
+  writtenInv := fun y hy => List.mem_append_left _ (h.writtenInv y hy)
+  writtenIds := h.writtenIds, owned := h.owned
+  logKeyed := h.logKeyed, histKeyed := h.histKeyed
+  respondedCommitted := by
+    intro y hy hry
+    rcases hresp _ hry with hry | hry
+    · exact h.respondedCommitted y hy hry
+    · exact absurd hry (hnotW y hy)
+  heldKeyed := h.heldKeyed, heldKeysNodup := h.heldKeysNodup
+  heldPending := by
+    intro g' hg' y hy h1 h2 hry
+    rcases hresp _ hry with hry | hry
+    · exact h.heldPending g' hg' y hy h1 h2 hry
+    · exact hnotW y hy hry
+  waitingInv := by
+    intro u hu
+    obtain ⟨h1, h2, h3⟩ := h.waitingInv u hu
+    refine ⟨List.mem_append_left _ h1, fun hr' => ?_, h3⟩
+    rcases hresp _ hr' with hr' | hr'
+    · exact h2 hr'
+    · have := inv_unique h.wf h1 hgi rfl rfl (by simp [Event.id, hr'])
+      simp at this
+  waitingNodup := h.waitingNodup
+  readingInv := by
+    intro u hu
+    obtain ⟨h1, h2⟩ := h.readingInv u hu
+    refine ⟨List.mem_append_left _ h1, fun hr' => ?_⟩
+    rcases hresp _ hr' with hr' | hr'
+    · exact h2 hr'
+    · exact hgR (hr' ▸ List.mem_map_of_mem hu)
+  readingNodup := h.readingNodup
+  linShape := by
+    intro u hu
+    by_cases hid : u.1.id = g.op
+    · obtain ⟨h1, -⟩ := h.heldLinOnly g hg u hu hid
+      refine Or.inr ⟨by rw [h1]; rfl, Or.inl ?_⟩
+      rw [h1]; exact List.mem_append_right _ (List.mem_singleton_self _)
+    · exact (h.linShape u hu).imp id fun ⟨h1, h2⟩ =>
+        ⟨h1, h2.imp (List.mem_append_left _) fun ⟨h3, h4⟩ => ⟨fun hr' => by
+          rcases hresp _ hr' with hr' | hr'
+          · exact h3 hr'
+          · exact hid hr', h4⟩⟩
+  linWrites := h.linWrites, linCommitted := h.linCommitted, linIds := h.linIds
+  linInv := fun u hu => List.mem_append_left _ (h.linInv u hu)
+  linInvLt := by
+    intro u hu i hi
+    rcases getElem?_append_one hi with hi | ⟨-, hie⟩
+    · exact h.linInvLt u hu i hi
+    · simp [Operation.inv, Operation.res] at hie
+  linResGe := by
+    intro u hu i hi
+    rcases getElem?_append_one hi with hi | ⟨rfl, -⟩
+    · exact h.linResGe u hu i hi
+    · exact h.linMarkLe u hu
+  linResEq := by
+    intro u hu e he hres hid
+    rcases List.mem_append.1 he with he | he
+    · exact h.linResEq u hu e he hres hid
+    · rw [List.mem_singleton] at he; subst he
+      obtain ⟨h1, -⟩ := h.heldLinOnly g hg u hu (by simpa [HeldRead.toOp, Operation.res, Event.id] using hid.symm)
+      rw [h1]
+  linMarkLe := fun u hu => (h.linMarkLe u hu).trans (by simp)
+  linSorted := h.linSorted
+  linResp := by
+    intro e he hres
+    rcases List.mem_append.1 he with he | he
+    · exact h.linResp e he hres
+    · rw [List.mem_singleton] at he; subst he; exact ⟨u0, hu0, by rw [hu0g]⟩
+  linLegal := h.linLegal
+  heldInv := by
+    intro g' hg'
+    have hg'' := (List.Nodup.mem_erase_iff hgnd).1 hg'
+    obtain ⟨h1, h2, h3⟩ := h.heldInv g' hg''.2
+    refine ⟨List.mem_append_left _ h1, fun hr' => ?_, h3⟩
+    rcases hresp _ hr' with hr' | hr'
+    · exact h2 hr'
+    · exact hg''.1 (List.inj_on_of_nodup_map h.heldNodup hg''.2 hg hr')
+  heldNodup := h.heldNodup.sublist (List.erase_sublist.map _)
+  heldShape := fun g' hg' => h.heldShape g' (List.mem_of_mem_erase hg')
+  heldLin := fun g' hg' => h.heldLin g' (List.mem_of_mem_erase hg')
+  heldLinOnly := fun g' hg' => h.heldLinOnly g' (List.mem_of_mem_erase hg') }
+
+/-- A held read is answered UNCOMMITTED: it stays pending. -/
+theorem ClientInvariant.abortRead {g : HeldRead Node} :
+    ClientInvariant P { a with heldReads := a.heldReads.erase g } :=
+  { h with
+    heldInv := fun g' hg' => h.heldInv g' (List.mem_of_mem_erase hg')
+    heldNodup := h.heldNodup.sublist (List.erase_sublist.map _)
+    heldShape := fun g' hg' => h.heldShape g' (List.mem_of_mem_erase hg')
+    heldLin := fun g' hg' => h.heldLin g' (List.mem_of_mem_erase hg')
+    heldLinOnly := fun g' hg' => h.heldLinOnly g' (List.mem_of_mem_erase hg') }
 
 end steps2
 
@@ -1471,81 +2048,149 @@ variable {Node : Type} [DecidableEq Node]
 
 /-! ## Every step preserves the invariant; the theorem -/
 
+theorem ne_fresh {c : State Node} {t : Nat} (ht : t ∈ c.usedIds) : t ≠ freshId c :=
+  fun e => freshId_not_mem c (e ▸ ht)
+
+/-- A restart (or nothing), then a fresh ID: the history of every ID in use is kept. -/
+theorem fresh_restart_idHist {c : State Node} {l : LeaseState Node} {n : Node} (hids : c.usedIds ⊆ l.core.usedIds)
+    (hkeep : ∀ t ∈ c.usedIds, l.core.idHist t = c.idHist t) :
+    ∀ t ∈ c.usedIds, c.idHist t <+: (freshen l n).core.idHist t := by
+  intro t ht
+  show _ <+: update l.core.idHist (freshId l.core) (l.core.log n) t
+  rw [update_of_ne _ _ (ne_fresh (hids ht)), hkeep t ht]
+
 /-- Every client step preserves the client invariant, given `margin ≥ 2 · drift`. -/
 theorem clientInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}
     {a a' : ClientState Node} {μ : ClientAction Node} (h : ClientInvariant P a)
-    (hs : ClientStep m P a μ a') : ClientInvariant P a' := by
+    (hs : ClientStepA m P a μ a') : ClientInvariant P a' := by
   cases hs with
   | lease μ l hs hμ =>
     have hl := leaseInvariant_step hM h.lease hs
     rcases leaseStep_core hs hμ with he | ⟨μ', hst, hr, hna⟩
     · have hr' : ReplyInvariant ⟨l.core, a.held, a.acknowledged⟩ := by rw [he]; exact h.reply
       have hm : CoreMove a.lease.core l.core := by rw [he]; exact CoreMove.refl h.reply.replIdsIssued
-      exact h.move l a.held hl hr' (List.Sublist.refl _) hm
-    · exact h.move l a.held hl (replyInvariant_core h.reply hst hr) (List.Sublist.refl _)
+      exact h.move l a.held a.heldReads hl hr' (List.Sublist.refl _) (List.Sublist.refl _) hm
+        (Or.inl (by rw [he])) (fun t _ => by rw [he])
+    · exact h.move l a.held a.heldReads hl (replyInvariant_core h.reply hst hr) (List.Sublist.refl _)
+        (List.Sublist.refl _)
         (coreMove_step h.reply.core h.reply.rcore h.reply.replIdsIssued hst hr hna)
+        (step_hist hst) (step_idHist h.lease.rcore hst)
   | restart μ l n hs hμ =>
     have hl := leaseInvariant_freshen (leaseInvariant_step hM h.lease hs) n
     cases hs with
     | restartEmpty n' hkl hsurv =>
       simp only [LeaseAction.restarted, Option.some.injEq] at hμ; subst hμ
       have hr := replyInvariant_step (replyInvariant_step h.reply
-        (ReplyStep.restartEmpty (m := m) a.reply n' hkl hsurv)) (ReplyStep.newId (m := m) _ n')
-      exact h.moveSameHist _ _ hl hr List.filter_sublist
+        (ReplyStepA.restartEmpty (m := m) a.reply n' hkl hsurv)) (ReplyStepA.newId (m := m) _ n')
+      exact h.moveSameHist _ _ _ hl hr List.filter_sublist List.filter_sublist
         (coreMove_fresh h.reply.replIdsIssued _ (Finset.subset_insert _ _) (fun _ e => update_of_ne _ _ e) rfl (fun x hx => restartEmpty_log_other hx)
           (fun j v hj => by simp [leaseRestart, restartEmpty] at hj)
           (fun x _ hx => (restartEmpty_thinksPrimary (h.lease.core.localCfgEq n' hkl)
             (h.lease.core.incLe n') hx).2)) rfl
+        (fresh_restart_idHist (Finset.subset_insert _ _) (fun t ht => update_of_ne _ _ (ne_fresh ht)))
     | restartKeep n' hkl =>
       simp only [LeaseAction.restarted, Option.some.injEq] at hμ; subst hμ
       have hr := replyInvariant_step (replyInvariant_step h.reply
-        (ReplyStep.restartKeep (m := m) a.reply n' hkl)) (ReplyStep.newId (m := m) _ n')
-      exact h.moveSameHist _ _ hl hr List.filter_sublist
+        (ReplyStepA.restartKeep (m := m) a.reply n' hkl)) (ReplyStepA.newId (m := m) _ n')
+      exact h.moveSameHist _ _ _ hl hr List.filter_sublist List.filter_sublist
         (coreMove_fresh h.reply.replIdsIssued _ (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) rfl (fun _ _ => rfl) (fun _ _ hj => hj)
           (fun _ _ hx => hx)) rfl
+        (fresh_restart_idHist (restartIds_sub _ _ _) (fun t ht => update_of_ne _ _ (ne_fresh ht)))
     | restartPartialKeep n' k hkl hk hkeep =>
       simp only [LeaseAction.restarted, Option.some.injEq] at hμ; subst hμ
       have hr := replyInvariant_step (replyInvariant_step h.reply
-        (ReplyStep.restartPartialKeep (m := m) a.reply n' k hkl hk hkeep)) (ReplyStep.newId (m := m) _ n')
-      exact h.moveSameHist _ _ hl hr List.filter_sublist
+        (ReplyStepA.restartPartialKeep (m := m) a.reply n' k hkl hk hkeep)) (ReplyStepA.newId (m := m) _ n')
+      exact h.moveSameHist _ _ _ hl hr List.filter_sublist List.filter_sublist
         (coreMove_fresh h.reply.replIdsIssued _ (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) rfl (fun x hx => restartPartialKeep_log_other hx)
           (fun j v hj => by
             change ((restartPartialKeep a.lease.core n' k).log n')[j]? = some v at hj
             rw [restartPartialKeep_log_self] at hj; exact take_entries hj)
           (fun _ _ hx => hx)) rfl
+        (fresh_restart_idHist (restartIds_sub _ _ _) (fun t ht => update_of_ne _ _ (ne_fresh ht)))
     | restartPartialFresh n' k hkl hk hfresh hsurv =>
       simp only [LeaseAction.restarted, Option.some.injEq] at hμ; subst hμ
       have hr := replyInvariant_step (replyInvariant_step h.reply
-        (ReplyStep.restartPartialFresh (m := m) a.reply n' k hkl hk hfresh hsurv))
-        (ReplyStep.newId (m := m) _ n')
-      exact h.moveSameHist _ _ hl hr List.filter_sublist
+        (ReplyStepA.restartPartialFresh (m := m) a.reply n' k hkl hk hfresh hsurv))
+        (ReplyStepA.newId (m := m) _ n')
+      exact h.moveSameHist _ _ _ hl hr List.filter_sublist List.filter_sublist
         (coreMove_fresh h.reply.replIdsIssued _ (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) rfl (fun x hx => restartPartialFresh_log_other hx)
           (fun j v hj => by
             change ((restartPartialFresh a.lease.core n' k).log n')[j]? = some v at hj
             rw [restartPartialFresh_log, if_pos rfl] at hj; exact take_entries hj)
           (fun x _ hx => (restartPartialFresh_thinksPrimary (h.lease.core.localCfgEq n' hkl)
             (h.lease.core.incLe n') hx).2)) rfl
+        (fresh_restart_idHist (restartIds_sub _ _ _) (fun t ht => update_of_ne _ _ (ne_fresh ht)))
     | _ => simp [LeaseAction.restarted] at hμ
   | newId p =>
-    have hr := replyInvariant_step (m := m) h.reply (ReplyStep.newId _ p)
-    exact h.moveSameHist _ _ (leaseInvariant_freshen h.lease p) hr (List.Sublist.refl _)
+    have hr := replyInvariant_step (m := m) h.reply (ReplyStepA.newId _ p)
+    exact h.moveSameHist _ _ _ (leaseInvariant_freshen h.lease p) hr (List.Sublist.refl _) (List.Sublist.refl _)
       (coreMove_fresh h.reply.replIdsIssued a.lease (Finset.Subset.refl _) (fun _ _ => rfl) rfl (fun _ _ => rfl) (fun _ _ hj => hj)
         (fun _ _ hx => hx)) rfl
+      (fresh_restart_idHist (Finset.Subset.refl _) (fun _ _ => rfl))
   | invokeWrite c => exact h.invokeWrite c
   | append p op c hw hp hW => exact h.append hM hw hp hW
   | release g x hm hc hf hx => exact h.release (m := m) hm hc hf hx
   | abort g hm hf =>
-    have hr := replyInvariant_step (m := m) h.reply (ReplyStep.abort a.reply g hm hf)
-    exact h.moveSameHist a.lease _ h.lease hr List.erase_sublist (CoreMove.refl h.reply.replIdsIssued) rfl
+    have hr := replyInvariant_step (m := m) h.reply (ReplyStepA.abort a.reply g hm hf)
+    exact h.moveSameHist a.lease _ _ h.lease hr List.erase_sublist (List.Sublist.refl _)
+      (CoreMove.refl h.reply.replIdsIssued) rfl (fun _ _ => List.prefix_refl _)
   | invokeRead c n => exact h.invokeRead c n
   | respondRead op c n hr hcan => exact h.respondRead hM hr hcan
+  | holdRead op c n hr hnp hlv hd => exact h.holdRead hr hnp hlv hd
+  | releaseRead g hm hc hId => exact h.releaseRead hm hc hId
+  | abortRead g hm _ => exact h.abortRead
 
-/-- The client invariant holds in every reachable state. -/
+/-! ## Two-step promotion: the client layer refines its atomic form -/
+
+/-- The client state as the atomic model sees it. -/
+def clientSim (a : ClientState Node) (L : Node → Cfg Node) : ClientState Node := { a with lease := leaseSim a.lease L }
+
+theorem clientInvariant_stepN {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}
+    {a a' : ClientState Node} {μ : ClientAction Node} {L : Node → Cfg Node} (hP : PromSim a.lease.core L)
+    (h : ClientInvariant P (clientSim a L)) (hs : ClientStep m P a μ a') :
+    ∃ L', PromSim a'.lease.core L' ∧ ClientInvariant P (clientSim a' L') := by
+  have hi : Invariant (simState a.lease.core L) := h.lease.core
+  have htp := hP.thinksPrimary
+  have hA : ∀ {μ a'}, ClientStepA m P (clientSim a L) μ a' → ClientInvariant P a' := fun hs => clientInvariant_step hM h hs
+  have hfr : ∀ {c : State Node}, c.proposing = a.lease.core.proposing → c.localCfg = a.lease.core.localCfg →
+      c.incarnation = a.lease.core.incarnation → c.cfg = a.lease.core.cfg → c.sync = a.lease.core.sync → PromSim c L :=
+    fun e1 e2 e3 e4 e5 => hP.frame e1 e2 e3 e4 (fun _ _ _ h => by rw [e5]; exact h)
+  cases hs with
+  | lease μ l hs hμ =>
+    obtain ⟨L', hP', hS | ⟨n, -, he⟩⟩ := hP.leaseStep hi hs
+    · exact ⟨L', hP', hA (ClientStepA.lease _ μ _ hS hμ)⟩
+    · refine ⟨L', hP', ?_⟩
+      show ClientInvariant P ((clientSim a L).withLease (leaseSim l L'))
+      rw [he]
+      have hr' : ReplyInvariant ⟨(clientSim a L).lease.core, a.held, a.acknowledged⟩ := h.reply
+      exact h.move _ a.held a.heldReads (leaseInvariant_bumpTraffic h.lease n) hr' (List.Sublist.refl _)
+        (List.Sublist.refl _) (CoreMove.refl h.reply.replIdsIssued) (Or.inl rfl) (fun _ _ => List.prefix_refl _)
+  | restart μ l n hs hμ =>
+    obtain ⟨L', hP', hS | ⟨n', hμn, -⟩⟩ := hP.leaseStep hi hs
+    · exact ⟨L', hP'.frame rfl rfl rfl rfl (fun _ _ _ h => h), hA (ClientStepA.restart (clientSim a L) μ (leaseSim l L') n hS hμ)⟩
+    · subst hμn; simp [LeaseAction.restarted] at hμ
+  | newId p => exact ⟨L, hfr rfl rfl rfl rfl rfl, hA (ClientStepA.newId _ p)⟩
+  | invokeWrite c => exact ⟨L, hP, hA (ClientStepA.invokeWrite _ c)⟩
+  | append p op c hw hp hW =>
+    exact ⟨L, hfr rfl rfl rfl rfl rfl, hA (ClientStepA.append _ p op c hw ((htp p).2 hp) (hP.writable hW))⟩
+  | release g x hm hc hf hx => exact ⟨L, hP, hA (ClientStepA.release _ g x hm hc ((hP.replyFenced g).2 hf) hx)⟩
+  | abort g hm hf => exact ⟨L, hP, hA (ClientStepA.abort _ g hm (fun h' => hf ((hP.replyFenced g).1 h')))⟩
+  | invokeRead c n => exact ⟨L, hP, hA (ClientStepA.invokeRead _ c n)⟩
+  | respondRead op c n hr hcan =>
+    exact ⟨L, hP, hA (ClientStepA.respondRead _ op c n hr (hcan.imp hP.primCanRead hP.replCanRead))⟩
+  | holdRead op c n hr hnp hlv hd =>
+    exact ⟨L, hP, hA (ClientStepA.holdRead _ op c n hr (fun ht => hnp ((htp n).1 ht)) hlv hd)⟩
+  | releaseRead g hm hc hId => exact ⟨L, hP, hA (ClientStepA.releaseRead _ g hm hc hId)⟩
+  | abortRead g hm hId => exact ⟨L, hP, hA (ClientStepA.abortRead _ g hm hId)⟩
+
+/-- The client invariant holds of the atomic model's view of every reachable state. -/
 theorem clientInvariant_reachable {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}
-    {i : Node} {a : ClientState Node} (h : ClientReachable m P i a) : ClientInvariant P a :=
+    {i : Node} {a : ClientState Node} (h : ClientReachable m P i a) :
+    ∃ L, PromSim a.lease.core L ∧ ClientInvariant P (clientSim a L) :=
   let ⟨_, run⟩ := h
-  Cslib.LTS.mtrInv_of_trInv (p := ClientInvariant P) (fun _ _ _ hs h => clientInvariant_step hM h hs) _ _ _ run
-    (clientInvariant_init P i)
+  Cslib.LTS.mtrInv_of_trInv (p := fun a => ∃ L, PromSim a.lease.core L ∧ ClientInvariant P (clientSim a L))
+    (fun _ _ _ hs ⟨_, hP, h⟩ => clientInvariant_stepN hM hP h hs) _ _ _ run
+    ⟨(init i).localCfg, promSim_init i, clientInvariant_init P i⟩
 
 /-- **Client histories are linearizable.** If the clock-drift margin is at least twice
 the drift bound, then for every `min-sync-replicas` value, every reachable client
@@ -1555,6 +2200,22 @@ responded before another was invoked ahead of it. -/
 theorem linearizable {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
     {a : ClientState Node} (hReachable : ClientReachable m P i a) :
     Lin.Linearizable Lin.LogLegal a.history :=
-  (clientInvariant_reachable hMargin hReachable).linearizable
+  let ⟨_, _, h⟩ := clientInvariant_reachable hMargin hReachable
+  h.linearizable
+
+/-- **A releasable held replica read returns committed data.** If the clock-drift margin
+is at least twice the drift bound, then in every reachable client state, a read held on a
+replica that may be released (the replica's committed view has reached the read's offset,
+and the replica still has the replication ID it had when the read ran) read a prefix of
+the committed history. That says the value has committed, not that it is recent: the read
+may be behind the history by the time it is released, and its recency comes from
+`linearizable`, which places it where the history reached its log. -/
+theorem heldRead_committed {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
+    {a : ClientState Node} (hReachable : ClientReachable m P i a) :
+    ∀ g ∈ a.heldReads, g.offset ≤ a.lease.committedView g.node →
+      a.lease.core.replId g.node = g.replId → g.entries <+: a.lease.core.hist :=
+  fun _ hg hc hId =>
+    let ⟨_, _, h⟩ := clientInvariant_reachable hMargin hReachable
+    h.heldRead_committed hg hc hId
 
 end SyncReplication

@@ -26,7 +26,7 @@ inductive StepNoInc (m : Nat) : State N → Action N → State N → Prop
       s.sync p r = false → catchUpPoint s p ≤ s.acked p r →
       StepNoInc m s (.addToSyncSet p r) (addToSyncSet s p r)
   | makeEligible (s : State N) (p r : N) : (s.localCfg p).primary = p → KnowsLatest s p →
-      s.sync p r = true → s.cfg.eligible r = false → StepNoInc m s (.makeEligible p r) (makeEligible s p r)
+      s.sync p r = true → s.cfg.eligible r = false → StepNoInc m s (.makeEligible p r) (proposeEligible s p r)
 
 /-- The weakened protocol as a transition system. -/
 def transitionSystemNoInc (m : Nat) : LTS (State N) (Action N) where
@@ -34,12 +34,12 @@ def transitionSystemNoInc (m : Nat) : LTS (State N) (Action N) where
 
 def e7 := restartEmpty c6 0        -- n0 restarts empty (n1 survives); new incarnation
 def e8 := addToSyncSet e7 0 2             -- n0 still acts as primary: counts the empty n2
-def e9 := makeEligible e8 0 2          -- n2 eligible with an empty log
+def e9 := proposeEligible e8 0 2          -- n2 eligible with an empty log
 
 /-- The run; the label list is its trace. After the shared prefix, the last two actions
 are the weakened ones. -/
 theorem noIncCheck_run : (transitionSystemNoInc 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+    [.addToSyncSet 0 1, .makeEligible 0 1, .learn 0, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
      .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
      .restartEmpty 0, .addToSyncSet 0 2, .makeEligible 0 2] e9 :=
   LTS.MTr.comp (transitionSystemNoInc 1) (mtr_of_step StepNoInc.step committed_run) <|

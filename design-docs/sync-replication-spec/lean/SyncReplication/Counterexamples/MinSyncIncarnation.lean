@@ -63,7 +63,7 @@ def w14 := recordAck (sendAckMsg w13 1) (.ack 1 0 3 2) 0 1 2                    
 /-- The run up to the commit. The append is the weakened action; so is the commit
 whose guard the theorem states. -/
 theorem noIncWritable_run : (transitionSystemNoIncWritable 1).MTr c0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+    [.addToSyncSet 0 1, .makeEligible 0 1, .learn 0, .append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
      .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
      .learn 1, .restartPartial 1 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 3 1 1), .sendAck 1,
      .deliver (.ack 1 0 3 1), .addToSyncSet 0 1, .append 0, .sendData 0 1, .deliver (.data 0 1 3 1 1),

@@ -58,17 +58,19 @@ def lq18 := recvData lq17 2 lq17.core (lq17.ackEcho 0 2) -- n0, deposed and leas
 /-- The run; the label list is its trace. Only the last `heartbeat 2` is the weakened
 action. -/
 theorem grantWithoutPrimaryLease_run : (leaseTransitionSystemGrantWithoutPrimaryLease 0 P0).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .core (.addToSyncSet 0 2), .core (.makeEligible 0 2),
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 0, .core (.addToSyncSet 0 2), .core (.makeEligible 0 2), .learn 0,
      .learn 1, .tick, .tick, .tick, .tick, .takeover 1, .tick, .tick, .tick, .demote 1 2,
      .core (.append 1), .core (.commit 1), .core (.psync 2), .ack 2, .heartbeat 2] lq18 :=
   .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.learn li2p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (InstantLeaseStep.core li2 _ _ (Step.addToSyncSet li2.core 0 2 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.core li3 _ _ (Step.makeEligible li3.core 0 2 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.learn li4p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (InstantLeaseStep.learn li4 1 (by decide))) <|
   .stepL (.step (InstantLeaseStep.tick lq5)) <| .stepL (.step (InstantLeaseStep.tick lq6)) <|
   .stepL (.step (InstantLeaseStep.tick lq7)) <| .stepL (.step (InstantLeaseStep.tick lq8)) <|

@@ -381,7 +381,7 @@ theorem deposed_not_leaseValid {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin)
     (hv : (a.core.localCfg p).epoch < a.core.cfg.epoch) : ¬ PrimLeaseValid P a p := by
   intro hL
   obtain ⟨t, htp, hel, _, hpl⟩ := h.deposed p hp hv
-  have := hL t hel htp
+  have := hL t (Or.inl hel) htp
   unfold HolderValid at this
   split at this
   · exact this
@@ -759,7 +759,7 @@ theorem leaseInvariant_makeEligible {p r : Node} (hp : ThinksPrimary a.core p)
   drop := drop_mono h rfl rfl rfl (fun _ _ e => e) (fun _ hm => ⟨hm, id⟩) }
 
 /-- The replication actions whose lease effects, if any, travel as lease messages. -/
-theorem leaseInvariant_core {m : Nat} {μ : Action Node} {c : State Node} (hs : Step m a.core μ c)
+theorem leaseInvariant_core {m : Nat} {μ : Action Node} {c : State Node} (hs : StepA m a.core μ c)
     (hpl : μ.isCore = true) : LeaseInvariant P (withCore a c) := by
   obtain ⟨hcore, hrcore⟩ := invariants_step h.core h.rcore hs
   have hkeep : ∀ x, a.core.log x <+: a.core.log x := fun _ => List.prefix_refl _
@@ -1523,19 +1523,24 @@ theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a
       exact absurd hq (hcb _ hm hc).2.2 } }
 
 /-- A full resync: the replica's committed view starts over and its connections close. -/
-theorem leaseInvariant_resync {r : Node} (hne : primaryOf a.core r ≠ r)
-    (hsy : a.core.sync (primaryOf a.core r) r = false)
-    (hke : (a.core.localCfg (primaryOf a.core r)).eligible r = false) :
+theorem leaseInvariant_resyncOf {r : Node} (hne : primaryOf a.core r ≠ r)
+    (hsy : a.core.sync (primaryOf a.core r) r = false) (hc : Invariant (resync a.core r)) :
     LeaseInvariant P (leaseResync a r) := by
   obtain ⟨hCV, hCH⟩ := committedView_reset h (c := resync a.core r) r (fun _ e => resync_log_other e) rfl
   obtain ⟨_, hcb, hgle⟩ := bump_facts h (a' := leaseResync a r) (n := r) rfl rfl
-  exact leaseInvariant_frame h (invariant_resync h.core r hne hsy hke) (h.rcore.resync hne)
+  exact leaseInvariant_frame h hc (h.rcore.resync hne)
     (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl) (hnow := rfl) (hPL := rfl)
     (hAR := rfl) (hAE := fun _ _ _ e => e) (hRL := fun _ _ e => e) (hPS := rfl) (hOE := rfl)
     (fun _ hm => hm) (fun msg hm hc => (hcb msg hm hc).1) hgle
     (fun msg hm hc => (resync_commit_other (s := a.core) (hcb msg hm hc).2.1).ge)
     (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe hCV hCH
     (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun msg hm => ⟨hm, fun hc => (hcb msg hm hc).1⟩))
+
+theorem leaseInvariant_resync {r : Node} (hne : primaryOf a.core r ≠ r)
+    (hsy : a.core.sync (primaryOf a.core r) r = false)
+    (hke : (a.core.localCfg (primaryOf a.core r)).eligible r = false) :
+    LeaseInvariant P (leaseResync a r) :=
+  leaseInvariant_resyncOf h hne hsy (invariant_resync h.core r hne hsy hke)
 
 /-! ### Restarts -/
 
@@ -1788,7 +1793,7 @@ end preserve
 
 /-- Every lease-layer step preserves the invariant, given `margin ≥ 2 · drift`. -/
 theorem leaseInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}
-    {a a' : LeaseState Node} {μ : LeaseAction Node} (h : LeaseInvariant P a) (hs : LeaseStep m P a μ a') :
+    {a a' : LeaseState Node} {μ : LeaseAction Node} (h : LeaseInvariant P a) (hs : LeaseStepA m P a μ a') :
     LeaseInvariant P a' := by
   cases hs with
   | tick => exact leaseInvariant_tick h
@@ -1803,6 +1808,10 @@ theorem leaseInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m
   | demote p r hp hkl hel hw => exact leaseInvariant_demote hM h hp hkl hel hw
   | takeover n hkl hel hnp hin hwait => exact leaseInvariant_takeover h hkl hel hnp hin hwait
   | resync r hne hsy hke => exact leaseInvariant_resync h hne hsy hke
+  | resyncStale r hne hsy hna =>
+    refine leaseInvariant_resyncOf h hne hsy (invariant_resyncOf h.core r hne hsy ⟨?_, fun he hi' => hna ⟨Or.inl he, hi'⟩, ?_⟩)
+    · intro e; apply hne; show (a.core.localCfg r).primary = r; rw [e, h.core.primKnows]
+    · intro x hx e; subst e; exact hne hx.1
   | restartEmpty n hkl hsurv => exact leaseInvariant_restartEmpty h hkl hsurv
   | restartKeep n hkl => exact leaseInvariant_restartKeep h hkl
   | restartPartialKeep n k hkl hk hkeep => exact leaseInvariant_restartPartialKeep h hkl hk hkeep
@@ -1811,25 +1820,198 @@ theorem leaseInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m
   | deliverDropRequest p r g t hm hc => exact leaseInvariant_deliverDropRequest h hm hc
   | deliverDropConfirm r p g t hm hc hno => exact leaseInvariant_deliverDropConfirm h hm hc hno
 
-/-- The invariant holds in every reachable state. -/
+/-! ## Two-step promotion: the lease layer refines its atomic form
+
+`leaseSim a L` is `a` with its replication state seen by the atomic model
+(`simState`, `Preserve/Promotion.lean`). Every lease step from `a` is a step of
+`LeaseStepA` from `leaseSim a L`, except Learn of an outcome the atomic model already
+knows, which only restarts the learner's takeover timer. -/
+
+/-- The lease state as the atomic model sees it. -/
+def leaseSim (a : LeaseState Node) (L : Node → Cfg Node) : LeaseState Node := { a with core := simState a.core L }
+
+section sim
+variable {P : LeaseParams} {a : LeaseState Node} {L : Node → Cfg Node} (hP : PromSim a.core L)
+include hP
+
+/-- What the primary needs a lease from, the atomic model's primary needs one from too:
+its eligible replicas and its candidate. -/
+theorem PromSim.primLeaseValid {p : Node} (hv : PrimLeaseValid P a p) : PrimLeaseValid P (leaseSim a L) p := by
+  intro x hx hxp
+  rcases hx with hx | hx
+  · exact hv x (hP.eligL hx) hxp
+  · exact absurd hx (by simp [leaseSim, simState])
+
+theorem PromSim.mayGrant {p r : Node} (hg : MayGrant P a p r) : MayGrant P (leaseSim a L) p r :=
+  ⟨hP.primLeaseValid hg.1, hg.2.1, hP.elig hg.2.2.1,
+    by show (L p).incarnation r = _; rw [hP.inc hg.2.2.1]; exact hg.2.2.2⟩
+
+theorem PromSim.primCanRead {p : Node} (hc : PrimCanRead P a p) : PrimCanRead P (leaseSim a L) p :=
+  ⟨(hP.thinksPrimary p).2 hc.1, hP.primLeaseValid hc.2.1, hc.2.2⟩
+
+theorem PromSim.replCanRead {r : Node} (hc : ReplCanRead P a r) : ReplCanRead P (leaseSim a L) r :=
+  ⟨fun ht => hc.1 ((hP.thinksPrimary r).1 ht), hc.2.1, hc.2.2⟩
+
+end sim
+
+/-- Restarting a node's takeover timer keeps the invariant. -/
+theorem leaseInvariant_bumpTraffic {P : LeaseParams} {b : LeaseState Node} (h : LeaseInvariant P b) (n : Node) :
+    LeaseInvariant P { b with primaryTraffic := update b.primaryTraffic n b.now } :=
+  leaseInvariant_frame h h.core h.rcore (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl) (hnow := rfl) (hPL := rfl)
+    (hAR := rfl) (hAE := fun _ _ _ e => e) (hRL := fun _ _ e => e) (hPS := rfl) (hOE := rfl)
+    (fun _ hm => hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
+    (primaryTraffic_bump h n) (fun r => Nat.le_trans (h.dataSentLe r) (primaryTraffic_bump h n r).1)
+    h.committedViewLen h.committedViewHist
+    (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun msg hm => ⟨hm, id⟩))
+
+/-- Every lease step is a step of `LeaseStepA` on the atomic model's view, or (Learn of an
+outcome the atomic model already knows) restarts the learner's takeover timer there. -/
+theorem PromSim.leaseStep {P : LeaseParams} {m : Nat}
+    {a a' : LeaseState Node} {μ : LeaseAction Node} {L : Node → Cfg Node} (hP : PromSim a.core L)
+    (hi : Invariant (simState a.core L)) (hs : LeaseStep m P a μ a') :
+    ∃ L', PromSim a'.core L' ∧ (LeaseStepA m P (leaseSim a L) μ (leaseSim a' L') ∨
+      ∃ n, μ = .learn n ∧ leaseSim a' L' =
+        { leaseSim a L with primaryTraffic := update (leaseSim a L).primaryTraffic n (leaseSim a L).now }) := by
+  have htp := hP.thinksPrimary
+  have hpo : ∀ x, primaryOf (leaseSim a L).core x = primaryOf a.core x := hP.primaryOf_eq
+  cases hs with
+  | tick => exact ⟨L, hP, Or.inl (LeaseStepA.tick _)⟩
+  | core μ c hc hpl =>
+    obtain ⟨L', hP', hS | ⟨_, n, hμ⟩⟩ := hP.step hi hc
+    · exact ⟨L', hP', Or.inl (LeaseStepA.core _ μ _ hS hpl)⟩
+    · subst hμ; simp [Action.isCore] at hpl
+  | sendData p r hne hf => exact ⟨L, hP, Or.inl (LeaseStepA.sendData _ p r hne (by rw [hpo]; exact hf))⟩
+  | sendGrant p r hne hf hp hg =>
+    exact ⟨L, hP, Or.inl (LeaseStepA.sendGrant _ p r hne (by rw [hpo]; exact hf) ((htp p).2 hp) (hP.mayGrant hg))⟩
+  | sendAck r hne =>
+    have := LeaseStepA.sendAck (m := m) (P := P) (leaseSim a L) r (by rw [hpo]; exact hne)
+    rw [hpo] at this
+    exact ⟨L, hP, Or.inl this⟩
+  | deliverData p r g t c e hm hc hf ho =>
+    exact ⟨L, hP, Or.inl (LeaseStepA.deliverData _ p r g t c e hm hc (by rw [hpo]; exact hf) ho)⟩
+  | deliverAck r p g t d hm hc => exact ⟨L, hP, Or.inl (LeaseStepA.deliverAck _ r p g t d hm hc)⟩
+  | drop msg hm => exact ⟨L, hP, Or.inl (LeaseStepA.drop _ msg hm)⟩
+  | sendDropRequest p r hne hf hp =>
+    exact ⟨L, hP, Or.inl (LeaseStepA.sendDropRequest _ p r hne (by rw [hpo]; exact hf) ((htp p).2 hp))⟩
+  | deliverDropRequest p r g t hm hc => exact ⟨L, hP, Or.inl (LeaseStepA.deliverDropRequest _ p r g t hm hc)⟩
+  | deliverDropConfirm r p g t hm hc hno => exact ⟨L, hP, Or.inl (LeaseStepA.deliverDropConfirm _ r p g t hm hc hno)⟩
+  | demote p r hp hkl hel hw =>
+    obtain ⟨L', hP', hS | ⟨_, n, hμ⟩⟩ := hP.step hi (Step.makeIneligible (m := m) a.core p r hp hkl hel)
+    · have e := hS.makeIneligible_inv
+      have := LeaseStepA.demote (m := m) (leaseSim a L) p r ((htp p).2 hp) (hP.knows hi hkl) hel hw
+      refine ⟨L', hP', Or.inl ?_⟩
+      show LeaseStepA m P (leaseSim a L) _ { a with core := simState (makeIneligible a.core p r) L' }
+      rw [e]; exact this
+    · cases hμ
+  | learn n hst =>
+    obtain ⟨L', hP', hS | ⟨he, -⟩⟩ := hP.step hi (Step.learn (m := m) a.core n hst)
+    · obtain ⟨e, hk⟩ := hS.learn_inv
+      have := LeaseStepA.learn (m := m) (P := P) (leaseSim a L) n hk
+      have hpr : ((simState a.core L).localCfg n).primary = (a.core.localCfg n).primary := hP.primary n
+      have heq : leaseLearn (leaseSim a L) n = leaseSim (leaseLearn a n) L' := by
+        simp only [leaseLearn, leaseSim, hpr]; rw [← e]; rfl
+      exact ⟨L', hP', Or.inl (heq ▸ this)⟩
+    · refine ⟨L', hP', ?_⟩
+      have hcond : a.core.cfg.primary = (a.core.localCfg n).primary := by
+        by_contra hc
+        have := congrArg (fun x => x.rgen n n) he
+        simp only [simState, learn, if_neg hc, closeInto] at this; simp at this
+      have heq : leaseSim (leaseLearn a n) L' =
+          { leaseSim a L with primaryTraffic := update (leaseSim a L).primaryTraffic n (leaseSim a L).now } := by
+        simp only [leaseSim, leaseLearn, if_pos hcond]; rw [he]
+      exact Or.inr ⟨n, rfl, heq⟩
+  | takeover n hkl hel hnp hin hwait =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.takeover (m := m) a.core n hkl hel hnp hin)
+    · have e := hS.takeover_inv
+      have := LeaseStepA.takeover (m := m) (leaseSim a L) n (hP.knows hi hkl) hel hnp hin hwait
+      have heq : leaseTakeover (leaseSim a L) n = leaseSim (leaseTakeover a n) L' := by
+        simp only [leaseTakeover, leaseSim]; rw [← e]; rfl
+      exact ⟨L', hP', Or.inl (heq ▸ this)⟩
+    · cases hμ
+  | resync r hne hsy hke =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.resync (m := m) a.core r hne hsy hke)
+    · have e := hS.resync_inv
+      have heq : leaseResync (leaseSim a L) r = leaseSim (leaseResync a r) L' := by
+        simp only [leaseResync, leaseSim]; rw [← e]
+      refine ⟨L', hP', Or.inl (heq ▸ ?_)⟩
+      by_cases hc : a.core.proposing (primaryOf a.core r) = some r
+      · rcases hP.stale _ r hc with h1 | h1 | h1
+        · rw [hsy] at h1; exact absurd h1 (by decide)
+        · exact LeaseStepA.resyncStale _ r (by rw [hpo]; exact hne) (by rw [hpo]; exact hsy) h1
+        · exact absurd rfl h1
+      · exact LeaseStepA.resync _ r (by rw [hpo]; exact hne) (by rw [hpo]; exact hsy)
+          (by rw [hpo]; exact hP.notElig' hke hc)
+    · cases hμ
+  | restartEmpty n hkl hsurv =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartEmpty (m := m) a.core n hkl hsurv)
+    · have e := hS.restartEmpty_inv
+      have heq : leaseRestart (leaseSim a L) n (restartEmpty (leaseSim a L).core n) =
+          leaseSim (leaseRestart a n (restartEmpty a.core n)) L' := by
+        simp only [leaseRestart, leaseSim]; rw [← e]
+      exact ⟨L', hP', heq ▸ Or.inl (LeaseStepA.restartEmpty _ n (hP.knows hi hkl) hsurv)⟩
+    · cases hμ
+  | restartKeep n hkl =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartKeep (m := m) a.core n hkl)
+    · have e := hS.restartKeep_inv
+      have heq : leaseRestart (leaseSim a L) n (restartKeep (leaseSim a L).core n) =
+          leaseSim (leaseRestart a n (restartKeep a.core n)) L' := by
+        simp only [leaseRestart, leaseSim]; rw [← e]
+      exact ⟨L', hP', heq ▸ Or.inl (LeaseStepA.restartKeep _ n (hP.knows hi hkl))⟩
+    · cases hμ
+  | restartPartialKeep n k hkl hk hkeep =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartPartialKeep (m := m) a.core n k hkl hk hkeep)
+    · rcases hS.restartPartial_inv with e | e
+      · have heq : leaseRestart (leaseSim a L) n (restartPartialKeep (leaseSim a L).core n k) =
+            leaseSim (leaseRestart a n (restartPartialKeep a.core n k)) L' := by
+          simp only [leaseRestart, leaseSim]; rw [← e]
+        exact ⟨L', hP', heq ▸ Or.inl (LeaseStepA.restartPartialKeep _ n k (hP.knows hi hkl) hk hkeep)⟩
+      · have := congrArg (fun x => x.incarnation n) e
+        simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
+    · cases hμ
+  | restartPartialFresh n k hkl hk hfresh hsurv =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartPartialFresh (m := m) a.core n k hkl hk hfresh hsurv)
+    · rcases hS.restartPartial_inv with e | e
+      · have := congrArg (fun x => x.incarnation n) e
+        simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
+      · have heq : leaseRestart (leaseSim a L) n (restartPartialFresh (leaseSim a L).core n k) =
+            leaseSim (leaseRestart a n (restartPartialFresh a.core n k)) L' := by
+          simp only [leaseRestart, leaseSim]; rw [← e]
+        exact ⟨L', hP', heq ▸ Or.inl (LeaseStepA.restartPartialFresh _ n k (hP.knows hi hkl) hk hfresh hsurv)⟩
+    · cases hμ
+
+theorem leaseInvariant_stepN {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}
+    {a a' : LeaseState Node} {μ : LeaseAction Node} {L : Node → Cfg Node} (hP : PromSim a.core L)
+    (h : LeaseInvariant P (leaseSim a L)) (hs : LeaseStep m P a μ a') :
+    ∃ L', PromSim a'.core L' ∧ LeaseInvariant P (leaseSim a' L') := by
+  obtain ⟨L', hP', hS | ⟨n, -, he⟩⟩ := hP.leaseStep h.core hs
+  · exact ⟨L', hP', leaseInvariant_step hM h hS⟩
+  · exact ⟨L', hP', he ▸ leaseInvariant_bumpTraffic h n⟩
+
+/-- The invariant holds of the atomic model's view of every reachable state. -/
 theorem leaseInvariant_reachable {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m : Nat}
-    {i : Node} {a : LeaseState Node} (h : LeaseReachable m P i a) : LeaseInvariant P a :=
+    {i : Node} {a : LeaseState Node} (h : LeaseReachable m P i a) :
+    ∃ L, PromSim a.core L ∧ LeaseInvariant P (leaseSim a L) :=
   let ⟨_, run⟩ := h
-  LTS.mtrInv_of_trInv (p := LeaseInvariant P) (fun _ _ _ hs h => leaseInvariant_step hM h hs) _ _ _ run
-    (leaseInvariant_init P i)
+  LTS.mtrInv_of_trInv (p := fun a => ∃ L, PromSim a.core L ∧ LeaseInvariant P (leaseSim a L))
+    (fun _ _ _ hs ⟨_, hP, h⟩ => leaseInvariant_stepN hM hP h hs) _ _ _ run
+    ⟨(init i).localCfg, promSim_init i, leaseInvariant_init P i⟩
 
 /-- **No stale linearizable read.** If the clock-drift margin is at least twice the drift
 bound, then in every reachable state, for every `min-sync-replicas` value, any node
 that may serve a linearizable read (a primary holding its lease from every eligible
-replica it knows, or a sync replica holding a read lease, each with nothing
-uncommitted) has exactly the committed history as its log. -/
+replica it knows and from the candidate of a promotion it has in flight, or a sync
+replica holding a read lease, each with nothing uncommitted) has exactly the committed
+history as its log. -/
 theorem noStaleRead {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
-    {a : LeaseState Node} (hReachable : LeaseReachable m P i a) : NoStaleRead P a :=
-  leaseInvariant_noStaleRead hMargin (leaseInvariant_reachable hMargin hReachable)
+    {a : LeaseState Node} (hReachable : LeaseReachable m P i a) : NoStaleRead P a := by
+  obtain ⟨L, hP, h⟩ := leaseInvariant_reachable hMargin hReachable
+  have hn := leaseInvariant_noStaleRead hMargin h
+  exact ⟨fun p hp => hn.1 p (hP.primCanRead hp), fun r hr => hn.2 r (hP.replCanRead hr)⟩
 
 /-- The replication safety theorem also holds of the lease layer's reachable states. -/
 theorem lease_safety {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
     {a : LeaseState Node} (hReachable : LeaseReachable m P i a) : Safety a.core :=
-  invariant_safety (leaseInvariant_reachable hMargin hReachable).core
+  let ⟨L, _, h⟩ := leaseInvariant_reachable hMargin hReachable
+  invariant_safety (s := simState a.core L) h.core
 
 end SyncReplication

@@ -51,7 +51,7 @@ def lk11 := leaseRestartKeepingReadLease lk10 1 (restartEmpty lk10.core 1) -- n1
 
 /-- The run; the label list is its trace. Only `restartEmpty 1` is the weakened action. -/
 theorem restartKeepsReadLease_run : (leaseTransitionSystemRestartKeepsReadLease 0 P0).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .core (.psync 1), .heartbeat 1, .ack 1,
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 0, .learn 1, .core (.psync 1), .heartbeat 1, .ack 1,
      .core (.append 0), .core (.sendData 0 1), .core (.deliver (.data 0 1 1 1 1)),
      .core (.sendAck 1), .core (.deliver (.ack 1 0 1 1)), .core (.commit 0), .heartbeat 1,
      .restartEmpty 1] lk11 :=

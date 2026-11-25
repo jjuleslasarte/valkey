@@ -58,6 +58,18 @@ structure Written where
   client : Nat
   deriving DecidableEq, Repr
 
+/-- A read held on a replica (the whole-keyspace form of dirty key tracking): the operation
+and client, the replica, and the offset, replication ID and log the replica had when it
+ran the read. The read returns that log, as operation ids (`HeldRead.toOp`). -/
+structure HeldRead (Node : Type) where
+  op : Nat
+  client : Nat
+  node : Node
+  offset : Nat
+  replId : Nat
+  entries : List Nat
+  deriving DecidableEq
+
 /-- Client histories: clients are numbered, values are operation ids. -/
 abbrev ClientHistory := History Nat (LogOp Nat) (LogRes Nat)
 
@@ -90,6 +102,8 @@ structure ClientState (Node : Type) [DecidableEq Node] where
   /-- Ghost variable: the operations linearized so far, in order, each with the
   history length at its linearization point. -/
   lin : List (ClientOp × Nat)
+  /-- Reads held on replicas, not yet answered. -/
+  heldReads : List (HeldRead Node)
 
 /-- The reply layer inside a client state. -/
 def ClientState.reply (a : ClientState Node) : ReplyState Node :=
@@ -112,16 +126,30 @@ operation of each new entry, in order, at linearization point `mark`. -/
 def commitsOf (w : List Written) (old new : List Nat) (mark : Nat) : List (ClientOp × Nat) :=
   ((new.drop old.length).zipIdx (old.length + 1)).map fun e => ((entryOf w e.2 e.1).toOp, mark)
 
+/-- The completed read operation of a held read: its value is the log it read, as
+operation ids. -/
+def HeldRead.toOp (g : HeldRead Node) (w : List Written) : ClientOp :=
+  ⟨g.op, g.client, .read, .log (logOps w g.entries)⟩
+
+/-- The held reads linearized when the committed history grows from `old` to `new`: those
+whose log is the new history and was not already within the old one, at point `mark`. -/
+def readsReached (w : List Written) (g : List (HeldRead Node)) (old new : List Nat) (mark : Nat) :
+    List (ClientOp × Nat) :=
+  (g.filter fun x => decide (new = x.entries) && !decide (x.entries <+: old)).map fun x => (x.toOp w, mark)
+
 /-- A lease step's effect on the client state: the new lease state, and every write
-whose entry joined the committed history linearized now. -/
+whose entry joined the committed history linearized now, then every held read whose
+log the committed history has just reached. -/
 def ClientState.withLease (a : ClientState Node) (l : LeaseState Node) : ClientState Node :=
-  { a with lease := l, lin := a.lin ++ commitsOf a.written a.lease.core.hist l.core.hist a.history.length }
+  { a with lease := l, lin := a.lin ++ commitsOf a.written a.lease.core.hist l.core.hist a.history.length ++
+      readsReached a.written a.heldReads a.lease.core.hist l.core.hist a.history.length }
 
 /-- `n` takes a fresh replication ID (the reply layer's `newId`, on the lease layer's
 replication state). -/
 def freshen (l : LeaseState Node) (n : Node) : LeaseState Node :=
   { l with core := { l.core with replId := update l.core.replId n (freshId l.core),
-                                 usedIds := insert (freshId l.core) l.core.usedIds } }
+                                 usedIds := insert (freshId l.core) l.core.usedIds,
+                                 idHist := update l.core.idHist (freshId l.core) (l.core.log n) } }
 
 /-- The lease actions the client layer takes as they are: all but the restarts (which
 take a fresh ID here) and the replication layer's append (which is a client write). -/
@@ -146,6 +174,9 @@ inductive ClientAction (Node : Type)
   | abort (h : Held Node)
   | invokeRead (c : Nat) (n : Node)
   | respondRead (op c : Nat) (n : Node)
+  | holdRead (op c : Nat) (n : Node)
+  | releaseRead (g : HeldRead Node)
+  | abortRead (g : HeldRead Node)
 
 /-- The client layer's step relation. `m` is `min-sync-replicas`, `P` the lease
 parameters. -/
@@ -157,7 +188,8 @@ inductive ClientStep (m : Nat) (P : LeaseParams) : ClientState Node → ClientAc
   /-- A restart, then a fresh replication ID for the restarted node; its held replies
   are dropped with its client connections. -/
   | restart (a μ l n) : (hs : LeaseStep m P a.lease μ l) → (hμ : μ.restarted = some n) →
-      ClientStep m P a (.restart μ) { a with lease := freshen l n, held := dropHeld a.held n }
+      ClientStep m P a (.restart μ) { a with lease := freshen l n, held := dropHeld a.held n,
+                                             heldReads := a.heldReads.filter (fun g => g.node != n) }
   /-- A node takes a fresh replication ID without a restart (the reply layer's `newId`). -/
   | newId (a p) : ClientStep m P a (.newId p) { a with lease := freshen a.lease p }
   /-- Client `c` sends a write; its value is its operation id. -/
@@ -195,9 +227,87 @@ inductive ClientStep (m : Nat) (P : LeaseParams) : ClientState Node → ClientAc
                  reading := a.reading.erase (op, c, n),
                  lin := a.lin ++ [(⟨op, c, .read, .log (logOps a.written (a.lease.core.log n))⟩,
                                    a.history.length)] }
+  /-- A replica that holds a read lease, and has entries it has not been told are
+  committed, runs a read against its log and holds the reply (the whole-keyspace
+  form of dirty key tracking). The held read records the replica's offset, replication ID
+  and log. If the committed history is already that log, the read is linearized now. -/
+  | holdRead (a op c n) : (hr : (op, c, n) ∈ a.reading) →
+      (hNotPrimary : ¬ ThinksPrimary a.lease.core n) → (hLease : ReadLeaseValid P a.lease n) →
+      (hDirty : a.lease.committedView n < (a.lease.core.log n).length) →
+      ClientStep m P a (.holdRead op c n)
+        { a with reading := a.reading.erase (op, c, n),
+                 heldReads := ⟨op, c, n, (a.lease.core.log n).length, a.lease.core.replId n,
+                               a.lease.core.log n⟩ :: a.heldReads,
+                 lin := a.lin ++ readsReached a.written
+                   [⟨op, c, n, (a.lease.core.log n).length, a.lease.core.replId n, a.lease.core.log n⟩]
+                   [] a.lease.core.hist a.history.length }
+  /-- A held read is released once the replica's committed view reaches its offset, and
+  only while the replica still has the replication ID it had when the read ran. -/
+  | releaseRead (a g) : (hm : g ∈ a.heldReads) →
+      (hc : g.offset ≤ a.lease.committedView g.node) →
+      (hId : a.lease.core.replId g.node = g.replId) →
+      ClientStep m P a (.releaseRead g)
+        { a with history := a.history ++ [(g.toOp a.written).res], heldReads := a.heldReads.erase g }
+  /-- A held read whose replica's replication ID has changed is answered UNCOMMITTED: no
+  response event. -/
+  | abortRead (a g) : (hm : g ∈ a.heldReads) → (hId : a.lease.core.replId g.node ≠ g.replId) →
+      ClientStep m P a (.abortRead g) { a with heldReads := a.heldReads.erase g }
+/-- `ClientStep` over `LeaseStepA`: the client layer of the model with atomic promotion. -/
+inductive ClientStepA (m : Nat) (P : LeaseParams) : ClientState Node → ClientAction Node → ClientState Node → Prop
+  | lease (a μ l) : (hs : LeaseStepA m P a.lease μ l) → (hμ : μ.isClientLease = true) →
+      ClientStepA m P a (.lease μ) (a.withLease l)
+  | restart (a μ l n) : (hs : LeaseStepA m P a.lease μ l) → (hμ : μ.restarted = some n) →
+      ClientStepA m P a (.restart μ) { a with lease := freshen l n, held := dropHeld a.held n,
+                                              heldReads := a.heldReads.filter (fun g => g.node != n) }
+  | newId (a p) : ClientStepA m P a (.newId p) { a with lease := freshen a.lease p }
+  | invokeWrite (a c) : ClientStepA m P a (.invokeWrite c)
+      { a with history := a.history ++ [.inv a.nextOp c (.write a.nextOp)],
+               nextOp := a.nextOp + 1, waiting := (a.nextOp, c) :: a.waiting }
+  | append (a p op c) : (hw : (op, c) ∈ a.waiting) → (hp : ThinksPrimary a.lease.core p) →
+      (hW : Writable m a.lease.core p) →
+      ClientStepA m P a (.append p op c)
+        { a with lease := withCore a.lease (appendWrite a.lease.core p),
+                 held := ⟨p, (a.lease.core.log p).length + 1, a.lease.core.replId p⟩ :: a.held,
+                 written := ⟨(a.lease.core.log p).length + 1, a.lease.core.replId p, op, c⟩ :: a.written,
+                 waiting := a.waiting.erase (op, c) }
+  | release (a h x) : (hm : h ∈ a.held) → (hc : h.offset ≤ a.lease.core.commit h.primary) →
+      (hf : ReplyFenced a.lease.core h) → (hx : entryOp a.written h.offset h.replId = some x) →
+      ClientStepA m P a (.release h)
+        { a with held := a.held.erase h, acknowledged := (h.offset, h.replId) :: a.acknowledged,
+                 history := a.history ++ [.res x.op x.client .ok] }
+  | abort (a h) : (hm : h ∈ a.held) → (hf : ¬ ReplyFenced a.lease.core h) →
+      ClientStepA m P a (.abort h) { a with held := a.held.erase h }
+  | invokeRead (a c n) : ClientStepA m P a (.invokeRead c n)
+      { a with history := a.history ++ [.inv a.nextOp c .read],
+               nextOp := a.nextOp + 1, reading := (a.nextOp, c, n) :: a.reading }
+  | respondRead (a op c n) : (hr : (op, c, n) ∈ a.reading) →
+      (hcan : PrimCanRead P a.lease n ∨ ReplCanRead P a.lease n) →
+      ClientStepA m P a (.respondRead op c n)
+        { a with history := a.history ++ [.res op c (.log (logOps a.written (a.lease.core.log n)))],
+                 reading := a.reading.erase (op, c, n),
+                 lin := a.lin ++ [(⟨op, c, .read, .log (logOps a.written (a.lease.core.log n))⟩,
+                                   a.history.length)] }
+  | holdRead (a op c n) : (hr : (op, c, n) ∈ a.reading) →
+      (hNotPrimary : ¬ ThinksPrimary a.lease.core n) → (hLease : ReadLeaseValid P a.lease n) →
+      (hDirty : a.lease.committedView n < (a.lease.core.log n).length) →
+      ClientStepA m P a (.holdRead op c n)
+        { a with reading := a.reading.erase (op, c, n),
+                 heldReads := ⟨op, c, n, (a.lease.core.log n).length, a.lease.core.replId n,
+                               a.lease.core.log n⟩ :: a.heldReads,
+                 lin := a.lin ++ readsReached a.written
+                   [⟨op, c, n, (a.lease.core.log n).length, a.lease.core.replId n, a.lease.core.log n⟩]
+                   [] a.lease.core.hist a.history.length }
+  | releaseRead (a g) : (hm : g ∈ a.heldReads) →
+      (hc : g.offset ≤ a.lease.committedView g.node) →
+      (hId : a.lease.core.replId g.node = g.replId) →
+      ClientStepA m P a (.releaseRead g)
+        { a with history := a.history ++ [(g.toOp a.written).res], heldReads := a.heldReads.erase g }
+  | abortRead (a g) : (hm : g ∈ a.heldReads) → (hId : a.lease.core.replId g.node ≠ g.replId) →
+      ClientStepA m P a (.abortRead g) { a with heldReads := a.heldReads.erase g }
+
 
 /-- The initial state: the lease layer's, no replies, no client events. -/
-def clientInit (i : Node) : ClientState Node := ⟨leaseInit i, [], [], [], 0, [], [], [], []⟩
+def clientInit (i : Node) : ClientState Node := ⟨leaseInit i, [], [], [], 0, [], [], [], [], []⟩
 
 /-- The client layer as a labelled transition system. -/
 def clientTransitionSystem (m : Nat) (P : LeaseParams) : LTS (ClientState Node) (ClientAction Node) where

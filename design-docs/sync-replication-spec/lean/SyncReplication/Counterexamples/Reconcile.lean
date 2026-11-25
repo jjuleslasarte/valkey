@@ -33,7 +33,8 @@ def transitionSystemNoReconcile (m : Nat) : LTS (State N) (Action N) where
 
 def r0 : State N := init 0
 def r1 := addToSyncSet r0 0 1             -- n0 counts n1
-def r2 := makeEligible r1 0 1          -- n1 eligible (epoch 2)
+def r2p := proposeEligible r1 0 1
+def r2 := learn r2p 0          -- n1 eligible (epoch 2)
 def r3 := appendWrite r2 0         -- n0 writes at offset 1
 def r4 := learn r3 1               -- n1 learns epoch 2
 def r5 := applyData (streamNext (reconnect r4 1) 0 1 0) (.data 0 1 1 1 1) 1 1 1   -- n1 copies the write
@@ -42,15 +43,17 @@ def r7 := commitNext r6 0          -- n0 commits: the history is [1]
 def r8 := takeover r7 1            -- n1 takes over (epoch 3) with commit point 0
 def r9 := learn r8 2               -- n2 learns epoch 3 and follows n1
 def r10 := addToSyncSet r9 1 2            -- n1 counts the empty n2: ack 0 ≥ commit 0
-def r11 := makeEligible r10 1 2        -- n2 eligible with an empty log
+def r11p := proposeEligible r10 1 2
+def r11 := learn r11p 1        -- n2 eligible with an empty log
 
 /-- The run; the label list is its trace. Only `addToSyncSet 1 2` is the weakened action. -/
 theorem noReconcile_run : (transitionSystemNoReconcile 1).MTr r0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .append 0, .learn 1, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
+    [.addToSyncSet 0 1, .makeEligible 0 1, .learn 0, .append 0, .learn 1, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
      .sendAck 1, .deliver (.ack 1 0 1 1), .commit 0,
-     .takeover 1, .learn 2, .addToSyncSet 1 2, .makeEligible 1 2] r11 :=
+     .takeover 1, .learn 2, .addToSyncSet 1 2, .makeEligible 1 2, .learn 1] r11 :=
   .stepL (.step (Step.addToSyncSet r0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible r1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.learn r2p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (Step.append r2 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)))) <|
   .stepL (.step (Step.learn r3 1 (by decide))) <|
@@ -65,6 +68,7 @@ theorem noReconcile_run : (transitionSystemNoReconcile 1).MTr r0
   .stepL (.step (Step.learn r8 2 (by decide))) <|
   .stepL (StepNoReconcile.addToSyncSet r9 1 2 (by decide) (by decide) (by decide) (by decide) (by decide)) <|
   .stepL (.step (Step.makeEligible r10 1 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.learn r11p 1 (by unfold KnowsLatest; decide))) <|
   .refl
 
 /-- Reconciliation is needed: without it a reachable state has an authoritative

@@ -67,7 +67,7 @@ def lt22 := withCore lt21 (commitNext lt21.core 1)    -- n1 commits alone: the h
 /-- The run; the label list is its trace. Only `takeover 1` is the weakened action;
 the demotion that follows is a step of the lease layer. -/
 theorem takeoverNoDemotionWait_run : (leaseTransitionSystemTakeoverNoDemotionWait 0 P3).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .core (.addToSyncSet 0 2), .core (.makeEligible 0 2),
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 0, .core (.addToSyncSet 0 2), .core (.makeEligible 0 2), .learn 0,
      .learn 1, .learn 2, .core (.psync 1), .core (.psync 2), .heartbeat 1, .ack 1, .heartbeat 2, .ack 2,
      .tick, .tick, .tick, .tick, .heartbeat 2, .ack 2, .heartbeat 2, .tick,
      .takeover 1, .demote 1 2, .core (.append 1), .core (.commit 1)] lt22 :=
@@ -75,10 +75,12 @@ theorem takeoverNoDemotionWait_run : (leaseTransitionSystemTakeoverNoDemotionWai
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.core li1 _ _ (Step.makeEligible li1.core 0 1 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.learn li2p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (InstantLeaseStep.core li2 _ _ (Step.addToSyncSet li2.core 0 2 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.core li3 _ _ (Step.makeEligible li3.core 0 2 (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.learn li4p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (InstantLeaseStep.learn li4 1 (by decide))) <|
   .stepL (.step (InstantLeaseStep.learn lt5 2 (by decide))) <|
   .stepL (.step (InstantLeaseStep.core lt6 _ _ (Step.psync lt6.core 1 (by decide) (by decide) (by decide)) rfl)) <|

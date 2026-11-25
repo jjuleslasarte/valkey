@@ -186,6 +186,17 @@ structure State (Node : Type) [DecidableEq Node] where
   /-- `stream p r`: the offset of the next entry `p` streams to `r`, and the generation
   of the connection on which `p` accepted `r`'s PSYNC. -/
   stream : Node → Node → Option (Nat × Nat)
+  /-- Ghost variable: `idHist t` is the history written under replication ID `t`: the log
+  of the primary that writes with `t`, as long as one does. Every log is a prefix of the
+  history of its node's ID. No step reads it; an append extends it, and a fresh ID gets
+  the new log of the node that takes it. A restart of a node that is not primary writes
+  the entry for `freshId` too, although it takes no ID; that is harmless, as no node has
+  that ID and the next step that hands it out overwrites the entry. -/
+  idHist : Nat → List Nat
+  /-- `proposing p`: the replica whose promotion `p` has proposed on the cluster bus
+  (MakeEligible) and whose outcome `p` has not yet learned. `p` keeps counting it: it
+  does not drop it from its sync replica set, and its primary lease needs it. -/
+  proposing : Node → Option Node
 
 variable {Node : Type} [DecidableEq Node]
 
@@ -214,6 +225,8 @@ def init (i : Node) : State Node where
   replId2 := fun _ => none
   rnet   := []
   stream := fun _ _ => none
+  idHist := fun _ => []
+  proposing := fun _ => none
 
 /-- `p` thinks it is primary: the configuration `p` knows (which may be stale) names
 `p` as primary, and the incarnation it records for `p` is `p`'s current one. A
@@ -239,7 +252,8 @@ def PrimaryAuthoritative (s : State Node) : Prop := s.cfg.incarnation s.cfg.prim
 /-- `appendWrite s p`: `p` appends one client write to its own log, tagged with its
 current replication ID. Nothing else changes. -/
 def appendWrite (s : State Node) (p : Node) : State Node :=
-  { s with log := update s.log p (s.log p ++ [s.replId p]) }
+  { s with log := update s.log p (s.log p ++ [s.replId p]),
+           idHist := update s.idHist (s.replId p) (s.log p ++ [s.replId p]) }
 
 /-- `replicate s r`: `r` copies the next entry of its primary's log onto its own and adopts
 its primary's replication ID, as a Valkey replica does on sync. -/
@@ -285,11 +299,22 @@ def makeIneligibleCfg (s : State Node) (r : Node) : Cfg Node :=
   { s.cfg with epoch := s.cfg.epoch + 1, eligible := update s.cfg.eligible r false }
 
 /-- `makeEligible s p r`: primary `p` publishes a configuration in which `r` is eligible
-(design §4, promotion step 4, the compare-and-set on the cluster bus). After it, `r`
-counts toward `Writable` and may take over. `p`'s own copy of the configuration changes
-in the same step, so `p` always knows the outcome of its own compare-and-set. -/
+and learns the outcome in the same step: the atomic form of promotion step 4 (design
+§4), which `StepA` uses. The model's MakeEligible is `proposeEligible` followed later by
+Learn; `learn (proposeEligible s p r) p` is this state when `p` is the current primary and
+has no proposal in flight. -/
 def makeEligible (s : State Node) (p r : Node) : State Node :=
   { s with cfg := makeEligibleCfg s r, localCfg := update s.localCfg p (makeEligibleCfg s r) }
+
+/-- `proposeEligible s p r`: primary `p` proposes the compare-and-set on the cluster bus
+that makes `r` eligible (design §4, promotion step 4), and it commits: the latest
+configuration lists `r` as eligible, and `r` may take over. `p`'s own copy of the
+configuration does not change until `p` learns the outcome (Learn); until then
+`proposing p = some r`. Shortcut: a compare-and-set that fails is not modelled
+separately, and the proposal commits at once; upgrade if a failed proposal must be
+told apart from one whose outcome is not yet known. -/
+def proposeEligible (s : State Node) (p r : Node) : State Node :=
+  { s with cfg := makeEligibleCfg s r, proposing := update s.proposing p (some r) }
 
 /-- `makeIneligible s p r`: primary `p` publishes a configuration in which `r` is not
 eligible, and drops `r` from its sync set. -/
@@ -311,6 +336,7 @@ closes; its own replicas stay connected (Valkey's `replicationSetPrimary`). -/
 def learn (s : State Node) (n : Node) : State Node :=
   { s with localCfg := update s.localCfg n s.cfg,
            sync := update s.sync n (if s.cfg.primary = n then s.sync n else fun _ => false),
+           proposing := update s.proposing n none,
            rgen := if s.cfg.primary = (s.localCfg n).primary then s.rgen else closeInto s.rgen n }
 
 /-- `cfg.eligible \ {cfg.primary, n}`: the eligible set after `n` takes over from the
@@ -352,7 +378,7 @@ def takeover (s : State Node) (n : Node) : State Node :=
            inheritedEnd := update s.inheritedEnd n (s.log n).length,
            replId := update s.replId n (freshId s), usedIds := insert (freshId s) s.usedIds,
            replId2 := update s.replId2 n (some (s.replId n, (s.log n).length)),
-           rgen := closeAll s.rgen n }
+           rgen := closeAll s.rgen n, idHist := update s.idHist (freshId s) (s.log n) }
 
 /-- The point a replica must have acknowledged before `p` counts it: `p`'s catch-up
 point while it is still reconciling, otherwise its commit point. -/
@@ -408,7 +434,7 @@ def restartEmpty (s : State Node) (n : Node) : State Node :=
                              else if p = s.cfg.primary then update (s.ackedMax p) n 0 else s.ackedMax p,
            replId := update s.replId n (freshId s), usedIds := insert (freshId s) s.usedIds,
            replId2 := update s.replId2 n none,
-           rgen := closeAll s.rgen n }
+           rgen := closeAll s.rgen n, idHist := update s.idHist (freshId s) [] }
 
 /-- The sync replica set a restarted primary starts from: the replicas that are
 eligible, with a matching recorded incarnation, in the configuration it knows, minus
@@ -456,7 +482,7 @@ def restartKeep (s : State Node) (n : Node) : State Node :=
               then rebuiltSync s n else fun _ => false),
            replId := (restartIds s n (s.log n).length).1, usedIds := (restartIds s n (s.log n).length).2.1,
            replId2 := (restartIds s n (s.log n).length).2.2,
-           rgen := closeAll s.rgen n }
+           rgen := closeAll s.rgen n, idHist := update s.idHist (freshId s) (s.log n) }
 
 /-- `restartPartialKeep s n k`, keeping the incarnation: `n` restarts from a persistence
 file holding only the first `k` entries of its log. Everything else is RestartKeep on
@@ -464,14 +490,16 @@ the truncated log: volatile state lost, catch-up point at the end of what it hol
 sync replica set rebuilt if it is primary. -/
 def restartPartialKeep (s : State Node) (n : Node) (k : Nat) : State Node :=
   { restartKeep s n with log := update s.log n ((s.log n).take k), inheritedEnd := update s.inheritedEnd n k,
-                         replId2 := (restartIds s n k).2.2 }
+                         replId2 := (restartIds s n k).2.2,
+                         idHist := update s.idHist (freshId s) ((s.log n).take k) }
 
 /-- `restartPartialFresh s n k`, taking a new incarnation: RestartEmpty, except that `n` keeps
 the first `k` entries of its log as a starting point for resynchronisation. -/
 def restartPartialFresh (s : State Node) (n : Node) (k : Nat) : State Node :=
   { restartEmpty s n with log := update s.log n ((s.log n).take k),
                           replId := (restartIds s n k).1, usedIds := (restartIds s n k).2.1,
-                          replId2 := (restartIds s n k).2.2 }
+                          replId2 := (restartIds s n k).2.2,
+                          idHist := update s.idHist (freshId s) ((s.log n).take k) }
 
 /-- The actions of the protocol, as labels on steps. Labels make a run readable: a
 counterexample's statement lists its actions in order. They also let the reply and
@@ -531,10 +559,11 @@ inductive InstantStep (m : Nat) : State Node → Action Node → State Node → 
   a deposed primary is fenced only by departed members it lists as eligible, and it
   cannot drop those. -/
   | removeFromSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hInSync : s.sync p r = true) →
-      (hNotLocallyEligible : (s.localCfg p).eligible r = false) → InstantStep m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
+      (hNotLocallyEligible : (s.localCfg p).eligible r = false) →
+      (hNotProposed : s.proposing p ≠ some r) → InstantStep m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
   /-- A primary that knows the latest configuration may make a sync member eligible. -/
   | makeEligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hInSync : s.sync p r = true) →
-      (hNotEligible : s.cfg.eligible r = false) → InstantStep m s (.makeEligible p r) (makeEligible s p r)
+      (hNotEligible : s.cfg.eligible r = false) → InstantStep m s (.makeEligible p r) (proposeEligible s p r)
   /-- A primary that knows the latest configuration may make a replica ineligible. -/
   | makeIneligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hEligible : s.cfg.eligible r = true) →
       InstantStep m s (.makeIneligible p r) (makeIneligible s p r)
@@ -565,6 +594,42 @@ inductive InstantStep (m : Nat) : State Node → Action Node → State Node → 
   | restartPartialFresh (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hMissesAcks : k < s.ackHigh n) →
       (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
       InstantStep m s (.restartPartial n k) (restartPartialFresh s n k)
+
+/-- `InstantStep` with the atomic MakeEligible (`makeEligible`: the primary learns the
+outcome of its compare-and-set in the same step) and RemoveFromSyncSet without the
+keep-counting guard. The proofs establish their invariants for this relation and carry
+them to `InstantStep` by a simulation (`Preserve/Promotion.lean`). -/
+inductive InstantStepA (m : Nat) : State Node → Action Node → State Node → Prop
+  | append (s p) : ThinksPrimary s p → Writable m s p → InstantStepA m s (.append p) (appendWrite s p)
+  | replicate (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
+      (s.log r).length < (s.log (primaryOf s r)).length → InstantStepA m s (.replicate r) (replicate s r)
+  | ack (s r) : primaryOf s r ≠ r → s.log r <+: s.log (primaryOf s r) →
+      s.ackedMax (primaryOf s r) r < (s.log r).length → InstantStepA m s (.ack r) (ack s r)
+  | commit (s p) : (hThinksPrimary : ThinksPrimary s p) → (hWritable : Writable m s p) → (hHasNext : s.commit p < (s.log p).length) →
+      (hAllAcked : ∀ r, s.sync p r = true → s.commit p < s.ackedMax p r) → InstantStepA m s (.commit p) (commitNext s p)
+  | addToSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hNotSelf : r ≠ p) → (hFollows : primaryOf s r = p) →
+      (hNotInSync : s.sync p r = false) → (hCaughtUp : catchUpPoint s p ≤ s.ackedMax p r) →
+      InstantStepA m s (.addToSyncSet p r) (addToSyncSet s p r)
+  | removeFromSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hInSync : s.sync p r = true) →
+      (hNotLocallyEligible : (s.localCfg p).eligible r = false) →  InstantStepA m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
+  | makeEligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hInSync : s.sync p r = true) →
+      (hNotEligible : s.cfg.eligible r = false) → InstantStepA m s (.makeEligible p r) (makeEligible s p r)
+  | makeIneligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hEligible : s.cfg.eligible r = true) →
+      InstantStepA m s (.makeIneligible p r) (makeIneligible s p r)
+  | learn (s n) : (hStale : ¬ KnowsLatest s n) → InstantStepA m s (.learn n) (learn s n)
+  | takeover (s n) : (hKnowsLatest : KnowsLatest s n) → (hEligible : s.cfg.eligible n = true) → (hNotPrimary : n ≠ s.cfg.primary) →
+      (hIncMatches : s.cfg.incarnation n = s.incarnation n) → InstantStepA m s (.takeover n) (takeover s n)
+  | resync (s r) : (hFollowsOther : primaryOf s r ≠ r) → (hDiverged : ¬ (s.log r <+: s.log (primaryOf s r))) →
+      (hNotInSync : s.sync (primaryOf s r) r = false) → (hNotLocallyEligible : (s.localCfg (primaryOf s r)).eligible r = false) →
+      InstantStepA m s (.resync r) (resync s r)
+  | restartEmpty (s n) : (hKnowsLatest : KnowsLatest s n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
+      InstantStepA m s (.restartEmpty n) (restartEmpty s n)
+  | restartKeep (s n) : (hKnowsLatest : KnowsLatest s n) → InstantStepA m s (.restartKeep n) (restartKeep s n)
+  | restartPartialKeep (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hCoversAcks : s.ackHigh n ≤ k) →
+      InstantStepA m s (.restartPartial n k) (restartPartialKeep s n k)
+  | restartPartialFresh (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hMissesAcks : k < s.ackHigh n) →
+      (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
+      InstantStepA m s (.restartPartial n k) (restartPartialFresh s n k)
 
 /-! ### Delayed replication -/
 
@@ -664,9 +729,10 @@ inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
       (hNotInSync : s.sync p r = false) → (hCaughtUp : catchUpPoint s p ≤ s.acked p r) →
       Step m s (.addToSyncSet p r) (addToSyncSet s p r)
   | removeFromSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hInSync : s.sync p r = true) →
-      (hNotLocallyEligible : (s.localCfg p).eligible r = false) → Step m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
+      (hNotLocallyEligible : (s.localCfg p).eligible r = false) →
+      (hNotProposed : s.proposing p ≠ some r) → Step m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
   | makeEligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hInSync : s.sync p r = true) →
-      (hNotEligible : s.cfg.eligible r = false) → Step m s (.makeEligible p r) (makeEligible s p r)
+      (hNotEligible : s.cfg.eligible r = false) → Step m s (.makeEligible p r) (proposeEligible s p r)
   | makeIneligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hEligible : s.cfg.eligible r = true) →
       Step m s (.makeIneligible p r) (makeIneligible s p r)
   | learn (s n) : (hStale : ¬ KnowsLatest s n) → Step m s (.learn n) (learn s n)
@@ -710,6 +776,58 @@ inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
       Step m s (.deliver (.ack r p g off)) (recordAck s (.ack r p g off) p r off)
   /-- A replication message is lost. -/
   | dropMsg (s msg) : (hIn : msg ∈ s.rnet) → Step m s (.dropMsg msg) (loseMsg s msg)
+
+/-- `Step` with the atomic MakeEligible and RemoveFromSyncSet without the keep-counting
+guard, as `InstantStepA` is to `InstantStep`, plus a Resync of a replica that is not
+authoritative though its primary may list it as eligible (`resyncStale`). The model takes
+that step when a candidate restarts with a new incarnation while its promotion is in
+flight: the primary does not yet list it as eligible, and the restart took it out of the
+sync replica set. -/
+inductive StepA (m : Nat) : State Node → Action Node → State Node → Prop
+  | append (s p) : ThinksPrimary s p → Writable m s p → StepA m s (.append p) (appendWrite s p)
+  | commit (s p) : (hThinksPrimary : ThinksPrimary s p) → (hWritable : Writable m s p) → (hHasNext : s.commit p < (s.log p).length) →
+      (hAllAcked : ∀ r, s.sync p r = true → s.commit p < s.acked p r) → StepA m s (.commit p) (commitNext s p)
+  | addToSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hNotSelf : r ≠ p) → (hFollows : primaryOf s r = p) →
+      (hNotInSync : s.sync p r = false) → (hCaughtUp : catchUpPoint s p ≤ s.acked p r) →
+      StepA m s (.addToSyncSet p r) (addToSyncSet s p r)
+  | removeFromSyncSet (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hInSync : s.sync p r = true) →
+      (hNotLocallyEligible : (s.localCfg p).eligible r = false) →  StepA m s (.removeFromSyncSet p r) (removeFromSyncSet s p r)
+  | makeEligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hInSync : s.sync p r = true) →
+      (hNotEligible : s.cfg.eligible r = false) → StepA m s (.makeEligible p r) (makeEligible s p r)
+  | makeIneligible (s p r) : (hThinksPrimary : ThinksPrimary s p) → (hKnowsLatest : KnowsLatest s p) → (hEligible : s.cfg.eligible r = true) →
+      StepA m s (.makeIneligible p r) (makeIneligible s p r)
+  | learn (s n) : (hStale : ¬ KnowsLatest s n) → StepA m s (.learn n) (learn s n)
+  | takeover (s n) : (hKnowsLatest : KnowsLatest s n) → (hEligible : s.cfg.eligible n = true) → (hNotPrimary : n ≠ s.cfg.primary) →
+      (hIncMatches : s.cfg.incarnation n = s.incarnation n) → StepA m s (.takeover n) (takeover s n)
+  | resync (s r) : (hFollowsOther : primaryOf s r ≠ r) →
+      (hNotInSync : s.sync (primaryOf s r) r = false) → (hNotLocallyEligible : (s.localCfg (primaryOf s r)).eligible r = false) →
+      StepA m s (.resync r) (resync s r)
+  | resyncStale (s r) : (hFollowsOther : primaryOf s r ≠ r) →
+      (hNotInSync : s.sync (primaryOf s r) r = false) → (hNotAuthoritative : ¬ IsAuthoritative s r) →
+      StepA m s (.resync r) (resync s r)
+  | restartEmpty (s n) : (hKnowsLatest : KnowsLatest s n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
+      StepA m s (.restartEmpty n) (restartEmpty s n)
+  | restartKeep (s n) : (hKnowsLatest : KnowsLatest s n) → StepA m s (.restartKeep n) (restartKeep s n)
+  | restartPartialKeep (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hCoversAcks : s.ackHigh n ≤ k) →
+      StepA m s (.restartPartial n k) (restartPartialKeep s n k)
+  | restartPartialFresh (s n k) : (hKnowsLatest : KnowsLatest s n) → (hFileShorter : k < (s.log n).length) → (hMissesAcks : k < s.ackHigh n) →
+      (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative s m) →
+      StepA m s (.restartPartial n k) (restartPartialFresh s n k)
+  | psync (s r) : (hFollowsOther : primaryOf s r ≠ r) →
+      (hServes : ServesPsync s (primaryOf s r)) →
+      (hOk : PsyncOk s (primaryOf s r) (s.replId r) (s.log r).length) → StepA m s (.psync r) (reconnect s r)
+  | sendData (s p r k) : (hStream : s.stream p r = some (k, s.rgen p r)) → (hHasNext : k < (s.log p).length) →
+      StepA m s (.sendData p r) (streamNext s p r k)
+  | deliverData (s p r g v rid) : (hIn : RMsg.data p r g v rid ∈ s.rnet) →
+      (hCurrent : (RMsg.data p r g v rid).Current s) → (hFirst : (RMsg.data p r g v rid).First s) →
+      (hFollows : primaryOf s r = p) →
+      StepA m s (.deliver (.data p r g v rid)) (applyData s (.data p r g v rid) r v rid)
+  | sendAck (s r) : (hFollowsOther : primaryOf s r ≠ r) → StepA m s (.sendAck r) (sendAckMsg s r)
+  | deliverAck (s r p g off k) : (hIn : RMsg.ack r p g off ∈ s.rnet) →
+      (hCurrent : (RMsg.ack r p g off).Current s) → (hFirst : (RMsg.ack r p g off).First s) →
+      (hStream : s.stream p r = some (k, g)) →
+      StepA m s (.deliver (.ack r p g off)) (recordAck s (.ack r p g off) p r off)
+  | dropMsg (s msg) : (hIn : msg ∈ s.rnet) → StepA m s (.dropMsg msg) (loseMsg s msg)
 
 /-- The model with instant replication as a labelled transition system. -/
 def instantReplTransitionSystem (m : Nat) : LTS (State Node) (Action Node) where

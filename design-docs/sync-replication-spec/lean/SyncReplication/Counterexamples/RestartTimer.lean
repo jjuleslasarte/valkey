@@ -45,7 +45,8 @@ def leaseTransitionSystemRestartForgetsTimer (m : Nat) (P : LeaseParams) : LTS (
 /-- n0 counts n1. -/
 def forgetTimer1 := withCore l0 (addToSyncSet l0.core 0 1)
 /-- n0 makes n1 eligible. -/
-def forgetTimer2 := withCore forgetTimer1 (makeEligible forgetTimer1.core 0 1)
+def forgetTimer2p := withCore forgetTimer1 (proposeEligible forgetTimer1.core 0 1)
+def forgetTimer2 := leaseLearn forgetTimer2p 0
 /-- n1 learns the configuration. -/
 def forgetTimer3 := leaseLearn forgetTimer2 1
 /-- Time 1. -/
@@ -74,13 +75,14 @@ def forgetTimer13 := withCore forgetTimer12 (commitNext forgetTimer12.core 1)
 /-- The run; the label list is its trace. Only `restartKeep 1` is the weakened action;
 the takeover that follows is a step of the lease layer. -/
 theorem restartForgetsTimer_run : (leaseTransitionSystemRestartForgetsTimer 0 P0).MTr l0
-    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 1, .tick, .tick, .tick, .tick,
+    [.core (.addToSyncSet 0 1), .core (.makeEligible 0 1), .learn 0, .learn 1, .tick, .tick, .tick, .tick,
      .core (.psync 1), .heartbeat 1, .ack 1, .restartKeep 1, .takeover 1, .core (.append 1), .core (.commit 1)]
     forgetTimer13 :=
   .stepL (.step (InstantLeaseStep.core l0 _ _ (Step.addToSyncSet l0.core 0 1 (by decide) (by decide) (by decide)
     (by decide) (by decide)) rfl)) <|
   .stepL (.step (InstantLeaseStep.core forgetTimer1 _ _ (Step.makeEligible forgetTimer1.core 0 1 (by decide)
     (by decide) (by decide) (by decide)) rfl)) <|
+  .stepL (.step (InstantLeaseStep.learn forgetTimer2p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (InstantLeaseStep.learn forgetTimer2 1 (by decide))) <|
   .stepL (.step (InstantLeaseStep.tick forgetTimer3)) <| .stepL (.step (InstantLeaseStep.tick forgetTimer4)) <|
   .stepL (.step (InstantLeaseStep.tick forgetTimer5)) <| .stepL (.step (InstantLeaseStep.tick forgetTimer6)) <|

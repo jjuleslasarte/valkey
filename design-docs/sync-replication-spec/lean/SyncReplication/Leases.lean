@@ -211,9 +211,11 @@ instance (P : LeaseParams) (now : Nat) (recv : Option Nat) (dur : Nat) :
   unfold GrantorOver; split <;> infer_instance
 
 /-- `p` holds a valid primary lease from every eligible replica in the configuration it
-knows. -/
+knows, and from the replica whose promotion it has proposed and not yet learned the
+outcome of (`proposing`). -/
 def PrimLeaseValid (P : LeaseParams) (a : LeaseState Node) (p : Node) : Prop :=
-  ∀ r, (a.core.localCfg p).eligible r = true → r ≠ p → HolderValid P a.now (a.primaryLease p r) P.primDur
+  ∀ r, ((a.core.localCfg p).eligible r = true ∨ a.core.proposing p = some r) → r ≠ p →
+    HolderValid P a.now (a.primaryLease p r) P.primDur
 
 /-- `r` holds a valid read lease. -/
 def ReadLeaseValid (P : LeaseParams) (a : LeaseState Node) (r : Node) : Prop :=
@@ -518,6 +520,64 @@ inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActio
   | restartPartialFresh (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) →
       (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       LeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialFresh a.core n k))
+/-- `LeaseStep` over `StepA`: the lease layer of the model with atomic promotion, plus
+`StepA.resyncStale`'s Resync. -/
+inductive LeaseStepA (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseAction Node → LeaseState Node → Prop
+  | tick (a) : LeaseStepA m P a .tick (tick a)
+  | core (a μ c) : StepA m a.core μ c → μ.isCore = true → LeaseStepA m P a (.core μ) (withCore a c)
+  | sendData (a p r) : (hNotSelf : p ≠ r) → (hFollows : primaryOf a.core r = p) →
+      LeaseStepA m P a (.sendData p r)
+        (send a (.data p r (a.gen p r) a.now (a.core.commit p) none))
+  | sendGrant (a p r) : (hNotSelf : p ≠ r) → (hFollows : primaryOf a.core r = p) →
+      (hThinksPrimary : ThinksPrimary a.core p) → (hMayGrant : MayGrant P a p r) →
+      LeaseStepA m P a (.sendData p r)
+        (send a (.data p r (a.gen p r) a.now (a.core.commit p) (a.ackEcho p r)))
+  | sendAck (a r) : (hNotSelf : primaryOf a.core r ≠ r) →
+      LeaseStepA m P a (.sendAck r)
+        (send a (.ack r (primaryOf a.core r) (a.gen (primaryOf a.core r) r) a.now (a.dataSent r)))
+  | deliverData (a p r g t c e) : (hIn : Msg.data p r g t c e ∈ a.net) →
+      (hCurrent : (Msg.data p r g t c e).Current a) → (hFollows : primaryOf a.core r = p) →
+      (hStream : StreamOpen a.core p r) →
+      LeaseStepA m P a (.deliver (.data p r g t c e)) (deliverData a (.data p r g t c e) r t c e)
+  | deliverAck (a r p g t d) : (hIn : Msg.ack r p g t d ∈ a.net) →
+      (hCurrent : (Msg.ack r p g t d).Current a) →
+      LeaseStepA m P a (.deliver (.ack r p g t d)) (deliverAck a (.ack r p g t d) r p t d)
+  | drop (a msg) : (hIn : msg ∈ a.net) → LeaseStepA m P a (.drop msg) (dropMsg a msg)
+  | learn (a n) : (hStale : ¬ KnowsLatest a.core n) → LeaseStepA m P a (.learn n) (leaseLearn a n)
+  | demote (a p r) : (hThinksPrimary : ThinksPrimary a.core p) → (hKnowsLatest : KnowsLatest a.core p) → (hEligible : a.core.cfg.eligible r = true) →
+      (hWaited : (GrantorOver P a.now (a.ackReceived p r) P.readDur ∧
+        ∀ T, a.primarySince p = some T → a.oldEligible p r = true →
+          T + P.readDur + P.margin ≤ a.now + P.drift) ∨ a.dropConfirmed p r = true) →
+      LeaseStepA m P a (.demote p r) (withCore a (makeIneligible a.core p r))
+  | sendDropRequest (a p r) : (hNotSelf : p ≠ r) → (hFollows : primaryOf a.core r = p) →
+      (hThinksPrimary : ThinksPrimary a.core p) →
+      LeaseStepA m P a (.sendDropRequest p r) (sendDropRequest a p r)
+  | deliverDropRequest (a p r g t) : (hIn : Msg.dropReq p r g t ∈ a.net) →
+      (hCurrent : (Msg.dropReq p r g t).Current a) →
+      LeaseStepA m P a (.deliver (.dropReq p r g t)) (deliverDropRequest a (.dropReq p r g t) r p)
+  | deliverDropConfirm (a r p g t) : (hIn : Msg.dropAck r p g t ∈ a.net) →
+      (hCurrent : (Msg.dropAck r p g t).Current a) → (hNoAck : a.ackEcho p r = none) →
+      LeaseStepA m P a (.deliver (.dropAck r p g t)) (deliverDropConfirm a (.dropAck r p g t) p r)
+  | takeover (a n) : (hKnowsLatest : KnowsLatest a.core n) → (hEligible : a.core.cfg.eligible n = true) → (hNotPrimary : n ≠ a.core.cfg.primary) →
+      a.core.cfg.incarnation n = a.core.incarnation n →
+      a.primaryTraffic n + P.primDur ≤ a.now + P.drift →
+      LeaseStepA m P a (.takeover n) (leaseTakeover a n)
+  | resync (a r) : primaryOf a.core r ≠ r →
+      a.core.sync (primaryOf a.core r) r = false → (a.core.localCfg (primaryOf a.core r)).eligible r = false →
+      LeaseStepA m P a (.resync r) (leaseResync a r)
+  | resyncStale (a r) : primaryOf a.core r ≠ r →
+      a.core.sync (primaryOf a.core r) r = false → ¬ IsAuthoritative a.core r →
+      LeaseStepA m P a (.resync r) (leaseResync a r)
+  | restartEmpty (a n) : (hKnowsLatest : KnowsLatest a.core n) → (hSurvivor : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      LeaseStepA m P a (.restartEmpty n) (leaseRestart a n (restartEmpty a.core n))
+  | restartKeep (a n) : (hKnowsLatest : KnowsLatest a.core n) →
+      LeaseStepA m P a (.restartKeep n) (leaseRestart a n (restartKeep a.core n))
+  | restartPartialKeep (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hCoversAcks : a.core.ackHigh n ≤ k) →
+      LeaseStepA m P a (.restartPartial n k) (leaseRestart a n (restartPartialKeep a.core n k))
+  | restartPartialFresh (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) →
+      (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
+      LeaseStepA m P a (.restartPartial n k) (leaseRestart a n (restartPartialFresh a.core n k))
+
 
 /-- The lease layer as a labelled transition system. -/
 def leaseTransitionSystem (m : Nat) (P : LeaseParams) : LTS (LeaseState Node) (LeaseAction Node) where

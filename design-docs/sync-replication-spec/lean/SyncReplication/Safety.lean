@@ -18,7 +18,8 @@ and no node has committed an entry that differs from it. This holds for any numb
 of nodes, log length, configuration changes and restarts, provided each restart
 without data leaves some other authoritative node with its data. -/
 theorem safety {m : Nat} {i : Node} {s : State Node} (hReachable : Reachable m i s) : Safety s :=
-  invariant_safety (invariant_reachable hReachable)
+  let ⟨_, _, hi⟩ := invariant_reachable hReachable
+  invariant_safety (s := simState s _) hi
 
 /-- When the current primary commits, an eligible replica with a matching incarnation
 is in its sync replica set, so the commit waited for that replica's acknowledgement.
@@ -31,17 +32,21 @@ theorem commit_two_copies {m : Nat} (hMinSync : 1 ≤ m) {i : Node} {s : State N
     (hAllAcked : ∀ r, s.sync p r = true → s.commit p < s.acked p r) :
     ∃ e, e ≠ p ∧ IsAuthoritative (commitNext s p) e ∧ IsAuthoritative (commitNext s p) p ∧
       (commitNext s p).hist <+: (commitNext s p).log e ∧ (commitNext s p).hist <+: (commitNext s p).log p := by
-  have hi := invariant_reachable hReachable
+  obtain ⟨L, hP, hi⟩ := invariant_reachable hReachable
   have hs' := (safety (hReachable.stepR (Step.commit s p hThinksPrimary hWritable hHasNext hAllAcked))).1
   obtain ⟨r, h1, h2, h3⟩ : (syncEligible s p).Nonempty :=
     Set.one_le_encard_iff_nonempty.mp (le_trans (by exact_mod_cast hMinSync) hWritable)
   subst hCurrent
-  rw [hi.primKnows] at h2 h3
-  have hrp : r ≠ s.cfg.primary := by intro e; rw [e, hi.noSelfSync] at h1; exact absurd h1 (by decide)
-  have har : IsAuthoritative (commitNext s s.cfg.primary) r := ⟨Or.inl h2, h3⟩
+  have hk : L s.cfg.primary = s.cfg := hi.primKnows
+  have h2' : s.cfg.eligible r = true := by rw [← hk]; exact hP.elig h2
+  have h3' : s.cfg.incarnation r = s.incarnation r := by rw [← hk, hP.inc h2]; exact h3
+  have hrp : r ≠ s.cfg.primary := by
+    intro e; have := hi.noSelfSync r; change s.sync r r = false at this
+    rw [← e, this] at h1; exact absurd h1 (by decide)
+  have har : IsAuthoritative (commitNext s s.cfg.primary) r := ⟨Or.inl h2', h3'⟩
   have hap : IsAuthoritative (commitNext s s.cfg.primary) s.cfg.primary := by
     refine ⟨Or.inr rfl, ?_⟩
-    have := hThinksPrimary.2; rw [hi.primKnows] at this; exact this
+    have := hThinksPrimary.2; rw [← hP.incSelf, hk] at this; exact this
   exact ⟨r, hrp, har, hap, hs' r har, hs' _ hap⟩
 
 /-! ## Inherited entries commit first
@@ -58,7 +63,7 @@ theorem commit_step_le {m : Nat} {s s' : State Node} {μ : Action Node} (hs : St
     s'.commit p ≤ s'.inheritedEnd p ∨
       (s'.inheritedEnd p = s.inheritedEnd p ∧ s'.commit p ≤ s.commit p + 1) := by
   cases hs <;>
-    simp only [appendWrite, commitNext, addToSyncSet, removeFromSyncSet, makeEligible,
+    simp only [appendWrite, commitNext, addToSyncSet, removeFromSyncSet, proposeEligible,
       makeIneligible, learn, takeover, resync, restartEmpty, restartKeep, restartPartialKeep,
       restartPartialFresh, reconnect, streamNext, applyData, sendAckMsg, recordAck, loseMsg, update] <;>
     (try split_ifs) <;> (try subst_vars) <;> (try simp only [true_and]) <;> omega

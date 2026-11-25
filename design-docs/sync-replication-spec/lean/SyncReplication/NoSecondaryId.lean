@@ -52,29 +52,41 @@ theorem RInvariant.clearSec {s : State Node} (h : RInvariant s) (n : Node) : RIn
   dataStream := h.dataStream
   ackOk := h.ackOk
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
-    exact ⟨H, { logH := hH.logH, ownH := hH.ownH, streamH := hH.streamH
+    show HistOk _ s.idHist
+    have hH := h.hist
+    exact { logH := hH.logH, ownH := hH.ownH, streamH := hH.streamH,
                 secH := fun x t o hx => by
                   change update s.replId2 n none x = _ at hx
                   by_cases e : x = n
                   · rw [e, update_self] at hx; cases hx
-                  · rw [update_of_ne _ _ e] at hx; exact hH.secH x t o hx }⟩
+                  · rw [update_of_ne _ _ e] at hx; exact hH.secH x t o hx }
 
 theorem invariants_stepNoSecondaryId {m : Nat} {s s' : State Node} {μ : Action Node}
-    (h : Invariant s ∧ RInvariant s) (hs : StepNoSecondaryId m s μ s') : Invariant s' ∧ RInvariant s' := by
+    (h : ∃ L, PromSim s L ∧ Invariant (simState s L) ∧ RInvariant (simState s L))
+    (hs : StepNoSecondaryId m s μ s') :
+    ∃ L, PromSim s' L ∧ Invariant (simState s' L) ∧ RInvariant (simState s' L) := by
+  obtain ⟨L, hP, hi, hr⟩ := h
   cases hs with
-  | step hs _ => exact invariants_step h.1 h.2 hs
+  | step hs _ =>
+    obtain ⟨L', hP', hA | ⟨he, -⟩⟩ := hP.step hi hs
+    · exact ⟨L', hP', invariants_step hi hr hA⟩
+    · exact ⟨L', hP', he ▸ hi, he ▸ hr⟩
   | renew hs hn =>
-    rename_i n
-    obtain ⟨hi, hr⟩ := invariants_step h.1 h.2 hs
-    exact ⟨hi.net_frame _ _ _ _ _ _ _, hr.clearSec n⟩
+    rename_i s'' n
+    obtain ⟨L', hP', hA | ⟨_, n', hμ⟩⟩ := hP.step hi hs
+    · obtain ⟨hi', hr'⟩ := invariants_step hi hr hA
+      exact ⟨L', hP'.frame rfl rfl rfl rfl (fun _ _ _ h => h), hi'.net_frame _ _ _ _ _ _ _, hr'.clearSec n⟩
+    · subst hμ; simp [Action.renewed] at hn
 
 /-- **Without secondary IDs, property 1 still holds.** -/
 theorem noSecondaryId_safety {m : Nat} {i : Node} {s : State Node}
     (h : (transitionSystemNoSecondaryId m).CanReach (init i) s) : Safety s :=
   let ⟨_, run⟩ := h
-  invariant_safety (LTS.mtrInv_of_trInv (p := fun s => Invariant s ∧ RInvariant s)
-    (fun _ _ _ hs h => invariants_stepNoSecondaryId h hs) _ _ _ run ⟨invariant_init i, rInvariant_init i⟩).1
+  let ⟨L, _, hi, _⟩ := LTS.mtrInv_of_trInv
+    (p := fun s => ∃ L, PromSim s L ∧ Invariant (simState s L) ∧ RInvariant (simState s L))
+    (fun _ _ _ hs h => invariants_stepNoSecondaryId h hs) _ _ _ run
+    ⟨(init i).localCfg, promSim_init i, invariant_init i, rInvariant_init i⟩
+  invariant_safety (s := simState s L) hi
 
 /-! ## Without the secondary ID, PSYNC after a takeover is refused
 
@@ -90,13 +102,14 @@ def ns11 := learn ns10 0
 
 theorem ns_run : (transitionSystemNoSecondaryId 0).MTr pk0
     [.append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
-     .addToSyncSet 0 1, .makeEligible 0 1, .learn 1, .takeover 1, .append 1, .learn 0] ns11 :=
+     .addToSyncSet 0 1, .makeEligible 0 1, .learn 0, .learn 1, .takeover 1, .append 1, .learn 0] ns11 :=
   .stepL (.step (Step.append _ 0 (tp2 _ _ rfl rfl) (wr2 _ _)) rfl) <|
   .stepL (.step (Step.psync _ 1 (by decide) (by decide) (by decide)) rfl) <|
   .stepL (.step (Step.sendData _ 0 1 0 (by decide) (by decide)) rfl) <|
   .stepL (.step (Step.deliverData _ 0 1 1 1 1 (by decide) (by decide) (by decide) (by decide)) rfl) <|
   .stepL (.step (Step.addToSyncSet _ 0 1 (tp2 _ _ rfl rfl) (by decide) rfl rfl (by decide)) rfl) <|
-  .stepL (.step (Step.makeEligible _ 0 1 (tp2 _ _ rfl rfl) rfl rfl rfl) rfl) <|
+  .stepL (.step (Step.makeEligible pk6 0 1 (tp2 _ _ rfl rfl) rfl rfl rfl) rfl) <|
+  .stepL (.step (Step.learn pk7p 0 (by unfold KnowsLatest; decide)) rfl) <|
   .stepL (.step (Step.learn _ 1 (by unfold KnowsLatest; decide)) rfl) <|
   .stepL (.renew (Step.takeover _ 1 rfl rfl (by decide) rfl) rfl) <|
   .stepL (.step (Step.append _ 1 (tp2 _ _ rfl rfl) (wr2 _ _)) rfl) <|

@@ -27,3 +27,5 @@ import SyncReplication.ClientProof
 import SyncReplication.ClientNaming
 import SyncReplication.Counterexamples.PsyncRestartId
 import SyncReplication.NoSecondaryId
+import SyncReplication.Counterexamples.HeldReplicaRead
+import SyncReplication.Counterexamples.TwoStepPromotion

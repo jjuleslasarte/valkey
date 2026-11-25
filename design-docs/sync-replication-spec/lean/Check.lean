@@ -52,3 +52,10 @@ import SyncReplication
 #print axioms SyncReplication.psyncFreshId_refused
 #print axioms SyncReplication.noSecondaryId_safety
 #print axioms SyncReplication.noSecondaryId_refuses
+#print axioms SyncReplication.heldReadNoFence_unsafe
+#print axioms SyncReplication.heldReadNoFence_returnsLost
+#print axioms SyncReplication.heldReadNoFence_unsafe_minSync1
+#print axioms SyncReplication.proposeEligible_unsafe
+#print axioms SyncReplication.learn_proposeEligible
+#print axioms SyncReplication.proposeEligible_stale
+#print axioms SyncReplication.heldRead_committed

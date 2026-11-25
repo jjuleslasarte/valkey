@@ -55,7 +55,7 @@ theorem replyInvariant_init (i : Node) : ReplyInvariant (replyInit i) where
 /-- What a replication step other than a restart does to the parts the reply
 invariants read. -/
 theorem step_facts {s s' : State Node} (h : Invariant s) (hr : RInvariant s) (ht : ReplIdsIssued s) {m : Nat} {μ : Action Node}
-    (hs : Step m s μ s') (hμ : μ.isRestart = false) :
+    (hs : StepA m s μ s') (hμ : μ.isRestart = false) :
     s.hist <+: s'.hist ∧ s.usedIds ⊆ s'.usedIds ∧ ReplIdsIssued s' ∧
     ∀ x t, t ∈ s.usedIds → ThinksPrimary s' x → s'.replId x = t →
       ThinksPrimary s x ∧ s.replId x = t ∧ s.log x <+: s'.log x := by
@@ -111,7 +111,7 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (hr : RInvariant s) (ht
       · refine ⟨?_, ?_, List.prefix_refl _⟩
         · unfold ThinksPrimary at hx ⊢; simpa [takeover, update_of_ne _ _ hxn] using hx
         · simpa [takeover, update_of_ne _ _ hxn] using e
-  | resync r hne _ _ =>
+  | resync r hne _ _ | resyncStale r hne _ _ =>
     refine ⟨List.prefix_refl _, Finset.Subset.refl _, ?_, ?_⟩
     · -- the resynced replica takes its primary's replication ID, a used one
       intro x; show update s.replId r (s.replId (primaryOf s r)) x ∈ s.usedIds
@@ -157,7 +157,7 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (hr : RInvariant s) (ht
     exact ⟨List.prefix_refl _, Finset.Subset.refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
 
 theorem replyInvariant_core {a : ReplyState Node} {c : State Node} (h : ReplyInvariant a) {m : Nat} {μ : Action Node}
-    (hs : Step m a.core μ c) (hμ : μ.isRestart = false) :
+    (hs : StepA m a.core μ c) (hμ : μ.isRestart = false) :
     ReplyInvariant ⟨c, a.held, a.acknowledged⟩ := by
   obtain ⟨hh, hv, ht', hx⟩ := step_facts h.core h.rcore h.replIdsIssued hs hμ
   obtain ⟨hc, hrc⟩ := invariants_step h.core h.rcore hs
@@ -229,12 +229,12 @@ theorem replyInvariant_restart {a : ReplyState Node} {c : State Node} (h : Reply
 /-- `p` takes a fresh ID, its log, secondary ID and connections unchanged: the fresh ID
 names `p`'s log, and nothing read before mentions it. -/
 theorem RInvariant.newId {s : State Node} (h : RInvariant s) (p : Node) :
-    RInvariant { s with replId := update s.replId p (freshId s), usedIds := insert (freshId s) s.usedIds } := by
+    RInvariant { s with replId := update s.replId p (freshId s), usedIds := insert (freshId s) s.usedIds, idHist := update s.idHist (freshId s) (s.log p) } := by
   have hne : ∀ x, x ≠ p → update s.replId p (freshId s) x = s.replId x := fun x hx => update_of_ne _ _ hx
   have hdata := dataOn_of_rnet (s := s)
-    (s' := { s with replId := update s.replId p (freshId s), usedIds := insert (freshId s) s.usedIds }) rfl
+    (s' := { s with replId := update s.replId p (freshId s), usedIds := insert (freshId s) s.usedIds, idHist := update s.idHist (freshId s) (s.log p) }) rfl
   have hpend := pend_of_rnet (s := s)
-    (s' := { s with replId := update s.replId p (freshId s), usedIds := insert (freshId s) s.usedIds }) rfl
+    (s' := { s with replId := update s.replId p (freshId s), usedIds := insert (freshId s) s.usedIds, idHist := update s.idHist (freshId s) (s.log p) }) rfl
   exact {
   ackedLeMax := h.ackedLeMax
   ids := fun x => by
@@ -261,13 +261,15 @@ theorem RInvariant.newId {s : State Node} (h : RInvariant s) (p : Node) :
   dataStream := h.dataStream
   ackOk := h.ackOk
   hist := by
-    obtain ⟨H, hH⟩ := h.hist
+    show HistOk _ (update s.idHist (freshId s) (s.log p))
+    have hH := h.hist
+    set H := s.idHist with hHdef
     obtain ⟨hsame, hnew⟩ := fresh_hist h (H := H) (s.log p)
-    refine ⟨update H (freshId s) (s.log p), {
+    refine {
       logH := fun x => ?_
       ownH := fun x hx => ?_
       secH := fun x t o hx => ?_
-      streamH := fun q r k g hs hgg i hi => ?_ }⟩
+      streamH := fun q r k g hs hgg i hi => ?_ }
     · show s.log x <+: update H (freshId s) (s.log p) (update s.replId p (freshId s) x)
       by_cases hx : x = p
       · subst hx; rw [update_self, hnew]
@@ -291,7 +293,9 @@ theorem RInvariant.newId {s : State Node} (h : RInvariant s) (p : Node) :
 fence (they can only be aborted), every other reply is unchanged. -/
 theorem replyInvariant_newId {a : ReplyState Node} (h : ReplyInvariant a) (p : Node) :
     ReplyInvariant (newId a p) := by
-  refine ⟨h.core.replId_frame _ _, h.rcore.newId p, ?_, h.acked⟩
+  refine ⟨(h.core.replId_frame (update a.core.replId p (freshId a.core))
+    (insert (freshId a.core) a.core.usedIds)).idHist_frame (update a.core.idHist (freshId a.core) (a.core.log p)),
+    h.rcore.newId p, ?_, h.acked⟩
   intro x hm
   obtain ⟨hb, hf⟩ := h.held x hm
   refine ⟨Finset.mem_insert_of_mem hb, fun ⟨hp, he⟩ => ?_⟩
@@ -301,7 +305,7 @@ theorem replyInvariant_newId {a : ReplyState Node} (h : ReplyInvariant a) (p : N
   · rw [update_of_ne _ _ hx] at he; exact hf ⟨hp, he⟩
 
 theorem replyInvariant_step {a a' : ReplyState Node} (h : ReplyInvariant a) {m : Nat}
-    {μ : ReplyAction Node} (hs : ReplyStep m a μ a') : ReplyInvariant a' := by
+    {μ : ReplyAction Node} (hs : ReplyStepA m a μ a') : ReplyInvariant a' := by
   cases hs with
   | core _ c hc hμ => exact replyInvariant_core h hc hμ
   | write p hp _ => exact replyInvariant_write h hp
@@ -309,32 +313,98 @@ theorem replyInvariant_step {a a' : ReplyState Node} (h : ReplyInvariant a) {m :
   | abort x _ _ => exact replyInvariant_abort h x
   | newId p => exact replyInvariant_newId h p
   | restartEmpty n hkl hsurv =>
-    exact replyInvariant_restart h (invariants_step h.core h.rcore (Step.restartEmpty (m := m) _ n hkl hsurv)) n rfl (Finset.subset_insert _ _) (fun _ e => update_of_ne _ _ e) (by show update _ n _ n ∈ insert _ _; rw [update_self]; exact Finset.mem_insert_self _ _)
+    exact replyInvariant_restart h (invariants_step h.core h.rcore (StepA.restartEmpty (m := m) _ n hkl hsurv)) n rfl (Finset.subset_insert _ _) (fun _ e => update_of_ne _ _ e) (by show update _ n _ n ∈ insert _ _; rw [update_self]; exact Finset.mem_insert_self _ _)
       (fun _ e => restartEmpty_log_other e)
       (fun _ _ hx => (restartEmpty_thinksPrimary (h.core.localCfgEq n hkl) (h.core.incLe n) hx).2)
   | restartKeep n hkl =>
-    exact replyInvariant_restart h (invariants_step h.core h.rcore (Step.restartKeep (m := m) _ n hkl)) n rfl (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) (restartIds_mem _ _ _ (h.replIdsIssued n))
+    exact replyInvariant_restart h (invariants_step h.core h.rcore (StepA.restartKeep (m := m) _ n hkl)) n rfl (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) (restartIds_mem _ _ _ (h.replIdsIssued n))
       (fun _ _ => rfl) (fun _ _ hx => hx)
   | restartPartialKeep n k hkl hk hkeep =>
-    exact replyInvariant_restart h (invariants_step h.core h.rcore (Step.restartPartialKeep (m := m) _ n k hkl hk hkeep)) n
+    exact replyInvariant_restart h (invariants_step h.core h.rcore (StepA.restartPartialKeep (m := m) _ n k hkl hk hkeep)) n
       rfl (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) (restartIds_mem _ _ _ (h.replIdsIssued n)) (fun _ e => restartPartialKeep_log_other e) (fun _ _ hx => hx)
   | restartPartialFresh n k hkl hk hfresh hsurv =>
-    exact replyInvariant_restart h (invariants_step h.core h.rcore (Step.restartPartialFresh (m := m) _ n k hkl hk hfresh hsurv)) n
+    exact replyInvariant_restart h (invariants_step h.core h.rcore (StepA.restartPartialFresh (m := m) _ n k hkl hk hfresh hsurv)) n
       rfl (restartIds_sub _ _ _) (fun _ e => restartIds_other _ _ _ e) (restartIds_mem _ _ _ (h.replIdsIssued n)) (fun _ e => restartPartialFresh_log_other e)
       (fun _ _ hx => (restartPartialFresh_thinksPrimary (h.core.localCfgEq n hkl) (h.core.incLe n) hx).2)
 
+/-! ## Two-step promotion: the reply layer refines its atomic form -/
+
+/-- The reply state as the atomic model sees it. -/
+def replySim (a : ReplyState Node) (L : Node → Cfg Node) : ReplyState Node := ⟨simState a.core L, a.held, a.acknowledged⟩
+
+theorem PromSim.replyFenced {s : State Node} {L : Node → Cfg Node} (hP : PromSim s L) (x : Held Node) :
+    ReplyFenced (simState s L) x ↔ ReplyFenced s x := by
+  unfold ReplyFenced; rw [hP.thinksPrimary]; rfl
+
+theorem replyInvariant_stepN {a a' : ReplyState Node} {L : Node → Cfg Node} (hP : PromSim a.core L)
+    (h : ReplyInvariant (replySim a L)) {m : Nat} {μ : ReplyAction Node} (hs : ReplyStep m a μ a') :
+    ∃ L', PromSim a'.core L' ∧ ReplyInvariant (replySim a' L') := by
+  have hi : Invariant (simState a.core L) := h.core
+  have htp := hP.thinksPrimary
+  have hA : ∀ {μ a'}, ReplyStepA m (replySim a L) μ a' → ReplyInvariant a' := fun hs => replyInvariant_step h hs
+  cases hs with
+  | core _ c hc hμ =>
+    obtain ⟨L', hP', hS | ⟨he, -⟩⟩ := hP.step hi hc
+    · exact ⟨L', hP', hA (ReplyStepA.core _ _ _ hS hμ)⟩
+    · refine ⟨L', hP', ?_⟩
+      show ReplyInvariant ⟨simState c L', a.held, a.acknowledged⟩
+      rw [he]; exact h
+  | write p hp hw =>
+    exact ⟨L, hP.frame rfl rfl rfl rfl (fun _ _ _ e => e), hA (ReplyStepA.write _ p ((htp p).2 hp) (hP.writable hw))⟩
+  | release x hm hc hf =>
+    exact ⟨L, hP, hA (ReplyStepA.release _ x hm hc ((hP.replyFenced x).2 hf))⟩
+  | abort x hm hf =>
+    exact ⟨L, hP, hA (ReplyStepA.abort _ x hm (fun h' => hf ((hP.replyFenced x).1 h')))⟩
+  | newId p =>
+    exact ⟨L, hP.frame rfl rfl rfl rfl (fun _ _ _ e => e), hA (ReplyStepA.newId _ p)⟩
+  | restartEmpty n hkl hsurv =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartEmpty (m := m) a.core n hkl hsurv)
+    · have e := hS.restartEmpty_inv
+      refine ⟨L', hP', ?_⟩
+      show ReplyInvariant ⟨simState (restartEmpty a.core n) L', dropHeld a.held n, a.acknowledged⟩
+      rw [e]; exact hA (ReplyStepA.restartEmpty _ n (hP.knows hi hkl) hsurv)
+    · cases hμ
+  | restartKeep n hkl =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartKeep (m := m) a.core n hkl)
+    · have e := hS.restartKeep_inv
+      refine ⟨L', hP', ?_⟩
+      show ReplyInvariant ⟨simState (restartKeep a.core n) L', dropHeld a.held n, a.acknowledged⟩
+      rw [e]; exact hA (ReplyStepA.restartKeep _ n (hP.knows hi hkl))
+    · cases hμ
+  | restartPartialKeep n k hkl hk hkeep =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartPartialKeep (m := m) a.core n k hkl hk hkeep)
+    · refine ⟨L', hP', ?_⟩
+      rcases hS.restartPartial_inv with e | e
+      · show ReplyInvariant ⟨simState (restartPartialKeep a.core n k) L', dropHeld a.held n, a.acknowledged⟩
+        rw [e]; exact hA (ReplyStepA.restartPartialKeep _ n k (hP.knows hi hkl) hk hkeep)
+      · have := congrArg (fun x => x.incarnation n) e
+        simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
+    · cases hμ
+  | restartPartialFresh n k hkl hk hfresh hsurv =>
+    obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ :=
+      hP.step hi (Step.restartPartialFresh (m := m) a.core n k hkl hk hfresh hsurv)
+    · refine ⟨L', hP', ?_⟩
+      rcases hS.restartPartial_inv with e | e
+      · have := congrArg (fun x => x.incarnation n) e
+        simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
+      · show ReplyInvariant ⟨simState (restartPartialFresh a.core n k) L', dropHeld a.held n, a.acknowledged⟩
+        rw [e]; exact hA (ReplyStepA.restartPartialFresh _ n k (hP.knows hi hkl) hk hfresh hsurv)
+    · cases hμ
+
 theorem replyInvariant_reachable {i : Node} {a : ReplyState Node} {m : Nat} (h : ReplyReachable m i a) :
-    ReplyInvariant a :=
+    ∃ L, PromSim a.core L ∧ ReplyInvariant (replySim a L) :=
   let ⟨_, run⟩ := h
-  LTS.mtrInv_of_trInv (p := ReplyInvariant) (fun _ _ _ hs h => replyInvariant_step h hs) _ _ _ run (replyInvariant_init i)
+  LTS.mtrInv_of_trInv (p := fun a => ∃ L, PromSim a.core L ∧ ReplyInvariant (replySim a L))
+    (fun _ _ _ hs ⟨_, hP, h⟩ => replyInvariant_stepN hP h hs) _ _ _ run
+    ⟨(init i).localCfg, promSim_init i, replyInvariant_init i⟩
 
 /-- No acknowledged write is lost, for any number of nodes, log length, configuration
 changes and restarts, and EVERY min-sync-replicas value `m`, as long as no restart
 without data removes the last authoritative node (survival assumption). -/
 theorem ackSafety {i : Node} {a : ReplyState Node} {m : Nat} (hReachable : ReplyReachable m i a) :
     AckedDurable a ∧ Safety a.core :=
-  let hi := replyInvariant_reachable hReachable
-  ⟨hi.acked, invariant_safety hi.core⟩
+  let ⟨L, _, hi⟩ := replyInvariant_reachable hReachable
+  ⟨hi.acked, invariant_safety (s := simState a.core L) hi.core⟩
 
 /-- Every authoritative node holds every acknowledged write. -/
 theorem ackedHeld {i : Node} {a : ReplyState Node} {m : Nat} (hReachable : ReplyReachable m i a) :

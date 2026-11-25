@@ -31,9 +31,11 @@ def transitionSystemRemoveFromSyncSetElig (m : Nat) : LTS (State N) (Action N) w
 
 def u0 : State N := init 0
 def u1 := addToSyncSet u0 0 1             -- n0 counts n1
-def u2 := makeEligible u1 0 1          -- n1 eligible
+def u2p := proposeEligible u1 0 1
+def u2 := learn u2p 0          -- n1 eligible
 def u3 := addToSyncSet u2 0 2             -- n0 counts n2
-def u4 := makeEligible u3 0 2          -- n2 eligible
+def u4p := proposeEligible u3 0 2
+def u4 := learn u4p 0          -- n2 eligible
 def u5 := appendWrite u4 0         -- n0 writes at offset 1
 def u6 := applyData (streamNext (reconnect u5 2) 0 2 0) (.data 0 2 1 1 1) 2 1 1   -- n2 copies it
 def u7 := recordAck (sendAckMsg u6 2) (.ack 2 0 1 1) 0 2 1                        -- n2 acknowledges
@@ -43,13 +45,15 @@ def u9 := commitNext u8 0          -- n0 commits with n2's acknowledgement only
 /-- The run; the label list is its trace. Only `removeFromSyncSet 0 1` is the weakened action:
 n1 is already eligible. -/
 theorem removeFromSyncSetElig_run : (transitionSystemRemoveFromSyncSetElig 1).MTr u0
-    [.addToSyncSet 0 1, .makeEligible 0 1, .addToSyncSet 0 2, .makeEligible 0 2, .append 0, .psync 2, .sendData 0 2,
+    [.addToSyncSet 0 1, .makeEligible 0 1, .learn 0, .addToSyncSet 0 2, .makeEligible 0 2, .learn 0, .append 0, .psync 2, .sendData 0 2,
      .deliver (.data 0 2 1 1 1), .sendAck 2, .deliver (.ack 2 0 1 1),
      .removeFromSyncSet 0 1, .commit 0] u9 :=
   .stepL (.step (Step.addToSyncSet u0 0 1 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible u1 0 1 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.learn u2p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (Step.addToSyncSet u2 0 2 (by decide) (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.makeEligible u3 0 2 (by decide) (by decide) (by decide) (by decide))) <|
+  .stepL (.step (Step.learn u4p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (Step.append u4 0 (by decide) (writable_one (r := 1) (by decide) (by decide)
     (by decide)))) <|
   .stepL (.step (Step.psync u5 2 (by decide) (by decide) (by decide))) <|

@@ -58,7 +58,7 @@ theorem grow_upd (L : Node → List Nat) (p : Node) (m : List Nat) :
   · rw [update_of_ne _ _ hx]
 
 theorem invariant_append {s : State Node} (h : Invariant s) (p : Node) : Invariant (appendWrite s p) :=
-  invariant_grow h _ (grow_upd s.log p _)
+  (invariant_grow h _ (grow_upd s.log p _)).idHist_frame _
 
 theorem invariant_replicate {s : State Node} (h : Invariant s) (r : Node) : Invariant (replicate s r) :=
   (invariant_grow h _ (grow_upd s.log r _)).replId_frame _ _
@@ -195,14 +195,28 @@ theorem resync_facts :
       change (s.localCfg (primaryOf s r)).eligible r = true at this
       rw [hke] at this; exact absurd this (by decide)
 
-omit hne hsy hke in
+end resync
+
+section resyncOf
+
+/-! Resync of a replica that is not the current primary, is not authoritative, and that no
+node that thinks it is primary is. Resync's guard implies this (`resync_facts`); so does a
+resync of a candidate that restarted with a new incarnation while its promotion was in
+flight (`StepA.resyncStale`). -/
+
+variable {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ r) (hsy : s.sync (primaryOf s r) r = false)
+  (hf : r ≠ s.cfg.primary ∧ (s.cfg.eligible r = true → s.cfg.incarnation r ≠ s.incarnation r) ∧ (∀ x, ThinksPrimary s x → x ≠ r))
+
+include h hne hsy hf
+
+omit hne hsy hf in
 /-- Resync changes no configuration. -/
 theorem config_resync : ConfigInvariant (resync s r) :=
   (h.toConfigInvariant).frame (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl)
 
 /-- `r`'s log becomes a prefix of its primary's and its acknowledgement is reset to 0, so recorded acknowledgements stay real. -/
 theorem repl_resync : ReplInvariant (resync s r) := by
-  obtain ⟨hrprim, hrel, htpne⟩ := resync_facts h r hne hsy hke
+  obtain ⟨hrprim, hrel, htpne⟩ := hf
   have hcl := commit_le_catchUpPoint h (primaryOf s r)
   have hLo : ∀ x, x ≠ r → (resync s r).log x = s.log x := fun _ => resync_log_other
   have hCo : ∀ x, x ≠ r → (resync s r).commit x = s.commit x := fun _ => resync_commit_other
@@ -236,7 +250,7 @@ theorem repl_resync : ReplInvariant (resync s r) := by
     intro q x hq hs
     rw [hCo q (htpne q hq), hAs q x hs]; exact h.syncCommit q x hq hs }
 
-omit hne hke in
+omit hne hf in
 /-- `r` was not counted, so the acknowledgements primaries count are untouched and every
 counted replica stays caught up. -/
 theorem membership_resync : MembershipInvariant (resync s r) := by
@@ -255,7 +269,7 @@ theorem membership_resync : MembershipInvariant (resync s r) := by
 
 /-- `r`'s commit point is capped at its primary's, so its committed prefix is still a prefix of the history. -/
 theorem commit_resync : CommitInvariant (resync s r) := by
-  obtain ⟨hrprim, hrel, htpne⟩ := resync_facts h r hne hsy hke
+  obtain ⟨hrprim, hrel, htpne⟩ := hf
   have hcl := commit_le_catchUpPoint h (primaryOf s r)
   have hcu := catchUpPoint_le_len h (primaryOf s r)
   have hLr := resync_log_self (s := s) (r := r)
@@ -294,15 +308,15 @@ theorem commit_resync : CommitInvariant (resync s r) := by
 /-- `r` is neither a primary nor eligible (`resync_facts`), and no counted acknowledgement
 moves, so every fence and everything it covers is unchanged. -/
 theorem failover_resync : FailoverInvariant (resync s r) := by
-  obtain ⟨hrprim, hrel, htpne⟩ := resync_facts h r hne hsy hke
+  obtain ⟨hrprim, hrel, htpne⟩ := hf
   have hcl := commit_le_catchUpPoint h (primaryOf s r)
   have hLo : ∀ x, x ≠ r → (resync s r).log x = s.log x := fun _ => resync_log_other
   have hAs : ∀ q x, s.sync q x = true → (resync s r).ackedMax q x = s.ackedMax q x :=
     fun _ _ => resync_acked_sync hsy
-  have hnotr : ∀ x, (s.cfg.eligible x = true ∨ x = s.cfg.primary) → x ≠ r := by
-    intro x hx e; subst e
+  have hnotr : ∀ x, IsAuthoritative s x → x ≠ r := by
+    intro x ⟨hx, hi⟩ e; subst e
     rcases hx with hx | hx
-    · rw [hrel] at hx; exact absurd hx (by decide)
+    · exact hrel hx hi
     · exact hrprim hx
   exact {
   stale := by
@@ -313,31 +327,38 @@ theorem failover_resync : FailoverInvariant (resync s r) := by
       (hack := (hAs x)) (hlog := (hLo x hxr)) (hprim := rfl) id
       (fun hq => hF.fenceLeInheritedEnd hq) (fun hq => by rw [hLo _ (Ne.symm hrprim)]; exact hF.primHolds hq)
       (fun hq => hF.primAck hq)
-      (fun m hm hi => Or.inl ⟨hm, hi, hLo m (hnotr m (Or.inl hm)), Nat.le_refl _⟩)
+      (fun m hm hi => Or.inl ⟨hm, hi, hLo m (hnotr m ⟨Or.inl hm, hi⟩), Nat.le_refl _⟩)
   authEx := h.authEx }
 
 /-- `r` is not authoritative (`resync_facts`), and no authoritative node's log moves. -/
 theorem eligibleHoldsCommitted_resync : EligibleHoldsCommitted (resync s r) := by
-  obtain ⟨hrprim, hrel, htpne⟩ := resync_facts h r hne hsy hke
+  obtain ⟨hrprim, hrel, htpne⟩ := hf
   have hcl := commit_le_catchUpPoint h (primaryOf s r)
   have hLo : ∀ x, x ≠ r → (resync s r).log x = s.log x := fun _ => resync_log_other
-  have hnotr : ∀ x, (s.cfg.eligible x = true ∨ x = s.cfg.primary) → x ≠ r := by
-    intro x hx e; subst e
+  have hnotr : ∀ x, IsAuthoritative s x → x ≠ r := by
+    intro x ⟨hx, hi⟩ e; subst e
     rcases hx with hx | hx
-    · rw [hrel] at hx; exact absurd hx (by decide)
+    · exact hrel hx hi
     · exact hrprim hx
-  intro x hx; rw [hLo x (hnotr x hx.1)]; exact h.eligibleHoldsCommitted x hx
+  intro x hx; rw [hLo x (hnotr x hx)]; exact h.eligibleHoldsCommitted x hx
 
 /-- Resync copies the primary's log up to its CatchUpPoint (the inherited log while it
 is unreconciled). -/
-theorem invariant_resync : Invariant (resync s r) where
+theorem invariant_resyncOf : Invariant (resync s r) where
   toConfigInvariant := config_resync h r
-  toReplInvariant := repl_resync h r hne hsy hke
+  toReplInvariant := repl_resync h r hne hsy hf
   toMembershipInvariant := membership_resync h r hsy
-  toCommitInvariant := commit_resync h r hne hsy hke
-  toFailoverInvariant := failover_resync h r hne hsy hke
-  eligibleHoldsCommitted := eligibleHoldsCommitted_resync h r hne hsy hke
+  toCommitInvariant := commit_resync h r hne hsy hf
+  toFailoverInvariant := failover_resync h r hne hsy hf
+  eligibleHoldsCommitted := eligibleHoldsCommitted_resync h r hne hsy hf
 
-end resync
+end resyncOf
+
+theorem invariant_resync {s : State Node} (h : Invariant s) (r : Node) (hne : primaryOf s r ≠ r)
+    (hsy : s.sync (primaryOf s r) r = false) (hke : (s.localCfg (primaryOf s r)).eligible r = false) :
+    Invariant (resync s r) :=
+  let ⟨a, b, c⟩ := resync_facts h r hne hsy hke
+  invariant_resyncOf h r hne hsy ⟨a, fun e => by rw [b] at e; exact absurd e (by decide), c⟩
+
 
 end SyncReplication

@@ -59,7 +59,8 @@ def pk2 := reconnect pk1 1                                      -- n1: PSYNC (1,
 def pk4 := streamNext pk2 0 1 0
 def pk5 := applyData pk4 (.data 0 1 1 1 1) 1 1 1              -- n1: [1]
 def pk6 := addToSyncSet pk5 0 1
-def pk7 := makeEligible pk6 0 1
+def pk7p := proposeEligible pk6 0 1
+def pk7 := learn pk7p 0
 def pk8 := learn pk7 1
 def pk9 := takeover pk8 1                                       -- n1: ID 2, secondary (1, 1)
 def pk10 := appendWrite pk9 1                                   -- n1: [1, 2]
@@ -74,21 +75,23 @@ def pk20 := reconnect pk18 0                                    -- n0: PSYNC (2,
 def pk21 := sendAckMsg pk20 0
 def pk22 := recordAck pk21 (.ack 0 1 5 2) 1 0 2
 def pk23 := addToSyncSet pk22 1 0
-def pk24 := makeEligible pk23 1 0
+def pk24p := proposeEligible pk23 1 0
+def pk24 := learn pk24p 1
 def pk25 := commitNext pk24 1                                   -- history [2]
 
 theorem pk_run : (transitionSystemRestartKeepsId 0).MTr pk0
     [.append 0, .psync 1, .sendData 0 1, .deliver (.data 0 1 1 1 1),
-     .addToSyncSet 0 1, .makeEligible 0 1, .learn 1, .takeover 1, .append 1, .learn 0, .psync 0,
+     .addToSyncSet 0 1, .makeEligible 0 1, .learn 0, .learn 1, .takeover 1, .append 1, .learn 0, .psync 0,
      .sendData 1 0, .deliver (.data 1 0 3 2 2), .restartPartial 1 0,
      .append 1, .append 1, .psync 0, .sendAck 0, .deliver (.ack 0 1 5 2),
-     .addToSyncSet 1 0, .makeEligible 1 0, .commit 1] pk25 :=
+     .addToSyncSet 1 0, .makeEligible 1 0, .learn 1, .commit 1] pk25 :=
   .stepL (.step (Step.append _ 0 (tp2 _ _ rfl rfl) (wr2 _ _))) <|
   .stepL (.step (Step.psync _ 1 (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.sendData _ 0 1 0 (by decide) (by decide))) <|
   .stepL (.step (Step.deliverData _ 0 1 1 1 1 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.addToSyncSet _ 0 1 (tp2 _ _ rfl rfl) (by decide) rfl rfl (by decide))) <|
-  .stepL (.step (Step.makeEligible _ 0 1 (tp2 _ _ rfl rfl) rfl rfl rfl)) <|
+  .stepL (.step (Step.makeEligible pk6 0 1 (tp2 _ _ rfl rfl) rfl rfl rfl)) <|
+  .stepL (.step (Step.learn pk7p 0 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (Step.learn _ 1 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (Step.takeover _ 1 rfl rfl (by decide) rfl)) <|
   .stepL (.step (Step.append _ 1 (tp2 _ _ rfl rfl) (wr2 _ _))) <|
@@ -103,7 +106,8 @@ theorem pk_run : (transitionSystemRestartKeepsId 0).MTr pk0
   .stepL (.step (Step.sendAck _ 0 (by decide))) <|
   .stepL (.step (Step.deliverAck _ 0 1 5 2 2 (by decide) (by decide) (by decide) (by decide))) <|
   .stepL (.step (Step.addToSyncSet _ 1 0 (tp2 _ _ rfl rfl) (by decide) rfl rfl (by decide))) <|
-  .stepL (.step (Step.makeEligible _ 1 0 (tp2 _ _ rfl rfl) rfl rfl rfl)) <|
+  .stepL (.step (Step.makeEligible pk23 1 0 (tp2 _ _ rfl rfl) rfl rfl rfl)) <|
+  .stepL (.step (Step.learn pk24p 1 (by unfold KnowsLatest; decide))) <|
   .stepL (.step (Step.commit _ 1 (tp2 _ _ rfl rfl) (wr2 _ _) (by decide) (fun r h => by revert r; decide))) <|
   .refl
 
