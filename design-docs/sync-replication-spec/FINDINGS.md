@@ -331,6 +331,73 @@ applies before the primary proposes the step-4 compare-and-set, or after it
 learns the compare-and-set failed. Knowing the latest shard configuration is
 not needed in addition.
 
+## Write-ahead replicas: proved with truncation; four rules shown needed, three not needed in the model
+
+The Lean model now has write-ahead replicas beside write-behind ones (design §2): a node
+chooses its mode while it holds nothing; a write-ahead replica logs on arrival, applies
+only up to its committed view, and its reads return what it has applied. Truncation
+(§5, "Truncating a write-ahead replica's log") is part of the proven step relation, under
+this rule: **only a node that acts as primary and has confirmed through the cluster bus
+that it is still primary answers with a truncation offset** (in the model: it thinks it
+is primary and knows the latest configuration). Every theorem covers it: `safety`,
+`ackSafety`, `lease_safety`, `noStaleRead`, `heldRead_committed` and `linearizable`. A
+new theorem, `SyncReplication.appliedCommitted`, shows that what a write-ahead replica
+has applied is always committed. The design's current rule lets any node that thinks it
+is primary answer; the proof does not cover that rule. Counterexamples
+(`Counterexamples/WriteAhead.lean`):
+- **Truncate where the secondary ID ended, not at the new primary's log end**
+  (`SyncReplication.truncAtEnd_unsafe`, 24 steps, min-sync = 1): an eligible replica
+  truncated at the new primary's log end keeps an old entry, acknowledges the new
+  primary's next one, and the commit leaves it without the committed history.
+- **Only a node acting as primary answers with a truncation offset**
+  (`SyncReplication.truncNotPrimary_unsafe`, 12 steps, min-sync = 1): a primary that
+  restarted from an empty file with a new incarnation, still named primary, truncates an
+  eligible replica below a committed write. This is review finding 19, now checked.
+- **A restart applies only up to the applied offset**
+  (`SyncReplication.restartApplies_unsafe`, 6 steps): a restart that applies the whole
+  restored log puts an uncommitted write in the keyspace.
+- **A full sync does not count as applied** (`SyncReplication.resyncSnapshotApplied_unsafe`,
+  16 steps): a write-ahead replica fully resynced during the new primary's reconciliation
+  gets the uncommitted inherited log; counting the snapshot's offset as committed and
+  applied puts it in the keyspace. The design's earlier wording ("resets to the snapshot's
+  offset") allowed this; the fix in progress (reset to the committed offset the primary
+  sends, or 0, and serve nothing until the committed offset passes the snapshot's offset)
+  matches the model, which resets both to 0.
+
+Not needed in the model: **resetting the committed offset on a truncation, or on a full
+resync**. The model's committed view never passes the committed history, and committed
+offsets are never reused across replication histories: a truncation answered by a node
+acting as primary keeps every committed entry, so an old committed view still covers only
+committed entries. In Valkey the committed offset a replica holds is a number in the
+sender's offset space, and offsets are reused after a full resync, so the reset is still
+the safe rule to state; the model cannot tell the two apart.
+
+Not needed in the model: **"never truncate below the applied offset"**. It is implied by
+the answering rule: with the guard removed the whole proof builds, and
+`truncate_applied_le` shows the applied offset is at most the truncation offset (what a
+replica has applied is committed, and the answering node, being the cluster's primary,
+holds the committed history, which no truncation offset cuts into). The real code may
+keep it as a defensive check.
+
+Unproven: **whether the answering node must have confirmed it is still primary**. The
+proof uses that half of the rule; a short search found no counterexample with a deposed
+primary, still thinking it is primary, answering, and none was built.
+
+**Proposed doc changes**, beyond the full-sync fix already in progress:
+- Say what the acknowledged offset drops to on a truncation: to the truncation offset.
+- Say that only a node that acts as primary and has confirmed through the cluster bus
+  that it is still primary answers with a truncation offset; a chained replica (one
+  serving PSYNC to its own replicas) never does.
+- A write-ahead new primary that accepts writes before reconciling must first apply its
+  inherited log; say that it applies the inherited log before accepting writes, or tracks
+  those keys as dirty.
+- A write-ahead replica restarted from a file older than its log should apply up to the
+  smaller of its recorded applied offset and its restored log.
+- Say when the mode may change: the model allows it only on a node that holds nothing.
+- Open Question 6 has a coarse answer the model uses: a write-ahead replica serves a lease
+  read only once its committed offset and its applied offset both reach the end of its
+  log. `linearizable` and `noStaleRead` cover it, truncation included.
+
 ## Two-step promotion: keep counting the candidate until the outcome is known
 
 Design §4, promotion step 4: the primary proposes the cluster-bus compare-and-set that
@@ -682,6 +749,72 @@ reaches the replica's log end when the read ran, which is the design's rule for
 keyspace-wide reads (section 1). The rule costs availability: a replica that reconnects
 to a new primary with PSYNC after a failover keeps its data but takes the new ID with
 the next streamed entry, so a held read not released by then is answered `UNCOMMITTED`.
+
+## Reads after a full sync or a restart
+
+A full sync from a primary that is still reconciling carries the whole log the primary
+inherited, past its committed offset (section 5, "Reconciliation"). A file restored after
+a restart can hold writes that never committed too: an AOF holds every write the node
+applied. The design tracks dirty keys in memory and marks a key when a write modifies it
+(section 1, "Uncommitted key tracking"). Loading a snapshot or a file modifies no key,
+and a restart loses the marks, so without a rule the loaded keys count as clean and
+reads of them are served at once. At bdc9684 the doc has the rule only for write-ahead
+replicas (section 2, "Reads after a full sync"; section 5, "Restarts").
+
+The rule: after a full sync, or a restart with its data, a node holds every read until
+its committed offset, learned in its current replication history, passes the offset it
+loaded: the snapshot's offset, or the offset its restored data covers. This applies to
+write-ahead replicas, write-behind replicas and a restarted primary. Writes the node
+applies after that offset are tracked per key as usual.
+
+Without the rule, in the model: its dirty key tracking is whole-keyspace, so every entry
+past a node's committed view is dirty, and "the loaded keys count as clean" is a node that
+counts what it loaded as committed. Three Lean runs, each in the lease layer with one
+action weakened, at `min-sync-replicas = 0`, end in a linearizable read of a write that
+has not committed, against property 6 (`NoStaleRead`):
+- After a full sync (`resyncCountsSnapshot_stale`, `Counterexamples/ResyncCountsSnapshot.lean`,
+  27 steps): n1 takes over with an inherited write that has not committed; n2 full-syncs
+  from n1 while n1 is reconciling, counts the snapshot as committed, is counted and made
+  eligible, gets a read lease and serves the write. The run's replicas are write-behind; with
+  a write-ahead replica the same gap is `resyncSnapshotApplied_unsafe` ("Write-ahead replicas").
+- After a replica's restart (`restartCountsLoaded_stale`, `Counterexamples/RestartCountsLoaded.lean`,
+  15 steps): n1 acknowledges a write n0 has not committed, restarts with its data, counts
+  it as committed, gets a read lease again and serves the write.
+- After a primary's restart (`restartCountsLoaded_primaryStale`, 12 steps): n0 restarts
+  with a write that has not committed, counts it as committed, regains its primary lease
+  from n1 and serves the write.
+
+What enforces the rule in the model is the read rule, not the model's resets of the
+committed view and offset at a full sync and a restart. A replica serves a linearizable
+read only when its committed view covers its whole log, and the view rises only to its
+primary's committed offset, so it never covers an entry that has not committed. A restart
+that keeps the committed view satisfies property 6 (`noStaleRead_restartKeepsView`,
+`RestartCommittedView.lean`). A full sync that keeps it is argued safe, not proven: the
+source holds the committed history up to the replica's view, or has restarted and sends
+nothing. A restarted primary that keeps its committed offset is not shown unsafe either;
+a scratch build without the reset fails only in the bookkeeping of acknowledgements,
+which the restart resets.
+
+**Proposed doc change:** replace the write-ahead paragraph "Reads after a full sync"
+(section 2) with the rule above for every node, and refer to it from section 1
+("Uncommitted key tracking"), the restart rule in section 5 and the replica rows of
+"Consistency and Durability Properties".
+
+**Async replicas (not modelled).** The doc says async replicas receive the stream only
+up to the committed offset, so they never hold uncommitted writes ("Architecture
+Overview", sections 2 and 4, "Consistency and Durability Properties"). A full sync from a reconciling primary sends
+the whole inherited log, and the doc names no replica type there (section 5,
+"Reconciliation"). An async replica that full-syncs in that window serves uncommitted
+writes to ordinary reads and passes them to its own replicas. A replica that doesn't send
+`REPLCONF CAPA SYNC`, including one running an older Valkey version, is treated as async
+and can't follow a replica-side rule, so the rule belongs on the primary: a primary that
+is still reconciling sends a snapshot past its committed offset only to replicas that
+sent `REPLCONF CAPA SYNC`, and starts the snapshot for any other replica once its
+committed offset reaches the offset the snapshot covers. The cost is that such a replica
+waits until the inherited log commits; no commit waits for it. The Lean model has no
+async replica: any follower may hold uncommitted entries, and only linearizable reads
+are modelled. Modelling it is tracked in
+[valkey-io/valkey#5586](https://github.com/valkey-io/valkey/issues/5586).
 
 ## The acknowledgement record is per connection (a rule the doc should state)
 
