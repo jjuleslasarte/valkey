@@ -29,3 +29,8 @@ import SyncReplication.Counterexamples.PsyncRestartId
 import SyncReplication.NoSecondaryId
 import SyncReplication.Counterexamples.HeldReplicaRead
 import SyncReplication.Counterexamples.TwoStepPromotion
+
+import SyncReplication.Counterexamples.WriteAhead
+import SyncReplication.RestartCommittedView
+import SyncReplication.Counterexamples.RestartCountsLoaded
+import SyncReplication.Counterexamples.ResyncCountsSnapshot

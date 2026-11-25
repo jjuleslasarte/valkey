@@ -223,6 +223,18 @@ theorem PromSim.restartFresh {s s' : State Node} {L : Node → Cfg Node} (hP : P
       · exact Or.inr (Or.inl h1)
       · exact Or.inr (Or.inr h1)
 
+/-- Truncation commutes with the atomic model's view, and its guard carries over. -/
+theorem PromSim.truncate {s : State Node} {L : Node → Cfg Node} (hP : PromSim s L)
+    (hi : Invariant (simState s L)) {r : Node} {k : Nat} (hok : TruncateOk s r k) :
+    PromSim (truncateAt s r k) L ∧ truncateAt (simState s L) r k = simState (truncateAt s r k) L ∧
+      TruncateOk (simState s L) r k := by
+  obtain ⟨hne, htpr, hkl, hsec, hklt⟩ := hok
+  have hpo := hP.primaryOf_eq r
+  refine ⟨hP.frame rfl rfl rfl rfl (fun _ _ _ h => h), ?_, ?_⟩
+  · unfold truncateAt reconnect; rw [show primaryOf (truncLog (simState s L) r k) r = primaryOf s r from hpo]; rfl
+  · exact ⟨by rw [hpo]; exact hne, by rw [hpo]; exact (hP.thinksPrimary _).2 htpr,
+      by rw [hpo]; exact hP.knows hi hkl, by rw [hpo]; exact hsec, hklt⟩
+
 /-! ## Every step of `Step` is a step of `StepA`, or none -/
 
 theorem PromSim.step {m : Nat} {s s' : State Node} {μ : Action Node} {L : Node → Cfg Node}
@@ -459,6 +471,9 @@ theorem PromSim.step {m : Nat} {s s' : State Node} {μ : Action Node} {L : Node 
   | dropMsg msg hin =>
     refine ⟨L, hP.frame rfl rfl rfl rfl (fun _ _ _ h => h), Or.inl ?_⟩
     exact StepA.dropMsg _ msg hin
+  | truncate r k hok =>
+    obtain ⟨hP', heq, hok'⟩ := hP.truncate hi hok
+    exact ⟨L, hP', Or.inl (heq ▸ StepA.truncate _ r k hok')⟩
   | takeover n hkl hel hnp hin =>
     have hnn := hP.none_of_knows hi hkl
     have hne : ∀ x c, s.proposing x = some c → x ≠ n := fun x c hx e => by subst e; rw [hnn] at hx; exact absurd hx (by simp)

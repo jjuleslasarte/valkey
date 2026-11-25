@@ -59,3 +59,12 @@ import SyncReplication
 #print axioms SyncReplication.learn_proposeEligible
 #print axioms SyncReplication.proposeEligible_stale
 #print axioms SyncReplication.heldRead_committed
+#print axioms SyncReplication.truncAtEnd_unsafe
+#print axioms SyncReplication.truncNotPrimary_unsafe
+#print axioms SyncReplication.restartApplies_unsafe
+#print axioms SyncReplication.resyncSnapshotApplied_unsafe
+#print axioms SyncReplication.appliedCommitted
+#print axioms SyncReplication.noStaleRead_restartKeepsView
+#print axioms SyncReplication.restartCountsLoaded_stale
+#print axioms SyncReplication.restartCountsLoaded_primaryStale
+#print axioms SyncReplication.resyncCountsSnapshot_stale

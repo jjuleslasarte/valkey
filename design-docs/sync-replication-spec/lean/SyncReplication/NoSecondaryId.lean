@@ -39,6 +39,13 @@ def transitionSystemNoSecondaryId (m : Nat) : LTS (State Node) (Action Node) whe
 theorem RInvariant.clearSec {s : State Node} (h : RInvariant s) (n : Node) : RInvariant (clearSec s n) where
   ids := h.ids
   ackedLeMax := h.ackedLeMax
+  idHistLe := h.idHistLe
+  switchTail := by
+    intro x t k hx hk
+    change update s.replId2 n none x = _ at hk
+    by_cases e : x = n
+    · rw [e, update_self] at hk; cases hk
+    · rw [update_of_ne _ _ e] at hk; exact h.switchTail x t k hx hk
   secIds := fun x t o hx => by
     change update s.replId2 n none x = _ at hx
     by_cases e : x = n

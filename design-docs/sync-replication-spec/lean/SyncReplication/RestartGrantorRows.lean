@@ -64,7 +64,8 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
     (hkl : KnowsLatest a.core n)
     (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
     (hinc : ∀ x, x ≠ n → c.incarnation x = a.core.incarnation x)
-    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hhist : c.hist = a.core.hist)
+    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hlogn : c.log n <+: a.core.log n)
+    (hhist : c.hist = a.core.hist)
     (hcommit : ∀ x, x ≠ n → c.commit x = a.core.commit x) :
     LeaseInvariant P (leaseRestartKeepGrantorRows a n c) := by
   have hPT := primaryTraffic_bump h n
@@ -138,6 +139,7 @@ theorem leaseInvariant_restartKeepGrantorRows {P : LeaseParams} {a : LeaseState 
     change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := hCV
   committedViewHist := hCH
+  appliedHist := h.appliedHist.restart n rfl hlogn hlog (by show a.core.hist <+: c.hist; rw [hhist])
   sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
   drop := h.drop.frame (congrArg Cfg.primary hcfg) (fun _ _ hd => ⟨hd, rfl⟩) (fun _ _ he => Or.inl he)
     (fun r x hx => (hLS r x hx).2)
@@ -158,11 +160,11 @@ theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift �
     · have e := hS.restartEmpty_inv
       have := leaseInvariant_restartKeepGrantorRows h (invariant_restartEmpty h.core n hkl' hsurv)
         (h.rcore.restartEmpty n) hkl' rfl rfl
-        (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e) rfl
-        (fun _ e => restartEmpty_commit_other e)
+        (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e)
+        (by simp [restartEmpty]) rfl (fun _ e => restartEmpty_commit_other e)
       have heq : leaseRestartKeepGrantorRows (leaseSim a L) n (restartEmpty (leaseSim a L).core n) =
           leaseSim (leaseRestartKeepGrantorRows a n (restartEmpty a.core n)) L' := by
-        simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]
+        simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]; try rfl
       exact ⟨L', hP', heq ▸ this⟩
     · cases hμ
   | restartKeep n hkl =>
@@ -170,11 +172,11 @@ theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift �
     obtain ⟨L', hP', hS | ⟨_, _, hμ⟩⟩ := hP.step hi (Step.restartKeep (m := m) a.core n hkl)
     · have e := hS.restartKeep_inv
       have := leaseInvariant_restartKeepGrantorRows h (invariant_restartKeep h.core n hkl')
-        (h.rcore.restartKeep n) hkl' rfl rfl (fun _ _ => rfl) (fun _ _ => rfl) rfl
+        (h.rcore.restartKeep n) hkl' rfl rfl (fun _ _ => rfl) (fun _ _ => rfl) (List.prefix_refl _) rfl
         (fun _ e => restartKeep_commit_other e)
       have heq : leaseRestartKeepGrantorRows (leaseSim a L) n (restartKeep (leaseSim a L).core n) =
           leaseSim (leaseRestartKeepGrantorRows a n (restartKeep a.core n)) L' := by
-        simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]
+        simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]; try rfl
       exact ⟨L', hP', heq ▸ this⟩
     · cases hμ
   | restartPartialKeep n k hkl hk hkeep =>
@@ -183,10 +185,12 @@ theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift �
     · rcases hS.restartPartial_inv with e | e
       · have := leaseInvariant_restartKeepGrantorRows h (invariant_restartPartialKeep h.core n k hkl' hk hkeep)
           (h.rcore.restartPartialKeep n hk) hkl' rfl rfl (fun _ _ => rfl)
-          (fun _ e => restartPartialKeep_log_other e) rfl (fun _ e => restartKeep_commit_other e)
+          (fun _ e => restartPartialKeep_log_other e)
+          (by simp [restartPartialKeep, restartKeep]; exact List.take_prefix _ _) rfl
+          (fun _ e => restartKeep_commit_other e)
         have heq : leaseRestartKeepGrantorRows (leaseSim a L) n (restartPartialKeep (leaseSim a L).core n k) =
             leaseSim (leaseRestartKeepGrantorRows a n (restartPartialKeep a.core n k)) L' := by
-          simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]
+          simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]; try rfl
         exact ⟨L', hP', heq ▸ this⟩
       · have := congrArg (fun x => x.incarnation n) e
         simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
@@ -200,11 +204,12 @@ theorem leaseInvariant_stepKeepGrantorRows {P : LeaseParams} (hM : 2 * P.drift �
         simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
       · have := leaseInvariant_restartKeepGrantorRows h
           (invariant_restartPartialFresh h.core n k hkl' hsurv hk hfresh) (h.rcore.restartPartialFresh n hk) hkl' rfl rfl
-          (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e) rfl
+          (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e)
+          (by simp [restartPartialFresh, restartEmpty]; exact List.take_prefix _ _) rfl
           (fun _ e => restartEmpty_commit_other e)
         have heq : leaseRestartKeepGrantorRows (leaseSim a L) n (restartPartialFresh (leaseSim a L).core n k) =
             leaseSim (leaseRestartKeepGrantorRows a n (restartPartialFresh a.core n k)) L' := by
-          simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]
+          simp only [leaseRestartKeepGrantorRows, leaseRestart, leaseSim]; rw [← e]; try rfl
         exact ⟨L', hP', heq ▸ this⟩
     · cases hμ
 

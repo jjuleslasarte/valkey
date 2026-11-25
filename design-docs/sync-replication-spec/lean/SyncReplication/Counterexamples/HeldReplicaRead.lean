@@ -149,7 +149,7 @@ theorem hr_run : ∃ a : ClientState N2, NoReadFenceReachable 0 wP 0 a ∧
   -- 4. Client 1 reads from n1; n1 holds the read.
   have r13 := r12.stepR (ClientStepNoReadFence.step (ClientStep.invokeRead _ 1 1))
   have r14 := r13.stepR (ClientStepNoReadFence.step (ClientStep.holdRead _ 1 1 1 (by decide)
-    (by unfold ThinksPrimary; decide) (by unfold ReadLeaseValid; decide) (by decide)))
+    (by unfold ThinksPrimary; decide) rfl (by unfold ReadLeaseValid; decide) (by decide)))
   -- 5. n0 restarts from a file holding none of its log, with a fresh ID.
   have r15 := r14.stepR (ClientStepNoReadFence.step (ClientStep.restart _ (.restartPartial 0 0) _ 0
     (LeaseStep.restartPartialKeep _ 0 0 rfl (by decide) (by decide)) rfl))
@@ -241,7 +241,7 @@ theorem hr_run1 : ∃ a : ClientState N2, NoReadFenceReachable 1 wP 0 a ∧
     (LeaseStep.deliverData _ 0 1 0 0 0 (some 0) (by decide) (by decide) (by decide) (by decide)) rfl))
   have r13 := r12.stepR (ClientStepNoReadFence.step (ClientStep.invokeRead _ 1 1))
   have r14 := r13.stepR (ClientStepNoReadFence.step (ClientStep.holdRead _ 1 1 1 (by decide)
-    (by unfold ThinksPrimary; decide) (by unfold ReadLeaseValid; decide) (by decide)))
+    (by unfold ThinksPrimary; decide) rfl (by unfold ReadLeaseValid; decide) (by decide)))
   -- 5-6 as in `hr_run`: n0 restarts from a file holding none of its log, and demotes n1.
   have r15 := r14.stepR (ClientStepNoReadFence.step (ClientStep.restart _ (.restartPartial 0 0) _ 0
     (LeaseStep.restartPartialKeep _ 0 0 rfl (by decide) (by decide)) rfl))

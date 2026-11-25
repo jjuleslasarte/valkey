@@ -82,6 +82,7 @@ theorem instant_simulates {m : Nat} {P : LeaseParams} {a a' : LeaseState Node} {
   | restartPartialKeep n k hkl hk hkeep => exact ⟨_, .single _ (LeaseStep.restartPartialKeep a n k hkl hk hkeep)⟩
   | restartPartialFresh n k hkl hk hfresh hsurv =>
     exact ⟨_, .single _ (LeaseStep.restartPartialFresh a n k hkl hk hfresh hsurv)⟩
+  | setMode n b hset => exact ⟨_, .single _ (LeaseStep.setMode a n b hset)⟩
 
 /-- A run with instant messages is a run with delayed ones. -/
 theorem instant_mtr {m : Nat} {P : LeaseParams} {a b : LeaseState Node} {μs : List (LeaseAction Node)}

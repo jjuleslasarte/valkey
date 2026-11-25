@@ -161,13 +161,22 @@ structure LeaseState (Node : Type) [DecidableEq Node] where
   has received no acknowledgement from `r` since it asked. `p` may then demote `r`
   without waiting out the lease (a planned demotion, design §4). -/
   dropConfirmed : Node → Node → Bool
+  /-- `writeAhead n`: `n` is a write-ahead replica (design §2): it logs each entry it
+  receives but applies only up to its committed view. Otherwise it is write-behind and
+  applies on arrival. A node chooses its mode while its log is empty (`leaseSetMode`). -/
+  writeAhead : Node → Bool
+  /-- `applied n`: for a write-ahead node, how much of its log it has applied to its
+  keyspace; its reads return that prefix. It never passes the committed view it has been
+  told of, except that a restart keeps it (the file records it) while the view starts over. -/
+  applied : Node → Nat
 
 variable {Node : Type} [DecidableEq Node]
 
 /-- The initial state: the replication model's initial state at time 0, no leases. -/
 def leaseInit (i : Node) : LeaseState Node :=
   ⟨init i, 0, fun _ => 0, fun _ _ => none, fun _ _ => none, fun _ _ => none, fun _ => none,
-   fun _ => 0, fun _ => 0, fun _ => none, fun _ _ => true, [], fun _ _ => 0, fun _ _ => false⟩
+   fun _ => 0, fun _ => 0, fun _ => none, fun _ _ => true, [], fun _ _ => 0, fun _ _ => false,
+   fun _ => false, fun _ => 0⟩
 
 /-- A message is current while its connection has not closed since it was sent. -/
 def Msg.Current (a : LeaseState Node) (m : Msg Node) : Prop :=
@@ -239,7 +248,31 @@ def PrimCanRead (P : LeaseParams) (a : LeaseState Node) (p : Node) : Prop :=
 holds a valid read lease, and has nothing uncommitted (its committed view covers its
 whole log). -/
 def ReplCanRead (P : LeaseParams) (a : LeaseState Node) (r : Node) : Prop :=
-  ¬ ThinksPrimary a.core r ∧ ReadLeaseValid P a r ∧ a.committedView r = (a.core.log r).length
+  ¬ ThinksPrimary a.core r ∧ ReadLeaseValid P a r ∧ a.committedView r = (a.core.log r).length ∧
+    (a.writeAhead r = true → a.applied r = (a.core.log r).length)
+
+/-- What a read on `n` returns: a write-ahead node that does not think it is primary
+returns the prefix of its log it has applied; any other node its log. -/
+def LeaseState.readView (a : LeaseState Node) (n : Node) : List Nat :=
+  if a.writeAhead n = true ∧ ¬ ((a.core.localCfg n).primary = n ∧ (a.core.localCfg n).incarnation n = a.core.incarnation n)
+  then (a.core.log n).take (a.applied n) else a.core.log n
+
+/-- A node that may serve a linearizable read serves its log. -/
+theorem readView_of_canRead {P : LeaseParams} {a : LeaseState Node} {n : Node}
+    (h : PrimCanRead P a n ∨ ReplCanRead P a n) : a.readView n = a.core.log n := by
+  unfold LeaseState.readView
+  split_ifs with hc
+  · rcases h with h | h
+    · exact absurd h.1 hc.2
+    · rw [h.2.2.2 hc.1, List.take_length]
+  · rfl
+
+/-- A write-ahead replica's keyspace holds only committed writes: the prefix it has
+applied is within its log and is a prefix of the committed history (the Consistency
+table's "committed, possibly stale"). -/
+def AppliedCommitted (a : LeaseState Node) : Prop :=
+  ∀ n, a.writeAhead n = true → ¬ ThinksPrimary a.core n →
+    a.applied n ≤ (a.core.log n).length ∧ (a.core.log n).take (a.applied n) <+: a.core.hist
 
 /-- No stale linearizable read: whenever a node may serve one, its log is exactly the
 committed history, so the value it returns is the latest committed value. -/
@@ -263,6 +296,8 @@ def recvData (a : LeaseState Node) (r : Node) (c : State Node) (echo : Option Na
   { a with core := c,
            committedView := update a.committedView r
              (max (a.committedView r) (min (a.core.commit (primaryOf a.core r)) (c.log r).length)),
+           applied := update a.applied r
+             (max (a.applied r) (min (a.core.commit (primaryOf a.core r)) (c.log r).length)),
            primaryTraffic := update a.primaryTraffic r a.now,
            dataSent := update a.dataSent r a.now,
            readLease := match echo with
@@ -300,10 +335,28 @@ def leaseTakeover (a : LeaseState Node) (n : Node) : LeaseState Node :=
            gen := closeAll a.gen n,
            dropConfirmed := update a.dropConfirmed n (fun _ => false) }
 
-/-- A full resync replaces `r`'s data; its committed view starts over. -/
+/-- A full resync replaces `r`'s data; its committed view starts over, and a write-ahead
+replica's applied offset with it: a full sync from a primary may carry writes that have
+not committed, so the replica applies nothing until a `REPLCONF COMMIT` passes them. -/
 def leaseResync (a : LeaseState Node) (r : Node) : LeaseState Node :=
   { a with core := resync a.core r, committedView := update a.committedView r 0,
+           applied := update a.applied r 0,
            gen := closeAll a.gen r }
+
+/-- A write-ahead replica truncates its log at `k`: its committed view resets to its
+applied offset, and its lease connections close as at a full resync. -/
+def leaseTruncate (a : LeaseState Node) (r : Node) (k : Nat) : LeaseState Node :=
+  { a with core := truncateAt a.core r k, committedView := update a.committedView r (a.applied r),
+           gen := closeAll a.gen r }
+
+/-- `n` sets its replica mode; it has applied nothing. -/
+def leaseSetMode (a : LeaseState Node) (n : Node) (b : Bool) : LeaseState Node :=
+  { a with writeAhead := update a.writeAhead n b, applied := update a.applied n 0 }
+
+/-- A node may choose its mode only while it holds nothing and no node counts or lists it:
+its log is empty, it is not the primary, not eligible, and in no sync replica set. -/
+def ModeSettable (s : State Node) (n : Node) : Prop :=
+  s.log n = [] ∧ n ≠ s.cfg.primary ∧ s.cfg.eligible n = false ∧ ∀ p, s.sync p n = false
 
 /-- `n` restarts, with replication state `c` afterwards. Lease state is in memory, so
 `n` loses its leases and its committed view, and its timers start afresh: it has just
@@ -314,6 +367,7 @@ primary a lease from the restart time, matching `primaryTraffic n`. -/
 def leaseRestart (a : LeaseState Node) (n : Node) (c : State Node) : LeaseState Node :=
   { a with core := c,
            committedView := update a.committedView n 0,
+           applied := update a.applied n (min (a.applied n) (c.log n).length),
            primaryLease := update a.primaryLease n (fun _ => none),
            ackReceived := update a.ackReceived n (fun _ => none),
            ackEcho := update a.ackEcho n (fun _ => none),
@@ -337,6 +391,7 @@ def deliverData (a : LeaseState Node) (msg : Msg Node) (r : Node) (t c : Nat) (e
     LeaseState Node :=
   { a with net := a.net.erase msg,
            committedView := update a.committedView r (max (a.committedView r) (min c (a.core.log r).length)),
+           applied := update a.applied r (max (a.applied r) (min c (a.core.log r).length)),
            primaryTraffic := update a.primaryTraffic r a.now,
            dataSent := update a.dataSent r t,
            readLease := match e with
@@ -378,7 +433,7 @@ def Action.isCore : Action Node → Bool
   | .makeEligible _ _ => true
   | .psync _ | .sendData _ _ | .sendAck _ | .deliver _ | .dropMsg _ => true
   | .replicate _ | .ack _ | .makeIneligible _ _ | .learn _ | .takeover _ | .resync _
-  | .restartEmpty _ | .restartKeep _ | .restartPartial _ _ => false
+  | .restartEmpty _ | .restartKeep _ | .restartPartial _ _ | .truncate _ _ => false
 
 /-- The actions of the lease layer. -/
 inductive LeaseAction (Node : Type)
@@ -389,6 +444,10 @@ inductive LeaseAction (Node : Type)
   | restartEmpty (n : Node) | restartKeep (n : Node) | restartPartial (n : Node) (k : Nat)
   | sendData (p r : Node) | sendAck (r : Node) | deliver (msg : Msg Node) | drop (msg : Msg Node)
   | sendDropRequest (p r : Node)
+  /-- `n` chooses its replica mode (`sync-replica-mode`). -/
+  | setMode (n : Node) (b : Bool)
+  /-- A write-ahead replica's PSYNC is answered with a truncation offset. -/
+  | truncate (r : Node) (k : Nat)
 
 /-- The lease layer with instant lease messages: every lease message is delivered in the
 step that sends it. `instant_simulates` shows each step is a run of `LeaseStep`. -/
@@ -438,6 +497,7 @@ inductive InstantLeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → Lea
   | restartPartialFresh (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) →
       (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       InstantLeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialFresh a.core n k))
+  | setMode (a n b) : (hSettable : ModeSettable a.core n) → InstantLeaseStep m P a (.setMode n b) (leaseSetMode a n b)
 
 /-- The step relation. `m` is `min-sync-replicas`, `P` the lease parameters. Lease
 messages go through `net`: a send adds one, a delivery takes any current one, in any
@@ -520,6 +580,14 @@ inductive LeaseStep (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActio
   | restartPartialFresh (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) →
       (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       LeaseStep m P a (.restartPartial n k) (leaseRestart a n (restartPartialFresh a.core n k))
+  /-- A node chooses its replica mode while it holds nothing (`ModeSettable`). -/
+  | setMode (a n b) : (hSettable : ModeSettable a.core n) → LeaseStep m P a (.setMode n b) (leaseSetMode a n b)
+  /-- A write-ahead replica's PSYNC is answered with a truncation offset (`TruncateOk`).
+  The design's rule "never truncate below the applied offset" is not a guard here: it
+  always holds (`truncate_applied_le`). -/
+  | truncate (a r k) : (hOk : TruncateOk a.core r k) → (hWriteAhead : a.writeAhead r = true) →
+      LeaseStep m P a (.truncate r k) (leaseTruncate a r k)
+
 /-- `LeaseStep` over `StepA`: the lease layer of the model with atomic promotion, plus
 `StepA.resyncStale`'s Resync. -/
 inductive LeaseStepA (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseAction Node → LeaseState Node → Prop
@@ -577,6 +645,9 @@ inductive LeaseStepA (m : Nat) (P : LeaseParams) : LeaseState Node → LeaseActi
   | restartPartialFresh (a n k) : (hKnowsLatest : KnowsLatest a.core n) → (hFileShorter : k < (a.core.log n).length) → (hMissesAcks : k < a.core.ackHigh n) →
       (∃ m, m ≠ n ∧ IsAuthoritative a.core m) →
       LeaseStepA m P a (.restartPartial n k) (leaseRestart a n (restartPartialFresh a.core n k))
+  | setMode (a n b) : (hSettable : ModeSettable a.core n) → LeaseStepA m P a (.setMode n b) (leaseSetMode a n b)
+  | truncate (a r k) : (hOk : TruncateOk a.core r k) → (hWriteAhead : a.writeAhead r = true) →
+      LeaseStepA m P a (.truncate r k) (leaseTruncate a r k)
 
 
 /-- The lease layer as a labelled transition system. -/

@@ -65,7 +65,8 @@ theorem commit_step_le {m : Nat} {s s' : State Node} {μ : Action Node} (hs : St
   cases hs <;>
     simp only [appendWrite, commitNext, addToSyncSet, removeFromSyncSet, proposeEligible,
       makeIneligible, learn, takeover, resync, restartEmpty, restartKeep, restartPartialKeep,
-      restartPartialFresh, reconnect, streamNext, applyData, sendAckMsg, recordAck, loseMsg, update] <;>
+      restartPartialFresh, reconnect, streamNext, applyData, sendAckMsg, recordAck, loseMsg, truncateAt,
+      truncLog, update] <;>
     (try split_ifs) <;> (try subst_vars) <;> (try simp only [true_and]) <;> omega
 
 /-- Along any run that ends with `p` committed past its inherited log, either `p` was

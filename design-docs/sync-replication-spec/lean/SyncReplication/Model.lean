@@ -517,6 +517,8 @@ inductive Action (Node : Type)
   replica acknowledges; a message arrives; a message is lost. -/
   | psync (r : Node) | sendData (p r : Node) | sendAck (r : Node) | deliver (msg : RMsg Node)
   | dropMsg (msg : RMsg Node)
+  /-- A write-ahead replica's PSYNC is answered with a truncation offset. -/
+  | truncate (r : Node) (k : Nat)
 
 /-- The restart actions. The acknowledgement layer treats them apart from the other
 actions: a node's held replies die with its client connections when it restarts. -/
@@ -524,7 +526,7 @@ def Action.isRestart : Action Node → Bool
   | .restartEmpty _ | .restartKeep _ | .restartPartial _ _ => true
   | .append _ | .replicate _ | .ack _ | .commit _ | .addToSyncSet _ _ | .removeFromSyncSet _ _
   | .makeEligible _ _ | .makeIneligible _ _ | .learn _ | .takeover _ | .resync _
-  | .psync _ | .sendData _ _ | .sendAck _ | .deliver _ | .dropMsg _ => false
+  | .psync _ | .sendData _ _ | .sendAck _ | .deliver _ | .dropMsg _ | .truncate _ _ => false
 
 /-- The step relation with instant replication: Replicate and Ack move a log entry or
 an acknowledged offset in the step that sends it. `m` is `min-sync-replicas`. Each constructor is one
@@ -691,6 +693,31 @@ def reconnect (s : State Node) (r : Node) : State Node :=
              (update (s.stream (primaryOf s r)) r
                (some ((s.log r).length, s.rgen (primaryOf s r) r + 1))) }
 
+/-- The PSYNC a replica `r` sends may be answered with a truncation offset `k` (design §5,
+"Truncating a write-ahead replica's log"). Only a node that acts as primary and has
+confirmed through the cluster bus that it is still primary answers this way: its primary
+thinks it is primary and knows the latest configuration. The replica offers the primary's
+secondary ID, and `k`, where that ID ended on the primary, is before the end of the
+replica's log. The replica's mode (the capability) is checked in the lease layer. -/
+def TruncateOk (s : State Node) (r : Node) (k : Nat) : Prop :=
+  primaryOf s r ≠ r ∧ ThinksPrimary s (primaryOf s r) ∧ KnowsLatest s (primaryOf s r) ∧
+    s.replId2 (primaryOf s r) = some (s.replId r, k) ∧ k < (s.log r).length
+
+/-- `r`'s log cut at `k`: its highest acknowledged offset drops to at most `k` (the entries
+it drops never committed, design §6), its own committed offset is capped at `k`, it drops
+any secondary ID, and every connection with `r` closes, as at a full resync. -/
+def truncLog (s : State Node) (r : Node) (k : Nat) : State Node :=
+  { s with log := update s.log r ((s.log r).take k),
+           ackHigh := update s.ackHigh r (min (s.ackHigh r) k),
+           commit := update s.commit r (min (s.commit r) k),
+           replId2 := update s.replId2 r none,
+           rgen := closeAll s.rgen r }
+
+/-- `truncateAt s r k`: `r` truncates its log at `k`, and its primary accepts its PSYNC
+there (the replica's ID is the primary's secondary ID up to `k`). -/
+def truncateAt (s : State Node) (r : Node) (k : Nat) : State Node :=
+  reconnect (truncLog s r k) r
+
 /-- `p` streams its entry at `k` to `r`. -/
 def streamNext (s : State Node) (p r : Node) (k : Nat) : State Node :=
   { s with rnet := s.rnet ++ [.data p r (s.rgen p r) ((s.log p).getD k 0) (s.replId p)],
@@ -776,6 +803,8 @@ inductive Step (m : Nat) : State Node → Action Node → State Node → Prop
       Step m s (.deliver (.ack r p g off)) (recordAck s (.ack r p g off) p r off)
   /-- A replication message is lost. -/
   | dropMsg (s msg) : (hIn : msg ∈ s.rnet) → Step m s (.dropMsg msg) (loseMsg s msg)
+  /-- A write-ahead replica's PSYNC is answered with a truncation offset. -/
+  | truncate (s r k) : (hOk : TruncateOk s r k) → Step m s (.truncate r k) (truncateAt s r k)
 
 /-- `Step` with the atomic MakeEligible and RemoveFromSyncSet without the keep-counting
 guard, as `InstantStepA` is to `InstantStep`, plus a Resync of a replica that is not
@@ -828,6 +857,7 @@ inductive StepA (m : Nat) : State Node → Action Node → State Node → Prop
       (hStream : s.stream p r = some (k, g)) →
       StepA m s (.deliver (.ack r p g off)) (recordAck s (.ack r p g off) p r off)
   | dropMsg (s msg) : (hIn : msg ∈ s.rnet) → StepA m s (.dropMsg msg) (loseMsg s msg)
+  | truncate (s r k) : (hOk : TruncateOk s r k) → StepA m s (.truncate r k) (truncateAt s r k)
 
 /-- The model with instant replication as a labelled transition system. -/
 def instantReplTransitionSystem (m : Nat) : LTS (State Node) (Action Node) where

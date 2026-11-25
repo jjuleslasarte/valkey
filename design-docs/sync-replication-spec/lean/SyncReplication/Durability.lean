@@ -133,6 +133,12 @@ theorem step_facts {s s' : State Node} (h : Invariant s) (hr : RInvariant s) (ht
     exact ⟨List.prefix_refl _, Finset.Subset.refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
   | sendData p r k _ _ =>
     exact ⟨List.prefix_refl _, Finset.Subset.refl _, ht, fun x _ _ hp e => ⟨hp, e, List.prefix_refl _⟩⟩
+  | truncate r k hok =>
+    refine ⟨List.prefix_refl _, Finset.Subset.refl _, ht, fun x _ _ hx e => ?_⟩
+    have hxr : x ≠ r := fun hxr => by subst hxr; exact hok.1 hx.1
+    refine ⟨hx, e, ?_⟩
+    show s.log x <+: update s.log r _ x
+    rw [update_of_ne _ _ hxr]
   | deliverData p r g v rid hin hcur hf hfol =>
     -- the replica takes the ID the entry was streamed under, a used one; it follows
     -- another node, so it does not think it is primary
@@ -237,6 +243,16 @@ theorem RInvariant.newId {s : State Node} (h : RInvariant s) (p : Node) :
     (s' := { s with replId := update s.replId p (freshId s), usedIds := insert (freshId s) s.usedIds, idHist := update s.idHist (freshId s) (s.log p) }) rfl
   exact {
   ackedLeMax := h.ackedLeMax
+  idHistLe := idHistLe_update h.idHistLe _ _ (fun v hv =>
+    (h.entries_le p v hv).trans (Nat.le_of_lt (lt_freshId (h.ids p))))
+  switchTail := by
+    intro x t k hx hk
+    obtain ⟨h1, h2⟩ := h.switchTail x t k hx hk
+    refine ⟨?_, h2⟩
+    show t < update s.replId p (freshId s) x
+    by_cases hxp : x = p
+    · subst hxp; rw [update_self]; exact lt_freshId (h.secIds x t k hk)
+    · rw [hne x hxp]; exact h1
   ids := fun x => by
     show update s.replId p (freshId s) x ∈ insert (freshId s) s.usedIds
     by_cases hx : x = p

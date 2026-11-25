@@ -467,7 +467,7 @@ theorem coreMove_step {s s' : State Node} (h : Invariant s) (hr : RInvariant s) 
       · subst hn; rw [update_self] at hj
         exact ⟨p, by rw [prefix_getElem? hpre (List.getElem?_eq_some_iff.1 hj).1]; exact hj⟩
       · rw [update_of_ne _ _ hn] at hj; exact ⟨n, hj⟩
-    | resync r _ _ _ | resyncStale r _ _ _ =>
+    | resync r _ _ _ | resyncStale r _ _ _ | truncate r _ _ =>
       intro n j v hj
       change (update s.log r _ n)[j]? = some v at hj
       by_cases hn : n = r
@@ -994,6 +994,7 @@ theorem leaseStep_core {m : Nat} {P : LeaseParams} {a l : LeaseState Node} {μ :
   | takeover n hkl hel hnp hin _ => right; exact ⟨_, StepA.takeover _ n hkl hel hnp hin, rfl, by simp⟩
   | resync r h1 h2 h3 => right; exact ⟨_, StepA.resync _ r h1 h2 h3, rfl, by simp⟩
   | resyncStale r h1 h2 h3 => right; exact ⟨_, StepA.resyncStale _ r h1 h2 h3, rfl, by simp⟩
+  | truncate r k hok _ => right; exact ⟨_, StepA.truncate _ r k hok, rfl, by simp⟩
   | restartEmpty => simp [LeaseAction.isClientLease] at hμ
   | restartKeep => simp [LeaseAction.isClientLease] at hμ
   | restartPartialKeep => simp [LeaseAction.isClientLease] at hμ
@@ -2135,8 +2136,8 @@ theorem clientInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {
     exact h.moveSameHist a.lease _ _ h.lease hr List.erase_sublist (List.Sublist.refl _)
       (CoreMove.refl h.reply.replIdsIssued) rfl (fun _ _ => List.prefix_refl _)
   | invokeRead c n => exact h.invokeRead c n
-  | respondRead op c n hr hcan => exact h.respondRead hM hr hcan
-  | holdRead op c n hr hnp hlv hd => exact h.holdRead hr hnp hlv hd
+  | respondRead op c n hr hcan => rw [readView_of_canRead hcan]; exact h.respondRead hM hr hcan
+  | holdRead op c n hr hnp _ hlv hd => exact h.holdRead hr hnp hlv hd
   | releaseRead g hm hc hId => exact h.releaseRead hm hc hId
   | abortRead g hm _ => exact h.abortRead
 
@@ -2177,9 +2178,15 @@ theorem clientInvariant_stepN {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) 
   | abort g hm hf => exact ⟨L, hP, hA (ClientStepA.abort _ g hm (fun h' => hf ((hP.replyFenced g).1 h')))⟩
   | invokeRead c n => exact ⟨L, hP, hA (ClientStepA.invokeRead _ c n)⟩
   | respondRead op c n hr hcan =>
-    exact ⟨L, hP, hA (ClientStepA.respondRead _ op c n hr (hcan.imp hP.primCanRead hP.replCanRead))⟩
-  | holdRead op c n hr hnp hlv hd =>
-    exact ⟨L, hP, hA (ClientStepA.holdRead _ op c n hr (fun ht => hnp ((htp n).1 ht)) hlv hd)⟩
+    have hcan' := hcan.imp hP.primCanRead hP.replCanRead
+    have := hA (ClientStepA.respondRead _ op c n hr hcan')
+    have e2 : (clientSim a L).lease.readView n = (clientSim a L).lease.core.log n := readView_of_canRead hcan'
+    rw [e2] at this
+    refine ⟨L, hP, ?_⟩
+    show ClientInvariant P (clientSim { a with history := _, reading := _, lin := _ } L)
+    rw [readView_of_canRead hcan]; exact this
+  | holdRead op c n hr hnp hwb hlv hd =>
+    exact ⟨L, hP, hA (ClientStepA.holdRead _ op c n hr (fun ht => hnp ((htp n).1 ht)) hwb hlv hd)⟩
   | releaseRead g hm hc hId => exact ⟨L, hP, hA (ClientStepA.releaseRead _ g hm hc hId)⟩
   | abortRead g hm hId => exact ⟨L, hP, hA (ClientStepA.abortRead _ g hm hId)⟩
 

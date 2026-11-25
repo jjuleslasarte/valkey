@@ -257,6 +257,48 @@ theorem DropInvariant.sendMsg {a : LeaseState Node} (h : DropInvariant a) {msg :
 
 /-! ## The invariant -/
 
+/-- What every node has applied is within its log and is a committed prefix. -/
+def AppliedHist (a : LeaseState Node) : Prop :=
+  ∀ r, a.applied r ≤ (a.core.log r).length ∧ (a.core.log r).take (a.applied r) <+: a.core.hist
+
+/-- Applied offsets unchanged, logs and the history only extended. -/
+theorem AppliedHist.grow {a a' : LeaseState Node} (h : AppliedHist a) (hap : a'.applied = a.applied)
+    (hlog : ∀ x, a.core.log x <+: a'.core.log x) (hhist : a.core.hist <+: a'.core.hist) : AppliedHist a' := by
+  intro r
+  obtain ⟨h1, h2⟩ := h r
+  rw [hap]
+  refine ⟨h1.trans (hlog r).length_le, ?_⟩
+  rw [← prefix_take_eq (hlog r) h1]; exact h2.trans hhist
+
+/-- One node's applied offset reset to 0; its log may change, the others' do not. -/
+theorem AppliedHist.reset {a a' : LeaseState Node} (h : AppliedHist a) (n : Node)
+    (hap : a'.applied = update a.applied n 0) (hlog : ∀ x, x ≠ n → a'.core.log x = a.core.log x)
+    (hhist : a.core.hist <+: a'.core.hist) : AppliedHist a' := by
+  intro r
+  rw [hap]
+  by_cases hr : r = n
+  · subst hr; simp
+  · rw [update_of_ne _ _ hr, hlog r hr]
+    obtain ⟨h1, h2⟩ := h r; exact ⟨h1, h2.trans hhist⟩
+
+/-- A restart of `n` keeps a prefix of its log and caps its applied offset by it. -/
+theorem AppliedHist.restart {a a' : LeaseState Node} (h : AppliedHist a) (n : Node)
+    (hap : a'.applied = update a.applied n (min (a.applied n) (a'.core.log n).length))
+    (hlogn : a'.core.log n <+: a.core.log n) (hlog : ∀ x, x ≠ n → a'.core.log x = a.core.log x)
+    (hhist : a.core.hist <+: a'.core.hist) : AppliedHist a' := by
+  intro r
+  rw [hap]
+  by_cases hr : r = n
+  · subst hr; rw [update_self]
+    refine ⟨Nat.min_le_right _ _, ?_⟩
+    rw [prefix_take_eq hlogn (Nat.min_le_right _ _)]
+    have : (a.core.log r).take (min (a.applied r) (a'.core.log r).length) =
+        ((a.core.log r).take (a.applied r)).take (min (a.applied r) (a'.core.log r).length) := by
+      rw [List.take_take, Nat.min_eq_left (Nat.min_le_left _ _)]
+    rw [this]; exact ((List.take_prefix _ _).trans (h r).2).trans hhist
+  · rw [update_of_ne _ _ hr, hlog r hr]
+    obtain ⟨h1, h2⟩ := h r; exact ⟨h1, h2.trans hhist⟩
+
 /-- The inductive invariant of the lease layer. -/
 structure LeaseInvariant (P : LeaseParams) (a : LeaseState Node) : Prop where
   /-- The replication invariant. -/
@@ -306,6 +348,8 @@ structure LeaseInvariant (P : LeaseParams) (a : LeaseState Node) : Prop where
   /-- A replica's committed view is within its log and is a committed prefix. -/
   committedViewLen   : ∀ r, a.committedView r ≤ (a.core.log r).length
   committedViewHist  : ∀ r, a.committedView r ≤ a.core.hist.length ∧ (a.core.log r).take (a.committedView r) <+: a.core.hist
+  /-- What a node has applied is a committed prefix of its log. -/
+  appliedHist : AppliedHist a
   /-- Every message in flight was sent in the past, by connections no newer than now's. -/
   sentLe : ∀ msg ∈ a.net, msg.sent ≤ a.now
   genLe : ∀ msg ∈ a.net, msg.g ≤ a.gen msg.link.1 msg.link.2
@@ -362,6 +406,7 @@ theorem leaseInvariant_init (P : LeaseParams) (i : Node) : LeaseInvariant P (lea
     · simp [leaseInit] at hm
   committedViewLen := by intro _; simp [leaseInit]
   committedViewHist := by intro _; simp [leaseInit, init]
+  appliedHist := by intro _; simp [leaseInit, init]
   sentLe := by intro _ hm; simp [leaseInit] at hm
   genLe := by intro _ hm; simp [leaseInit] at hm
   commitLe := by intro _ hm; simp [leaseInit] at hm
@@ -421,7 +466,7 @@ theorem leaseInvariant_noStaleRead {P : LeaseParams} (hM : 2 * P.drift ≤ P.mar
     have := h.core.committedIsHistoryPrefix p
     rw [hc, List.take_length] at this
     rw [this, ← hc, he, List.take_length]
-  · intro r ⟨hnp, hL, hv⟩
+  · intro r ⟨hnp, hL, hv, _⟩
     have hauth : IsAuthoritative a.core r := by
       unfold ReadLeaseValid HolderValid at hL
       cases hx : a.readLease r with
@@ -476,6 +521,7 @@ theorem leaseInvariant_tick : LeaseInvariant P (tick a) where
   selfPrimNoLease := h.selfPrimNoLease
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
+  appliedHist := h.appliedHist
   sentLe := fun msg hm => Nat.le_succ_of_le (h.sentLe msg hm)
   genLe := h.genLe
   commitLe := h.commitLe
@@ -642,6 +688,7 @@ theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core) (hr
     (hCV : ∀ r, a'.committedView r ≤ (a'.core.log r).length)
     (hCH : ∀ r, a'.committedView r ≤ a'.core.hist.length ∧
       (a'.core.log r).take (a'.committedView r) <+: a'.core.hist)
+    (hAH : AppliedHist a')
     (hDrop : DropInvariant a') :
     LeaseInvariant P a' := by
   have hmono : ∀ msg ∈ a'.net, msg ∈ a.net ∧ (msg.Current a' → msg.Current a) :=
@@ -679,6 +726,7 @@ theorem leaseInvariant_frame {a' : LeaseState Node} (hc : Invariant a'.core) (hr
     intro p hp x hx; rw [hlocalCfg] at hp; exact h.selfPrimNoLease p hp x (hLS p x hx)
   committedViewLen := hCV
   committedViewHist := hCH
+  appliedHist := hAH
   sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
   drop := hDrop }
 
@@ -717,6 +765,7 @@ theorem leaseInvariant_withCore {c : State Node} (hc : Invariant c) (hrc : RInva
       show (c.log r).take (a.committedView r) <+: c.hist
       rw [← prefix_take_eq (hlog r) (h.committedViewLen r)]
       exact h2.trans hhist)
+    (h.appliedHist.grow rfl hlog hhist)
     (drop_mono h (congrArg Cfg.primary hcfg) rfl rfl (fun _ _ e => e) (fun _ hm => ⟨hm, id⟩))
 
 /-- MakeEligible by the current primary. The new eligible replica's recorded incarnation
@@ -753,6 +802,7 @@ theorem leaseInvariant_makeEligible {p r : Node} (hp : ThinksPrimary a.core p)
   selfPrimNoLease := fun q hq => selfPrimNoLease_cfgBump h hkp makeEligible_localCfg hq
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
+  appliedHist := h.appliedHist
   sentLe := h.sentLe, genLe := h.genLe, commitLe := h.commitLe
   follows := fun msg hm hc hd =>
     ⟨(hpo msg.dst).trans (h.follows msg hm hc hd).1, (h.follows msg hm hc hd).2⟩
@@ -804,7 +854,7 @@ theorem leaseInvariant_core {m : Nat} {μ : Action Node} {c : State Node} (hs : 
 theorem leaseInvariant_drop {msg : Msg Node} : LeaseInvariant P (dropMsg a msg) :=
   leaseInvariant_frame h h.core h.rcore rfl rfl rfl rfl rfl rfl (fun _ _ _ e => e) (fun _ _ e => e) rfl rfl
     (fun _ hm => List.mem_of_mem_erase hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
-    (fun r => ⟨Nat.le_refl _, h.primaryTrafficLe r⟩) h.dataSentLe h.committedViewLen h.committedViewHist
+    (fun r => ⟨Nat.le_refl _, h.primaryTrafficLe r⟩) h.dataSentLe h.committedViewLen h.committedViewHist h.appliedHist
     (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun _ hm => ⟨List.mem_of_mem_erase hm, id⟩))
 
 /-- A new message, before the step's own effect on leases: every old lease start, held
@@ -881,6 +931,7 @@ theorem leaseInvariant_send {msg : Msg Node} (hg : msg.g = a.gen msg.link.1 msg.
       · exact hne hq
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
+  appliedHist := h.appliedHist
   sentLe := by
     intro m' hm; rcases List.mem_cons.1 hm with rfl | hm
     · rw [hsent]; rfl
@@ -988,6 +1039,25 @@ theorem rview_data_ok {r q : Node} {L : List Nat} {c : Nat} (hpre : L <+: a.core
       rw [this, hcE, List.take_take, Nat.min_eq_left hk]
       exact List.take_prefix _ _
     · rw [Nat.max_eq_left hle, ← prefix_take_eq hgrow hrl]; exact h2
+
+/-- As `rview_data_ok`, for the applied offset. -/
+theorem applied_data_ok {r q : Node} {L : List Nat} {c : Nat} (hpre : L <+: a.core.log q)
+    (hgrow : a.core.log r <+: L) (hc : c ≤ a.core.commit q) :
+    max (a.applied r) (min c L.length) ≤ L.length ∧
+    L.take (max (a.applied r) (min c L.length)) <+: a.core.hist := by
+  obtain ⟨hrl, h2⟩ := h.appliedHist r
+  have hcE := h.core.committedIsHistoryPrefix q
+  have hk : min c L.length ≤ a.core.commit q := Nat.le_trans (Nat.min_le_left _ _) hc
+  refine ⟨Nat.max_le.2 ⟨Nat.le_trans hrl hgrow.length_le, Nat.min_le_right _ _⟩, ?_⟩
+  rcases Nat.le_total (a.applied r) (min c L.length) with hle | hle
+  · rw [Nat.max_eq_right hle]
+    rw [prefix_take_eq hpre (Nat.min_le_right _ _)]
+    have : (a.core.log q).take (min c L.length) =
+        ((a.core.log q).take (a.core.commit q)).take (min c L.length) := by
+      rw [List.take_take, Nat.min_eq_left hk]
+    rw [this, hcE, List.take_take, Nat.min_eq_left hk]
+    exact List.take_prefix _ _
+  · rw [Nat.max_eq_left hle, ← prefix_take_eq hgrow hrl]; exact h2
 
 /-- Two lease starts that each satisfy `leaseBound` have a later one that does too. -/
 theorem bound_max {r : Node} {v e : Nat}
@@ -1127,6 +1197,14 @@ theorem leaseInvariant_deliverData {p r : Node} {g t c : Nat} {e : Option Nat}
     unfold update; split_ifs with ex
     · subst ex; exact ⟨hv2, hv3⟩
     · exact h.committedViewHist x
+  appliedHist := by
+    obtain ⟨ha1, ha2⟩ := applied_data_ok h (r := r) hpre (List.prefix_refl _) hcp
+    intro x
+    show update a.applied r _ x ≤ (a.core.log x).length ∧
+      (a.core.log x).take (update a.applied r _ x) <+: a.core.hist
+    unfold update; split_ifs with ex
+    · subst ex; exact ⟨ha1, ha2⟩
+    · exact h.appliedHist x
   sentLe := fun m' hm' => h.sentLe m' (List.mem_of_mem_erase hm')
   genLe := fun m' hm' => h.genLe m' (List.mem_of_mem_erase hm')
   commitLe := fun m' hm' => h.commitLe m' (List.mem_of_mem_erase hm')
@@ -1209,6 +1287,7 @@ theorem leaseInvariant_deliverAck {r p : Node} {g t d : Nat}
   selfPrimNoLease := fun q hq v hx => h.selfPrimNoLease q hq v (hLS q v hx)
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
+  appliedHist := h.appliedHist
   sentLe := fun m' hm' => h.sentLe m' (List.mem_of_mem_erase hm')
   genLe := fun m' hm' => h.genLe m' (List.mem_of_mem_erase hm')
   commitLe := fun m' hm' => h.commitLe m' (List.mem_of_mem_erase hm')
@@ -1317,6 +1396,7 @@ theorem leaseInvariant_learn {n : Node} (hnkl : ¬ KnowsLatest a.core n) :
     · exact h.selfPrimNoLease q hq v (hLS q v hx)
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
+  appliedHist := h.appliedHist
   sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
   drop := drop_mono h rfl rfl rfl (fun _ _ e => e) hmono }
 
@@ -1375,6 +1455,7 @@ theorem leaseInvariant_demote {p r : Node} (hp : ThinksPrimary a.core p) (hkl : 
   selfPrimNoLease := fun q hq => selfPrimNoLease_cfgBump h hkp makeIneligible_localCfg hq
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
+  appliedHist := h.appliedHist
   sentLe := h.sentLe, genLe := h.genLe, commitLe := h.commitLe
   follows := fun msg hm hc hd =>
     ⟨(hpo msg.dst).trans (h.follows msg hm hc hd).1, (h.follows msg hm hc hd).2⟩
@@ -1500,6 +1581,7 @@ theorem leaseInvariant_takeover {n : Node} (hkl : KnowsLatest a.core n) (hel : a
     rw [hK, if_neg e] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := h.committedViewLen
   committedViewHist := h.committedViewHist
+  appliedHist := h.appliedHist
   sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
   drop := {
     -- the new primary `n` has confirmed no drop and its drop messages were discarded.
@@ -1534,6 +1616,7 @@ theorem leaseInvariant_resyncOf {r : Node} (hne : primaryOf a.core r ≠ r)
     (fun _ hm => hm) (fun msg hm hc => (hcb msg hm hc).1) hgle
     (fun msg hm hc => (resync_commit_other (s := a.core) (hcb msg hm hc).2.1).ge)
     (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe hCV hCH
+    (h.appliedHist.reset r rfl (fun _ e => resync_log_other e) (List.prefix_refl _))
     (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun msg hm => ⟨hm, fun hc => (hcb msg hm hc).1⟩))
 
 theorem leaseInvariant_resync {r : Node} (hne : primaryOf a.core r ≠ r)
@@ -1541,6 +1624,64 @@ theorem leaseInvariant_resync {r : Node} (hne : primaryOf a.core r ≠ r)
     (hke : (a.core.localCfg (primaryOf a.core r)).eligible r = false) :
     LeaseInvariant P (leaseResync a r) :=
   leaseInvariant_resyncOf h hne hsy (invariant_resync h.core r hne hsy hke)
+
+/-- A replica's applied offset is within any truncation offset its primary answers with:
+what it applied is committed, and no committed prefix of its log reaches past `k`. -/
+theorem truncate_applied_le {r : Node} {k : Nat} (hok : TruncateOk a.core r k) : a.applied r ≤ k := by
+  obtain ⟨har, hah⟩ := h.appliedHist r
+  have := trunc_committed h.core h.rcore hok hah (List.take_prefix _ _)
+  rwa [List.length_take, Nat.min_eq_left har] at this
+
+/-- Write-ahead truncation: `r` cuts its log at `k`, no shorter than what it has
+applied; its committed view becomes its applied offset and its connections close. -/
+theorem leaseInvariant_truncate {r : Node} {k : Nat} (hok : TruncateOk a.core r k) :
+    LeaseInvariant P (leaseTruncate a r k) := by
+  have hap := truncate_applied_le h hok
+  obtain ⟨hc, hrc⟩ := invariants_truncate h.core h.rcore hok
+  obtain ⟨_, hcb, hgle⟩ := bump_facts h (a' := leaseTruncate a r k) (n := r) rfl rfl
+  have hlr : (leaseTruncate a r k).core.log r = (a.core.log r).take k := by
+    show update a.core.log r _ r = _; rw [update_self]
+  have hlo : ∀ x, x ≠ r → (leaseTruncate a r k).core.log x = a.core.log x := by
+    intro x e; show update a.core.log r _ x = _; rw [update_of_ne _ _ e]
+  have hhist : (leaseTruncate a r k).core.hist = a.core.hist := rfl
+  obtain ⟨har, hah⟩ := h.appliedHist r
+  have hlen : a.applied r ≤ ((a.core.log r).take k).length := by
+    rw [List.length_take]; exact Nat.le_min.2 ⟨hap, har⟩
+  have htk : ((a.core.log r).take k).take (a.applied r) = (a.core.log r).take (a.applied r) := by
+    rw [List.take_take, Nat.min_eq_left hap]
+  have hAH : AppliedHist (leaseTruncate a r k) := by
+    intro x
+    show a.applied x ≤ ((leaseTruncate a r k).core.log x).length ∧
+      ((leaseTruncate a r k).core.log x).take (a.applied x) <+: (leaseTruncate a r k).core.hist
+    by_cases e : x = r
+    · subst e; rw [hlr, hhist, htk]; exact ⟨hlen, hah⟩
+    · rw [hlo x e, hhist]; exact h.appliedHist x
+  exact leaseInvariant_frame h hc hrc
+    (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl) (hnow := rfl) (hPL := rfl)
+    (hAR := rfl) (hAE := fun _ _ _ e => e) (hRL := fun _ _ e => e) (hPS := rfl) (hOE := rfl)
+    (fun _ hm => hm) (fun msg hm hc => (hcb msg hm hc).1) hgle
+    (fun msg hm hc => by
+      have e := (hcb msg hm hc).2.1
+      show a.core.commit msg.src ≤ update a.core.commit r _ msg.src
+      rw [update_of_ne _ _ e])
+    (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe
+    (by
+      intro x; show update a.committedView r (a.applied r) x ≤ _
+      by_cases e : x = r
+      · subst e; rw [update_self, hlr]; exact hlen
+      · rw [update_of_ne _ _ e, hlo x e]; exact h.committedViewLen x)
+    (by
+      intro x
+      show update a.committedView r (a.applied r) x ≤ (leaseTruncate a r k).core.hist.length ∧
+        ((leaseTruncate a r k).core.log x).take (update a.committedView r (a.applied r) x) <+:
+          (leaseTruncate a r k).core.hist
+      by_cases e : x = r
+      · subst e; rw [update_self, hlr, hhist, htk]
+        refine ⟨?_, hah⟩
+        have := hah.length_le; rw [List.length_take, Nat.min_eq_left har] at this; exact this
+      · rw [update_of_ne _ _ e, hlo x e, hhist]; exact h.committedViewHist x)
+    hAH
+    (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun msg hm => ⟨hm, fun hc => (hcb msg hm hc).1⟩))
 
 /-! ### Restarts -/
 
@@ -1552,7 +1693,8 @@ theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c) (h
     (hkl : KnowsLatest a.core n)
     (hcfg : c.cfg = a.core.cfg) (hlocalCfg : c.localCfg = a.core.localCfg)
     (hinc : ∀ x, x ≠ n → c.incarnation x = a.core.incarnation x)
-    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hhist : c.hist = a.core.hist)
+    (hlog : ∀ x, x ≠ n → c.log x = a.core.log x) (hlogn : c.log n <+: a.core.log n)
+    (hhist : c.hist = a.core.hist)
     (hcommit : ∀ x, x ≠ n → c.commit x = a.core.commit x) :
     LeaseInvariant P (leaseRestart a n c) := by
   have hPT := primaryTraffic_bump h n
@@ -1618,6 +1760,7 @@ theorem leaseInvariant_restart {n : Node} {c : State Node} (hc : Invariant c) (h
     change (c.localCfg q).primary = q at hq; rw [hlocalCfg] at hq; exact h.selfPrimNoLease q hq v hx
   committedViewLen := hCV
   committedViewHist := hCH
+  appliedHist := h.appliedHist.restart n rfl hlogn hlog (by show a.core.hist <+: c.hist; rw [hhist])
   sentLe := hS1, genLe := hS2, commitLe := hS3, follows := hS4
   drop := by
     refine h.drop.frame (congrArg Cfg.primary hcfg) ?_ ?_ (fun r x hx => (hLS r x hx).2)
@@ -1646,19 +1789,20 @@ theorem leaseInvariant_restartEmpty {n : Node} (hkl : KnowsLatest a.core n)
     (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) :
     LeaseInvariant P (leaseRestart a n (restartEmpty a.core n)) :=
   leaseInvariant_restart h (invariant_restartEmpty h.core n hkl hsurv) (h.rcore.restartEmpty n) hkl rfl rfl
-    (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e) rfl
-    (fun _ e => restartEmpty_commit_other e)
+    (fun _ e => restartEmpty_inc_other e) (fun _ e => restartEmpty_log_other e)
+    (by simp [restartEmpty]) rfl (fun _ e => restartEmpty_commit_other e)
 
 theorem leaseInvariant_restartKeep {n : Node} (hkl : KnowsLatest a.core n) :
     LeaseInvariant P (leaseRestart a n (restartKeep a.core n)) :=
   leaseInvariant_restart h (invariant_restartKeep h.core n hkl) (h.rcore.restartKeep n) hkl rfl rfl
-    (fun _ _ => rfl) (fun _ _ => rfl) rfl (fun _ e => restartKeep_commit_other e)
+    (fun _ _ => rfl) (fun _ _ => rfl) (List.prefix_refl _) rfl (fun _ e => restartKeep_commit_other e)
 
 theorem leaseInvariant_restartPartialKeep {n : Node} {k : Nat} (hkl : KnowsLatest a.core n)
     (hk : k < (a.core.log n).length) (hkeep : a.core.ackHigh n ≤ k) :
     LeaseInvariant P (leaseRestart a n (restartPartialKeep a.core n k)) :=
   leaseInvariant_restart h (invariant_restartPartialKeep h.core n k hkl hk hkeep) (h.rcore.restartPartialKeep n hk) hkl rfl rfl
-    (fun _ _ => rfl) (fun _ e => restartPartialKeep_log_other e) rfl
+    (fun _ _ => rfl) (fun _ e => restartPartialKeep_log_other e)
+    (by simp [restartPartialKeep, restartKeep]; exact List.take_prefix _ _) rfl
     (fun _ e => restartKeep_commit_other e)
 
 theorem leaseInvariant_restartPartialFresh {n : Node} {k : Nat} (hkl : KnowsLatest a.core n)
@@ -1666,7 +1810,8 @@ theorem leaseInvariant_restartPartialFresh {n : Node} {k : Nat} (hkl : KnowsLate
     (hsurv : ∃ m, m ≠ n ∧ IsAuthoritative a.core m) :
     LeaseInvariant P (leaseRestart a n (restartPartialFresh a.core n k)) :=
   leaseInvariant_restart h (invariant_restartPartialFresh h.core n k hkl hsurv hk hfresh) (h.rcore.restartPartialFresh n hk) hkl rfl rfl
-    (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e) rfl
+    (fun _ e => restartEmpty_inc_other e) (fun _ e => restartPartialFresh_log_other e)
+    (by simp [restartPartialFresh, restartEmpty]; exact List.take_prefix _ _) rfl
     (fun _ e => restartEmpty_commit_other e)
 
 /-! ### Planned demotion -/
@@ -1712,7 +1857,7 @@ theorem leaseInvariant_sendDropRequest {p r : Node} (hf : primaryOf a.core r = p
   have hb : LeaseInvariant P b :=
     leaseInvariant_frame h h.core h.rcore rfl rfl rfl rfl rfl rfl hAE (fun _ _ e => e) rfl rfl
       (fun _ hm => hm) (fun msg hm hc => (hcb msg hm hc).1) hgle (fun _ _ _ => Nat.le_refl _)
-      (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist
+      (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist h.appliedHist
       hdrop
   refine leaseInvariant_send hb (closeLink_self _ _ _).symm rfl (fun _ hx => by cases hx) (fun hx => by cases hx)
     (fun _ hx => by cases hx) (fun _ hx => by cases hx) ?_
@@ -1740,7 +1885,7 @@ theorem leaseInvariant_deliverDropRequest {p r : Node} {g t : Nat}
   have hcI : LeaseInvariant P c :=
     leaseInvariant_frame h h.core h.rcore rfl rfl rfl rfl rfl rfl (fun _ _ _ e => e) hRL rfl rfl
       (fun _ hm => List.mem_of_mem_erase hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
-      (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist
+      (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist h.appliedHist
       (drop_mono h rfl rfl rfl hRL hnet)
   refine leaseInvariant_send hcI rfl rfl (fun _ hx => by cases hx) (fun hx => by cases hx)
     (fun _ hx => by cases hx) (fun _ hx => by cases hx) ?_
@@ -1785,7 +1930,7 @@ theorem leaseInvariant_deliverDropConfirm {r p : Node} {g t : Nat}
       exact h.drop.confirmNoLease x q g' t' (List.mem_of_mem_erase hm') hc' he hq y (hLS x y hy) }
   exact leaseInvariant_frame h h.core h.rcore rfl rfl rfl rfl rfl rfl (fun _ _ _ e => e) (fun _ _ e => e) rfl rfl
     (fun _ hm => List.mem_of_mem_erase hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
-    (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist hdrop
+    (fun x => ⟨Nat.le_refl _, h.primaryTrafficLe x⟩) h.dataSentLe h.committedViewLen h.committedViewHist h.appliedHist hdrop
 
 end preserve
 
@@ -1819,6 +1964,14 @@ theorem leaseInvariant_step {P : LeaseParams} (hM : 2 * P.drift ≤ P.margin) {m
   | sendDropRequest p r _ hf _ => exact leaseInvariant_sendDropRequest h hf
   | deliverDropRequest p r g t hm hc => exact leaseInvariant_deliverDropRequest h hm hc
   | deliverDropConfirm r p g t hm hc hno => exact leaseInvariant_deliverDropConfirm h hm hc hno
+  | setMode n b _ =>
+    exact leaseInvariant_frame h h.core h.rcore (hcfg := rfl) (hlocalCfg := rfl) (hinc := rfl) (hnow := rfl)
+      (hPL := rfl) (hAR := rfl) (hAE := fun _ _ _ e => e) (hRL := fun _ _ e => e) (hPS := rfl) (hOE := rfl)
+      (fun _ hm => hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
+      (fun r => ⟨Nat.le_refl _, h.primaryTrafficLe r⟩) h.dataSentLe h.committedViewLen h.committedViewHist
+      (h.appliedHist.reset n rfl (fun _ _ => rfl) (List.prefix_refl _))
+      (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun msg hm => ⟨hm, id⟩))
+  | truncate r k hok _ => exact leaseInvariant_truncate h hok
 
 /-! ## Two-step promotion: the lease layer refines its atomic form
 
@@ -1861,7 +2014,7 @@ theorem leaseInvariant_bumpTraffic {P : LeaseParams} {b : LeaseState Node} (h : 
     (hAR := rfl) (hAE := fun _ _ _ e => e) (hRL := fun _ _ e => e) (hPS := rfl) (hOE := rfl)
     (fun _ hm => hm) (fun _ _ hc => hc) h.genLe (fun _ _ _ => Nat.le_refl _)
     (primaryTraffic_bump h n) (fun r => Nat.le_trans (h.dataSentLe r) (primaryTraffic_bump h n r).1)
-    h.committedViewLen h.committedViewHist
+    h.committedViewLen h.committedViewHist h.appliedHist
     (drop_mono h rfl rfl rfl (fun _ _ e => e) (fun msg hm => ⟨hm, id⟩))
 
 /-- Every lease step is a step of `LeaseStepA` on the atomic model's view, or (Learn of an
@@ -1895,6 +2048,12 @@ theorem PromSim.leaseStep {P : LeaseParams} {m : Nat}
     exact ⟨L, hP, Or.inl (LeaseStepA.sendDropRequest _ p r hne (by rw [hpo]; exact hf) ((htp p).2 hp))⟩
   | deliverDropRequest p r g t hm hc => exact ⟨L, hP, Or.inl (LeaseStepA.deliverDropRequest _ p r g t hm hc)⟩
   | deliverDropConfirm r p g t hm hc hno => exact ⟨L, hP, Or.inl (LeaseStepA.deliverDropConfirm _ r p g t hm hc hno)⟩
+  | setMode n b hset => exact ⟨L, hP, Or.inl (LeaseStepA.setMode _ n b hset)⟩
+  | truncate r k hok hwa =>
+    obtain ⟨hP', heq, hok'⟩ := hP.truncate hi hok
+    have e : leaseTruncate (leaseSim a L) r k = leaseSim (leaseTruncate a r k) L := by
+      simp only [leaseTruncate, leaseSim]; rw [heq]
+    exact ⟨L, hP', Or.inl (e ▸ LeaseStepA.truncate _ r k hok' hwa)⟩
   | demote p r hp hkl hel hw =>
     obtain ⟨L', hP', hS | ⟨_, n, hμ⟩⟩ := hP.step hi (Step.makeIneligible (m := m) a.core p r hp hkl hel)
     · have e := hS.makeIneligible_inv
@@ -1947,7 +2106,7 @@ theorem PromSim.leaseStep {P : LeaseParams} {m : Nat}
     · have e := hS.restartEmpty_inv
       have heq : leaseRestart (leaseSim a L) n (restartEmpty (leaseSim a L).core n) =
           leaseSim (leaseRestart a n (restartEmpty a.core n)) L' := by
-        simp only [leaseRestart, leaseSim]; rw [← e]
+        simp only [leaseRestart, leaseSim]; rw [← e]; try rfl
       exact ⟨L', hP', heq ▸ Or.inl (LeaseStepA.restartEmpty _ n (hP.knows hi hkl) hsurv)⟩
     · cases hμ
   | restartKeep n hkl =>
@@ -1955,7 +2114,7 @@ theorem PromSim.leaseStep {P : LeaseParams} {m : Nat}
     · have e := hS.restartKeep_inv
       have heq : leaseRestart (leaseSim a L) n (restartKeep (leaseSim a L).core n) =
           leaseSim (leaseRestart a n (restartKeep a.core n)) L' := by
-        simp only [leaseRestart, leaseSim]; rw [← e]
+        simp only [leaseRestart, leaseSim]; rw [← e]; try rfl
       exact ⟨L', hP', heq ▸ Or.inl (LeaseStepA.restartKeep _ n (hP.knows hi hkl))⟩
     · cases hμ
   | restartPartialKeep n k hkl hk hkeep =>
@@ -1963,7 +2122,7 @@ theorem PromSim.leaseStep {P : LeaseParams} {m : Nat}
     · rcases hS.restartPartial_inv with e | e
       · have heq : leaseRestart (leaseSim a L) n (restartPartialKeep (leaseSim a L).core n k) =
             leaseSim (leaseRestart a n (restartPartialKeep a.core n k)) L' := by
-          simp only [leaseRestart, leaseSim]; rw [← e]
+          simp only [leaseRestart, leaseSim]; rw [← e]; try rfl
         exact ⟨L', hP', heq ▸ Or.inl (LeaseStepA.restartPartialKeep _ n k (hP.knows hi hkl) hk hkeep)⟩
       · have := congrArg (fun x => x.incarnation n) e
         simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
@@ -1975,7 +2134,7 @@ theorem PromSim.leaseStep {P : LeaseParams} {m : Nat}
         simp [simState, restartPartialKeep, restartKeep, restartPartialFresh, restartEmpty] at this
       · have heq : leaseRestart (leaseSim a L) n (restartPartialFresh (leaseSim a L).core n k) =
             leaseSim (leaseRestart a n (restartPartialFresh a.core n k)) L' := by
-          simp only [leaseRestart, leaseSim]; rw [← e]
+          simp only [leaseRestart, leaseSim]; rw [← e]; try rfl
         exact ⟨L', hP', heq ▸ Or.inl (LeaseStepA.restartPartialFresh _ n k (hP.knows hi hkl) hk hfresh hsurv)⟩
     · cases hμ
 
@@ -2013,5 +2172,13 @@ theorem lease_safety {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m :
     {a : LeaseState Node} (hReachable : LeaseReachable m P i a) : Safety a.core :=
   let ⟨L, _, h⟩ := leaseInvariant_reachable hMargin hReachable
   invariant_safety (s := simState a.core L) h.core
+
+/-- **A write-ahead replica's keyspace holds only committed writes.** In every reachable
+state, what each node has applied is within its log and a prefix of the committed
+history. -/
+theorem appliedCommitted {P : LeaseParams} (hMargin : 2 * P.drift ≤ P.margin) {m : Nat} {i : Node}
+    {a : LeaseState Node} (hReachable : LeaseReachable m P i a) : AppliedCommitted a :=
+  let ⟨_, _, h⟩ := leaseInvariant_reachable hMargin hReachable
+  fun n _ _ => h.appliedHist n
 
 end SyncReplication

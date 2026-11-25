@@ -218,21 +218,23 @@ inductive ClientStep (m : Nat) (P : LeaseParams) : ClientState Node → ClientAc
   | invokeRead (a c n) : ClientStep m P a (.invokeRead c n)
       { a with history := a.history ++ [.inv a.nextOp c .read],
                nextOp := a.nextOp + 1, reading := (a.nextOp, c, n) :: a.reading }
-  /-- Node `n` answers a read with its log once it may serve a linearizable read; the
-  read is linearized now. -/
+  /-- Node `n` answers a read with what it serves (`readView`: its log, or a write-ahead
+  replica's applied prefix) once it may serve a linearizable read; the read is linearized
+  now. -/
   | respondRead (a op c n) : (hr : (op, c, n) ∈ a.reading) →
       (hcan : PrimCanRead P a.lease n ∨ ReplCanRead P a.lease n) →
       ClientStep m P a (.respondRead op c n)
-        { a with history := a.history ++ [.res op c (.log (logOps a.written (a.lease.core.log n)))],
+        { a with history := a.history ++ [.res op c (.log (logOps a.written (a.lease.readView n)))],
                  reading := a.reading.erase (op, c, n),
-                 lin := a.lin ++ [(⟨op, c, .read, .log (logOps a.written (a.lease.core.log n))⟩,
+                 lin := a.lin ++ [(⟨op, c, .read, .log (logOps a.written (a.lease.readView n))⟩,
                                    a.history.length)] }
-  /-- A replica that holds a read lease, and has entries it has not been told are
-  committed, runs a read against its log and holds the reply (the whole-keyspace
+  /-- A write-behind replica that holds a read lease, and has entries it has not been told
+  are committed, runs a read against its log and holds the reply (the whole-keyspace
   form of dirty key tracking). The held read records the replica's offset, replication ID
   and log. If the committed history is already that log, the read is linearized now. -/
   | holdRead (a op c n) : (hr : (op, c, n) ∈ a.reading) →
-      (hNotPrimary : ¬ ThinksPrimary a.lease.core n) → (hLease : ReadLeaseValid P a.lease n) →
+      (hNotPrimary : ¬ ThinksPrimary a.lease.core n) → (hWriteBehind : a.lease.writeAhead n = false) →
+      (hLease : ReadLeaseValid P a.lease n) →
       (hDirty : a.lease.committedView n < (a.lease.core.log n).length) →
       ClientStep m P a (.holdRead op c n)
         { a with reading := a.reading.erase (op, c, n),
@@ -283,12 +285,13 @@ inductive ClientStepA (m : Nat) (P : LeaseParams) : ClientState Node → ClientA
   | respondRead (a op c n) : (hr : (op, c, n) ∈ a.reading) →
       (hcan : PrimCanRead P a.lease n ∨ ReplCanRead P a.lease n) →
       ClientStepA m P a (.respondRead op c n)
-        { a with history := a.history ++ [.res op c (.log (logOps a.written (a.lease.core.log n)))],
+        { a with history := a.history ++ [.res op c (.log (logOps a.written (a.lease.readView n)))],
                  reading := a.reading.erase (op, c, n),
-                 lin := a.lin ++ [(⟨op, c, .read, .log (logOps a.written (a.lease.core.log n))⟩,
+                 lin := a.lin ++ [(⟨op, c, .read, .log (logOps a.written (a.lease.readView n))⟩,
                                    a.history.length)] }
   | holdRead (a op c n) : (hr : (op, c, n) ∈ a.reading) →
-      (hNotPrimary : ¬ ThinksPrimary a.lease.core n) → (hLease : ReadLeaseValid P a.lease n) →
+      (hNotPrimary : ¬ ThinksPrimary a.lease.core n) → (hWriteBehind : a.lease.writeAhead n = false) →
+      (hLease : ReadLeaseValid P a.lease n) →
       (hDirty : a.lease.committedView n < (a.lease.core.log n).length) →
       ClientStepA m P a (.holdRead op c n)
         { a with reading := a.reading.erase (op, c, n),
