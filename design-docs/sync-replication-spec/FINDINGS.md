@@ -81,14 +81,14 @@ after a takeover that leaves no sync replica: `CoreRecon_strictReachLoneReconMin
 explores the full state space without ever reconciling such a primary,
 while `CoreRecon_ReachLoneReconMin1` (the fix) reconciles it in 12 states.
 Lean counterexample without the fix: `SyncReplication.noReconcile_unsafe`
-(14 steps). AddToSyncSet's catch-up guard cannot simply be dropped either:
+(16 steps). AddToSyncSet's catch-up guard cannot simply be dropped either:
 `SyncReplication.noCatchUp_unsafe` deletes it and, after a write commits on n0
-and n1, has n0 count and promote n2, which has acknowledged nothing (11 steps).
+and n1, has n0 count and promote n2, which has acknowledged nothing (13 steps).
 That AddToSyncSet is one the doc's own step 1 already forbids; F1 is about the case
 the doc's guard lets through.
 Full resync of an eligible replica is excluded by the model, as the doc says
 (eligible replicas ahead of the new primary are demoted first):
-`SyncReplication.resyncEligible_unsafe` (11 steps) resyncs one from a primary
+`SyncReplication.resyncEligible_unsafe` (12 steps) resyncs one from a primary
 that restarted from a stale file. Requiring instead that the resync source
 thinks it is primary also works (a scratch Lean build, not in the
 repository), but the proof then
@@ -106,7 +106,7 @@ forced failover. Writes are identified by offset and the primaryship's
 replication ID, and the
 fence uses the node's local, possibly stale view of its primaryship. Without
 the reply fence, `CoreAck_noReplyFence` (TLC) and `SyncReplication.noReplyFence_unsafe`
-(Lean, 14 steps) acknowledge a write that is not in the history. Reviewed in
+(Lean, 16 steps) acknowledge a write that is not in the history. Reviewed in
 round 4: sound within that scope.
 
 Section 1 releases a held reply when the committed offset passes a bare
@@ -165,7 +165,7 @@ records eligibility in Cluster V2. Section 5, "Restarts", says only that
 lease state is in memory. A primary that restarts with its data comes back
 with an empty sync set and can commit without an eligible replica.
 
-**Counterexample** (Lean `SyncReplication.noRebuild_unsafe`, 12 steps,
+**Counterexample** (Lean `SyncReplication.noRebuild_unsafe`, 14 steps,
 min-sync = 1; TLC `CoreRestart_noRebuildMin1`, 10 states, breaks the same
 invariant):
 1. n0 is primary. It counts n1, makes it eligible, and writes.
@@ -216,7 +216,7 @@ restart *without* data, so this node keeps its incarnation and its eligibility,
 the takeover check lets it through, and the primary still counts the stale
 acknowledgement.
 
-**Counterexample** (Lean `SyncReplication.staleRestoreKeepsInc_unsafe`, 11 steps,
+**Counterexample** (Lean `SyncReplication.staleRestoreKeepsInc_unsafe`, 12 steps,
 min-sync = 1, every other fix on; TLC `CoreRestart_staleKeepMin1`, 9 states):
 1. n0 is primary. It counts n1 and makes it eligible.
 2. n0 writes; n1 replicates and acknowledges; n0 commits (the write is
@@ -284,7 +284,7 @@ Section 6 says the takeover compare-and-set checks the incarnation, so a node
 that came back empty cannot be promoted. That is not enough: the node may
 already be the primary.
 
-**Counterexample** (Lean `SyncReplication.noIncCheck_unsafe`, 12 steps,
+**Counterexample** (Lean `SyncReplication.noIncCheck_unsafe`, 13 steps,
 min-sync = 1, every other fix on):
 1. A write commits on n0 (primary) and n1 (eligible).
 2. n0 restarts empty, with a new incarnation. n1 keeps the write.
@@ -304,7 +304,7 @@ each has now been settled on its own. Counting a replica into the sync set
 (`AddToSyncSet` in Lean, `Count` in the TLA+ spec) needs no incarnation check: the proofs never used it, and the guard
 has been removed from the Lean model. Counting toward min-sync-replicas
 (`Writable`) does need it, for the two-copies property rather than for safety:
-`SyncReplication.noIncWritable_oneCopy` (22 steps, min-sync = 1) has a replica
+`SyncReplication.noIncWritable_oneCopy` (23 steps, min-sync = 1) has a replica
 restart empty, stay listed as eligible, catch up and be counted again; the
 primary then commits with it as its only sync member, and after the commit
 the primary is the only authoritative node. The data is on the replica, but
@@ -318,20 +318,54 @@ Section 4: "If the replica falls behind or fails before step 4, the primary
 simply removes it from the commit calculation." The Lean model has this as
 `RemoveFromSyncSet`. "Before step 4" is
 load-bearing: dropping a replica that is already eligible lets the primary
-commit without it (`SyncReplication.removeFromSyncSetElig_unsafe`, 12 steps, min-sync = 1;
+commit without it (`SyncReplication.removeFromSyncSetElig_unsafe`, 14 steps, min-sync = 1;
 TLC `Core_earlyDrop`, `CoreRecon_earlyDropMin1`, `CoreRestart_earlyDropMin1`).
 "Not yet eligible" is read in the primary's own configuration, and that is
 enough: the proofs hold with no requirement that the primary knows the latest
 configuration, so a deposed primary may drop such a replica too. (An earlier
-version of the model required it; the proof no longer does.) This relies on
-the model's MakeEligible being atomic: the primary always learns the outcome
-of its own step-4 compare-and-set at once. In the real system the
-compare-and-set can commit while the primary has not seen the result, and
-dropping the replica then is `removeFromSyncSetElig_unsafe`.
+version of the model required it; the proof no longer does.) The primary's own
+configuration lags the latest one while its step-4 compare-and-set is in flight; the
+next entry is the rule that covers that window.
 **Proposed doc change:** keep "before step 4" as written: early removal
 applies before the primary proposes the step-4 compare-and-set, or after it
 learns the compare-and-set failed. Knowing the latest shard configuration is
 not needed in addition.
+
+## Two-step promotion: keep counting the candidate until the outcome is known
+
+Design §4, promotion step 4: the primary proposes the cluster-bus compare-and-set that
+makes the candidate eligible, and learns later whether it committed. The Lean model
+now has this: MakeEligible is a proposal (`proposeEligible`) that commits at once in
+the latest configuration, and the primary's own configuration catches up only when it
+learns the outcome (Learn); until then it records the candidate (`proposing`). Proposal
+followed at once by the primary's Learn is the old atomic MakeEligible
+(`SyncReplication.learn_proposeEligible`). Two limits: a compare-and-set that fails is
+not modelled separately, and the proposal commits in the step that proposes it.
+
+While the compare-and-set is in flight the primary's own configuration still lists the
+candidate as not eligible, and two rules are needed:
+- **Do not drop the candidate.** Without the guard on RemoveFromSyncSet, n0 drops the
+  candidate n1 whose promotion has committed and commits with n2's acknowledgement
+  only; the eligible n1 lacks the write (`SyncReplication.proposeEligible_unsafe`,
+  `Counterexamples/TwoStepPromotion.lean`, 13 steps, min-sync = 1).
+- **Require a primary lease from the candidate before serving primary reads.** If the
+  read rule checks the lease only over the replicas the primary lists as eligible, n1
+  learns its promotion, waits out its takeover wait, takes over and commits a write,
+  and n0 still passes the read rule with a log that misses it
+  (`SyncReplication.proposeEligible_stale`, 11 steps, min-sync = 0, margin = 2 × drift,
+  in the model itself).
+
+With both rules all the theorems hold (safety, ackSafety, noStaleRead, lease_safety,
+linearizable, heldRead_committed), by a simulation of the model with atomic promotion.
+One behaviour has no atomic counterpart and is safe: a candidate that restarts with a
+new incarnation while its promotion is in flight leaves the sync replica set, and its
+primary, which does not yet list it as eligible, may resync it in full; the candidate is
+then not authoritative.
+**Proposed doc change:** step 4 should say that once the primary has proposed the
+compare-and-set it keeps counting the candidate, for commits and for its primary
+lease, until it learns the outcome; if the compare-and-set committed, the candidate
+leaves only through demotion; if it failed because the primary lost primaryship, the
+primary steps down.
 
 ## Survival condition (an assumption, not a defect)
 
@@ -341,7 +375,7 @@ detected"). The proofs therefore assume that at every restart without data,
 some other authoritative node keeps its data. This entry records that the
 guarantee depends on it.
 
-**Counterexample** (Lean `SyncReplication.noSurvivor_loses`, 12 steps; TLC
+**Counterexample** (Lean `SyncReplication.noSurvivor_loses`, 13 steps; TLC
 `CoreRestart_noSurvivorMin0`, `CoreRestart_noSurvivorMin1`): a write commits
 on n0 and n1, n1 restarts empty, then n0 restarts empty. No node holds the
 write, and no node is authoritative. Because no node is authoritative,
@@ -502,7 +536,7 @@ The takeover half of the doc's restart rule ("A node that restarts waits one
 full lease duration before it attempts a takeover") is needed: a restarted
 node that skips the wait, treating its primary as long silent, takes over at
 once while the old primary still holds its lease from it, and the old primary
-serves a stale read (`restartForgetsTimer_stale`, 14 steps). The model
+serves a stale read (`restartForgetsTimer_stale`, 15 steps). The model
 implements the wait by restarting the takeover timer at the restart.
 Persisting the timer across the restart also kept every theorem in a scratch
 build (not in the repository), but the model has one clock that keeps running
@@ -618,6 +652,36 @@ The review showed that is only half supported:
   ReadDur=2.
 - Capping timestamp ages in the model (`VIEW`) is sound (2 reviewers
   checked it).
+
+## Held replica reads need the replication-ID check
+
+The design holds a read of a dirty key on a sync replica until the replica's committed
+offset passes the write (section 2, "Write path"). Released on the offset alone, such a
+read can return a write that was lost: Lean `heldReadNoFence_unsafe` and
+`heldReadNoFence_returnsLost` (`Counterexamples/HeldReplicaRead.lean`, two nodes,
+`min-sync-replicas = 0`, 31 steps). A read is held on n1 with an uncommitted write; the
+primary restarts from a file without it, writes at the same offset and commits; n1 is
+fully resynced and learns the offset is committed, and the held read is released with
+the lost write. The client history is not linearizable. The same happens at
+`min-sync-replicas = 1` (`heldReadNoFence_unsafe_minSync1`, 40 steps): n1 is resynced to
+the primary's empty log and counted again before the second write, which then commits
+with n1's acknowledgement.
+
+The rule: a replica releases a held read only while it still has the replication ID it
+had when the read ran, and answers `UNCOMMITTED` otherwise. This changes the wording of
+the doc's section 1, which releases a reply as OK "only while the node is still primary
+with that same replication ID". Read literally, that never releases a replica's held
+read; for a replica the rule keeps the same-ID condition and drops "still primary".
+
+The rule is enough in the model: with held replica reads in the client layer, released
+under the ID check, a released read returns a prefix of the committed history
+(`heldRead_committed`) and every client history is still linearizable (`linearizable`),
+with `margin ≥ 2 · drift`. The model uses the whole-keyspace form of dirty key tracking:
+it holds every read on a replica that has uncommitted entries, until the committed offset
+reaches the replica's log end when the read ran, which is the design's rule for
+keyspace-wide reads (section 1). The rule costs availability: a replica that reconnects
+to a new primary with PSYNC after a failover keeps its data but takes the new ID with
+the next streamed entry, so a held read not released by then is answered `UNCOMMITTED`.
 
 ## The acknowledgement record is per connection (a rule the doc should state)
 
