@@ -6,11 +6,13 @@ on:
       - '**/*.md'
       - '**/00-RELEASENOTES'
       - '**/COPYING'
+      - 'design-docs/sync-replication-spec/**'
   pull_request:
     paths-ignore:
       - '**/*.md'
       - '**/00-RELEASENOTES'
       - '**/COPYING'
+      - 'design-docs/sync-replication-spec/**'
 
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
